@@ -136,6 +136,11 @@ const Binder = struct {
                         try self.appendExport(specifier.exported_name, specifier.local_name, node_id);
                     }
                 }
+
+                // Any export record — default or named — counts toward module exports.
+                if (export_decl.default_name != null) {
+                    _ = try self.appendExport("default", export_decl.default_name.?, node_id);
+                }
             },
             .FunctionDeclaration => |function_decl| {
                 const symbol_id = try self.declare(scope, function_decl.name, .function, node_id, node.span);
@@ -194,6 +199,12 @@ const Binder = struct {
                 if (for_stmt.condition) |condition| try self.bindNode(condition, scope);
                 if (for_stmt.update) |update| try self.bindNode(update, scope);
                 try self.bindNode(for_stmt.body, scope);
+            },
+            .ObjectExpression => |obj_expr| {
+                for (obj_expr.properties) |prop| try self.bindNode(prop.value, scope);
+            },
+            .ArrayExpression => |arr| {
+                for (arr.elements) |elem| try self.bindNode(elem, scope);
             },
             else => {},
         }

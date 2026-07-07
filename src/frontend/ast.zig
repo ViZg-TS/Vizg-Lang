@@ -124,6 +124,20 @@ pub const ForStatement = struct {
     body: NodeId,
 };
 
+pub const ObjectProperty = struct {
+    key: []const u8,
+    key_span: tokens.Span,
+    value: NodeId,
+};
+
+pub const ObjectExpression = struct {
+    properties: []const ObjectProperty,
+};
+
+pub const ArrayExpression = struct {
+    elements: []const NodeId,
+};
+
 pub const NodeData = union(enum) {
     Program: Program,
     BlockStatement: BlockStatement,
@@ -144,6 +158,8 @@ pub const NodeData = union(enum) {
     ForStatement: ForStatement,
     ImportDeclaration: ImportDeclaration,
     ExportDeclaration: ExportDeclaration,
+    ObjectExpression: ObjectExpression,
+    ArrayExpression: ArrayExpression,
 };
 
 pub const Node = struct {

@@ -156,6 +156,21 @@ const Parser = struct {
 
         if (self.at(.Keyword_default)) {
             _ = self.advance();
+
+            // export default function <name>() {} — parse as a named
+            // FunctionDeclaration and tag the wrapper with default_name.
+            if (self.at(.Keyword_function)) {
+                const function_id = try self.parseFunctionDeclaration(true);
+                const func_node = self.nodes.items[@intCast(function_id)];
+                return self.addNode(.{
+                    .span = joinSpans(start, func_node.span),
+                    .data = .{ .ExportDeclaration = .{
+                        .declaration = function_id,
+                        .default_name = func_node.data.FunctionDeclaration.name,
+                    } },
+                });
+            }
+
             const name = if (self.at(.Identifier)) self.advance().lexeme else "";
             _ = self.eat(.Semicolon);
             return self.addNode(.{
@@ -439,6 +454,72 @@ const Parser = struct {
         return left;
     }
 
+    fn parseObjectExpression(self: *Parser) anyerror!NodeId {
+        const start = self.expect(.LBrace, "expected {").span;
+        var properties: std.ArrayList(ast_mod.ObjectProperty) = .empty;
+        errdefer properties.deinit(self.allocator);
+        while (!self.at(.RBrace) and !self.at(.EOF)) {
+            const key_tok = self.advance();
+            const key_tok_kind = key_tok.kind;
+
+            // Accept Identifier, PrivateIdentifier, StringLiteral; also NumberLiteral for "0: ..." keys.
+            if (key_tok_kind != .Identifier and key_tok_kind != .PrivateIdentifier and
+                key_tok_kind != .StringLiteral and key_tok_kind != .NumberLiteral)
+            {
+                self.reportAt(key_tok, "expected property key", .expected_token);
+                break;
+            }
+
+            const key = switch (key_tok_kind) {
+                .Identifier, .PrivateIdentifier => key_tok.lexeme,
+                .StringLiteral => blk: {
+                    // Strip surrounding quotes. StringLiteral lexeme includes the quote chars.
+                    const s = key_tok.lexeme;
+                    break :blk s[1 .. s.len - 1];
+                },
+                .NumberLiteral => blk: {
+                    // Numeric literal key — use its textual form as the property name.
+                    break :blk key_tok.lexeme;
+                },
+                else => unreachable,
+            };
+
+            _ = self.expect(.Colon, "expected :");
+            const value = try self.parseExpression();
+            try properties.append(self.allocator, .{
+                .key = key,
+                .key_span = key_tok.span,
+                .value = value,
+            });
+            if (!self.eat(.Comma)) break;
+        }
+        _ = self.expect(.RBrace, "expected }");
+        return self.addNode(.{
+            .span = joinSpans(start, self.previousOrCurrent().span),
+            .data = @unionInit(ast_mod.NodeData, "ObjectExpression", .{ .properties = try properties.toOwnedSlice(self.allocator) }),
+        });
+    }
+
+    fn parseArrayExpression(self: *Parser) anyerror!NodeId {
+        // The LBracket was already consumed by parsePrimary before dispatching here.
+        const start = self.previous().?.span;
+        var elements: std.ArrayList(NodeId) = .empty;
+        errdefer elements.deinit(self.allocator);
+
+        while (!self.at(.RBracket) and !self.at(.EOF)) {
+            if (self.eat(.Comma)) continue;   // trailing comma — allow it
+            const elem = try self.parseExpression();
+            try elements.append(self.allocator, elem);
+            _ = self.eat(.Comma);             // trailing comma allowed by spec
+        }
+
+        _ = self.expect(.RBracket, "expected ]");
+        return self.addNode(.{
+            .span = joinSpans(start, self.previousOrCurrent().span),
+            .data = @unionInit(ast_mod.NodeData, "ArrayExpression", .{ .elements = try elements.toOwnedSlice(self.allocator) }),
+        });
+    }
+
     fn parsePrimary(self: *Parser) anyerror!NodeId {
         var node: NodeId = undefined;
         const token = self.advance();
@@ -454,6 +535,12 @@ const Parser = struct {
             .LParen => {
                 node = try self.parseExpression();
                 _ = self.expect(.RParen, "expected )");
+            },
+            .LBrace => {
+                node = try self.parseObjectExpression();
+            },
+            .LBracket => {
+                node = try self.parseArrayExpression();
             },
             else => {
                 self.reportAt(token, "expected expression", .expected_token);

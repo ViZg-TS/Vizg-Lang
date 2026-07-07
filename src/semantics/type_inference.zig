@@ -144,6 +144,12 @@ pub fn inferLiteralNodeTypes(
             },
             .ImportDeclaration => {},
             .ExportDeclaration => {},
+            .ObjectExpression => |obj_expr| {
+                for (obj_expr.properties) |prop| _ = try stack.append(allocator, prop.value);
+            },
+            .ArrayExpression => |arr| {
+                for (arr.elements) |elem| _ = try stack.append(allocator, elem);
+            },
         }
     }
 

@@ -1018,3 +1018,354 @@ test "frontend suite: simple type annotation fixture" {
     try std.testing.expect(ret_ann != null);
     try std.testing.expectEqualStrings("boolean", ret_ann.?.name);
 }
+test "frontend suite: export default function creates named symbol and declaration wrapper" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Source parses a single 'export default function <name>() {}' statement.
+    const source = "export default function createColorArt() {
+  return [];
+}";
+
+    const parsed = try parseOk(allocator, source);
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    // The parser should produce exactly one statement (the ExportDeclaration).
+    const root = parsed.ast.node(parsed.ast.root).data.Program;
+    try std.testing.expect(root.statements.len == 1);
+
+    const stmt_id = root.statements[0];
+    try expectNodeTag(parsed.ast, stmt_id, .ExportDeclaration);
+
+    // The wrapper holds a nested FunctionDeclaration as its declaration.
+    const decl_node = parsed.ast.node(stmt_id);
+    const export_decl = decl_node.data.ExportDeclaration;
+    try std.testing.expect(export_decl.declaration != ast_mod.invalid_node);
+    try expectNodeTag(parsed.ast, export_decl.declaration, .FunctionDeclaration);
+
+    // default_name should be the function's identifier.
+    try std.testing.expectEqualStrings("createColorArt", export_decl.default_name.?);
+
+    const func = parsed.ast.node(export_decl.declaration).data.FunctionDeclaration;
+    try std.testing.expectEqualStrings("createColorArt", func.name);
+
+    // Binder must register a 'createColorArt' symbol AND record an export.
+    const scanner = @import("scanner.zig");
+    const bound = try binder.bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
+
+    for (bound.symbols) |symbol| {
+        if (std.mem.eql(u8, symbol.name, "createColorArt")) return; // pass
+    }
+    try std.testing.fail("expected a 'createColorArt' symbol");
+
+    var saw_default = false;
+    for (bound.module.exports) |exp| {
+        if (std.mem.eql(u8, exp.name, "default") and std.mem.eql(u8, exp.local_name, "createColorArt")) {
+            saw_default = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_default);
+}
+
+test "frontend suite: export default preserves bare identifier path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Regression test — 'export default foo;' still produces default_name=foo, not the function branch.
+    const source = "var x = 1; export default x;";
+
+    const parsed = try parseOk(allocator, source);
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    // The second statement is the default-name-only export with no declaration.
+    const root = parsed.ast.node(parsed.ast.root).data.Program;
+    try std.testing.expect(root.statements.len == 2);
+
+    const stmt_id = root.statements[1];
+    try expectNodeTag(parsed.ast, stmt_id, .ExportDeclaration);
+    const decl_node = parsed.ast.node(stmt_id);
+    const export_decl = decl_node.data.ExportDeclaration;
+    try std.testing.expectEqualStrings("x", export_decl.default_name.?);
+    try std.testing.expect(export_decl.declaration == ast_mod.invalid_node);
+
+    const scanner = @import("scanner.zig");
+    const bound = try binder.bind(allocator, parsed.ast);
+    for (bound.module.exports) |exp| {
+        if (std.mem.eql(u8, exp.name, "default")) return; // pass
+    }
+    try std.testing.fail("expected a 'default' export record");
+}
+
+test "frontend suite: existing named export is unchanged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // 'export function f() {}' still produces the existing shape.
+    const source = "export function main(name: string) {
+  return name;
+}";
+
+    const parsed = try parseOk(allocator, source);
+    const scanner = @import("scanner.zig");
+    const bound = try binder.bind(allocator, parsed.ast);
+
+    for (bound.symbols) |symbol| {
+        if (std.mem.eql(u8, symbol.name, "main")) return; // pass
+    }
+    try std.testing.fail("expected a 'main' symbol from named export");
+
+    var saw_main = false;
+    for (bound.module.exports) |exp| {
+        if (std.mem.eql(u8, exp.name, "main") and std.mem.eql(u8, exp.local_name, "main")) {
+            saw_main = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_main);
+
+    // default must NOT be recorded for a named export.
+    var saw_default = false;
+    for (bound.module.exports) |exp| {
+        if (std.mem.eql(u8, exp.name, "default")) {
+            saw_default = true;
+            break;
+        }
+    }
+    try std.testing.expect(!saw_default);
+}
+
+test "frontend suite: parser accepts object literal expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const colors = { red: "#f00", green: "x2e8b1" };
+    );
+
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    try std.testing.expectEqual(@as(usize, 1), program.statements.len);
+
+    const var_decl_id = program.statements[0];
+    try expectNodeTag(parsed.ast, var_decl_id, .VariableDeclaration);
+
+    const var_decl = parsed.ast.node(var_decl_id).data.VariableDeclaration;
+    try std.testing.expectEqual(@as(usize, 1), var_decl.declarations.len);
+
+    const declarator = parsed.ast.node(var_decl.declarations[0]).data.VariableDeclarator;
+    try std.testing.expectEqualStrings("colors", declarator.name);
+    try std.testing.expect(declarator.init != ast_mod.invalid_node);
+    try expectNodeTag(parsed.ast, declarator.init.?, .ObjectExpression);
+
+    const obj = parsed.ast.node(declarator.init.?).data.ObjectExpression;
+    try std.testing.expectEqual(@as(usize, 2), obj.properties.len);
+
+    // First property: key=red (raw lexeme from Identifier token)
+    try std.testing.expectEqualStrings("red", obj.properties[0].key);
+    // Second property: string-literal value includes surrounding quotes in the lexeme.
+    try std.testing.expect(obj.properties[1].value != ast_mod.invalid_node);
+}
+
+test "frontend suite: parser accepts trailing comma in object literals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const obj = { a: 1, b: 2, };
+    );
+
+    const var_decl = parsed.ast.node(parsed.ast.root).data.Program.statements[0];
+    const decl = parsed.ast.node(var_decl).data.VariableDeclaration;
+    const init_id = parsed.ast.node(decl.declarations[0]).data.VariableDeclarator.init.?;
+    try expectNodeTag(parsed.ast, init_id, .ObjectExpression);
+    const obj = parsed.ast.node(init_id).data.ObjectExpression;
+    try std.testing.expectEqual(@as(usize, 2), obj.properties.len);
+}
+
+test "frontend suite: parser accepts string-literal and numeric literal keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const m = { "k": 1, 0: 2 };
+    );
+
+    const var_decl_id = parsed.ast.root;
+    const program = parsed.ast.node(var_decl_id).data.Program;
+    const init_id = parsed.ast.node(program.statements[0]).data.VariableDeclaration.declarations[0];
+    try expectNodeTag(parsed.ast, init_id, .VariableDeclarator);
+    const obj = parsed.ast.node(parsed.ast.node(init_id).data.VariableDeclarator.init.?).data.ObjectExpression;
+    try std.testing.expectEqual(@as(usize, 2), obj.properties.len);
+    // Key from a string-literal arrives with surrounding quotes stripped by the parser.
+    try std.testing.expectEqualStrings("k", obj.properties[0].key);
+    // Numeric key preserves its textual form.
+    try std.testing.expectEqualStrings("0", obj.properties[1].key);
+}
+
+test "frontend suite: binder does not bind object literal property keys as symbols" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const colors = { red: "#f00", green: "#2e8" };
+    );
+
+    const bound = try binder.bind(allocator, parsed.ast);
+
+    // The only declared symbol should be "colors".
+    var saw_colors = false;
+    for (bound.symbols) |sym| {
+        if (std.mem.eql(u8, sym.name, "colors")) {
+            saw_colors = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_colors);
+
+    // Property keys red and green must NOT appear as bound symbols.
+    const red_sym = symbolByName(bound, "red");
+    try std.testing.expect(red_sym == null);
+    const green_sym = symbolByName(bound, "green");
+    try std.testing.expect(green_sym == null);
+
+    // And no diagnostics (e.g. cannot_find_name) should fire for the keys.
+    for (parsed.diagnostics) |diag| {
+        if (diag.code == .cannot_find_name or diag.code == .expected_token) {
+            try std.testing.fail("unexpected diagnostic: " ++ @tagName(diag.code));
+        }
+    }
+}
+
+test "frontend suite: parser accepts array literal expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const art = [1, 2, "x"];
+    );
+
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    try std.testing.expectEqual(@as(usize, 1), program.statements.len);
+
+    const var_decl_id = program.statements[0];
+    try expectNodeTag(parsed.ast, var_decl_id, .VariableDeclaration);
+
+    const var_decl = parsed.ast.node(var_decl_id).data.VariableDeclaration;
+    try std.testing.expectEqual(@as(usize, 1), var_decl.declarations.len);
+
+    const declarator = parsed.ast.node(var_decl.declarations[0]).data.VariableDeclarator;
+    try std.testing.expectEqualStrings("art", declarator.name);
+    try expectNodeTag(parsed.ast, declarator.init.?, .ArrayExpression);
+
+    const arr = parsed.ast.node(declarator.init.?).data.ArrayExpression;
+    try std.testing.expectEqual(@as(usize, 3), arr.elements.len);
+
+    // Each element is an expression node with a known tag (Identifier or Literal).
+    for (arr.elements) |elem_id| {
+        const elem = parsed.ast.node(elem_id);
+        switch (std.meta.activeTag(elem.data)) {
+            .Identifier, .Literal => {},
+            else => try std.testing.expect(false),
+        }
+    }
+}
+
+test "frontend suite: parser accepts empty array literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const empty = [];
+    );
+
+    const declarator = parsed.ast.node(parsed.ast.root).data.Program.statements[0];
+    const decl = parsed.ast.node(declarator).data.VariableDeclaration;
+    const init_id = parsed.ast.node(decl.declarations[0]).data.VariableDeclarator.init.?;
+    try expectNodeTag(parsed.ast, init_id, .ArrayExpression);
+    const arr = parsed.ast.node(init_id).data.ArrayExpression;
+    try std.testing.expectEqual(@as(usize, 0), arr.elements.len);
+}
+
+test "frontend suite: parser accepts trailing comma in array literals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const items = [1, 2,];
+    );
+
+    const declarator = parsed.ast.node(parsed.ast.root).data.Program.statements[0];
+    const decl = parsed.ast.node(declarator).data.VariableDeclaration;
+    const init_id = parsed.ast.node(decl.declarations[0]).data.VariableDeclarator.init.?;
+    try expectNodeTag(parsed.ast, init_id, .ArrayExpression);
+    const arr = parsed.ast.node(init_id).data.ArrayExpression;
+    try std.testing.expectEqual(@as(usize, 2), arr.elements.len);
+}
+
+test "frontend suite: resolver visits array literal elements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const arr = [1, 2, "x"];
+        \const items: []const f64 = arr;
+    );
+
+    const bound = try binder.bind(allocator, parsed.ast);
+    // Nothing in the array itself should be declared as a symbol.
+    for (bound.symbols) |sym| {
+        if (std.mem.eql(u8, sym.name, "arr")) continue;
+        if (std.mem.eql(u8, sym.name, "1") or std.mem.eql(u8, sym.name, "2"))
+            try std.testing.fail("unexpected symbol from array literal");
+    }
+
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+    // Only the declared names should be referenced: `arr` and `items`.
+    for (resolved.references) |ref| {
+        if (std.mem.eql(u8, ref.name, "1") or std.mem.eql(u8, ref.name, "2"))
+            try std.testing.fail("resolver produced a reference from an array literal element");
+    }
+
+    // No diagnostics — array literals should not trigger any errors in this snippet.
+    for (parsed.diagnostics) |diag| {
+        if (diag.code == .cannot_find_name or diag.code == .expected_token)
+            try std.testing.fail("unexpected diagnostic: " ++ @tagName(diag.code));
+    }
+}
+
+test "frontend suite: array literals work with mixed element expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const items = [1 + 2, "x", true];
+    );
+
+    const declarator = parsed.ast.node(parsed.ast.root).data.Program.statements[0];
+    const decl = parsed.ast.node(declarator).data.VariableDeclaration;
+    const init_id = parsed.ast.node(decl.declarations[0]).data.VariableDeclarator.init.?;
+    try expectNodeTag(parsed.ast, init_id, .ArrayExpression);
+    const arr = parsed.ast.node(init_id).data.ArrayExpression;
+    try std.testing.expectEqual(@as(usize, 3), arr.elements.len);
+
+    // The first element is a BinaryExpression from `1 + 2`.
+    try expectNodeTag(parsed.ast, arr.elements[0], .BinaryExpression);
+}
+
+fn symbolByName(bind: binder.BindResult, name: []const u8) ?binder.Symbol {
+    for (bind.symbols) |sym| if (std.mem.eql(u8, sym.name, name)) return sym;
+    return null;
+}

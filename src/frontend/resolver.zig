@@ -126,6 +126,12 @@ const Resolver = struct {
                 if (for_stmt.update) |update| try self.resolveNode(update, scope);
                 try self.resolveNode(for_stmt.body, scope);
             },
+            .ObjectExpression => |obj_expr| {
+                for (obj_expr.properties) |prop| try self.resolveNode(prop.value, scope);
+            },
+            .ArrayExpression => |arr| {
+                for (arr.elements) |elem| try self.resolveNode(elem, scope);
+            },
         }
     }
 

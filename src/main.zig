@@ -336,6 +336,28 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
             if (decl.declaration != ast_mod.invalid_node) try printAstNode(writer, tree, decl.declaration, depth + 1);
         },
+        .ObjectExpression => |obj_expr| {
+            try writer.print("ObjectExpression #{} props=[", .{node_id});
+            for (obj_expr.properties, 0..) |prop, i| {
+                if (i > 0) try writer.print(", ", .{});
+                try writer.print("{s}", .{prop.key});
+            }
+            try writer.print("] {}..{}\n", .{ node.span.start, node.span.end });
+            for (obj_expr.properties) |prop| {
+                try printAstNode(writer, tree, prop.value, depth + 1);
+            }
+        },
+        .ArrayExpression => |arr_expr| {
+            try writer.print("ArrayExpression #{} elements=[", .{node_id});
+            for (arr_expr.elements, 0..) |elem, i| {
+                if (i > 0) try writer.print(", ", .{});
+                try writer.print("#{}", .{elem});
+            }
+            try writer.print("] {}..{}\n", .{ node.span.start, node.span.end });
+            for (arr_expr.elements) |elem| {
+                try printAstNode(writer, tree, elem, depth + 1);
+            }
+        },
     }
 }
 
@@ -944,6 +966,8 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .ForStatement => return "ForStatement",
         .ImportDeclaration => return "ImportDeclaration",
         .ExportDeclaration => return "ExportDeclaration",
+        .ObjectExpression => return "ObjectExpression",
+        .ArrayExpression => return "ArrayExpression",
     }
 }
 
