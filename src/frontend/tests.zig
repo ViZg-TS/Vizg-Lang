@@ -656,6 +656,42 @@ test "frontend suite: resolver records calls assignments members imports and exp
     try std.testing.expectEqual(@as(usize, 0), countReferences(resolved, "exportedName", null));
 }
 
+test "frontend suite: resolver allows console as ambient global without VZG4001" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `console` is a predeclared ambient global; should not emit VZG4001
+    // for the bare read of `console`, and member `.log` skips resolution entirely.
+    const parsed = try parseOk(allocator,
+        \\console.log("hi");
+    );
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+}
+
+
+test "frontend suite: truly missing name still emits VZG4001 and ambient does not swallow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `missingName` is not in scope and is not an ambient; should still report VZG4001.
+    const parsed = try parseOk(allocator,
+        \\function f() {
+        \\    return missingName;
+        \\}
+    );
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+
+    try std.testing.expectEqual(@as(usize, 1), resolved.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.cannot_find_name, resolved.diagnostics[0].code);
+}
+
+
 test "frontend suite: frontend analyze includes resolver diagnostics" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
