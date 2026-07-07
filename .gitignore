@@ -1,0 +1,6 @@
+.codegraph
+.zig-cache
+zig-out
+AGENTS.md
+.codex
+.agents
