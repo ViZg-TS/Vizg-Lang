@@ -80,7 +80,6 @@ test "linked import model compiles" {
     });
 
     const imports: []const LinkedImport = try imports_list.toOwnedSlice(allocator);
-    _ = imports; // model is constructable — that is the point of this test
 
     var linker = Linker{
         .arena = arena,
@@ -89,6 +88,8 @@ test "linked import model compiles" {
     defer linker.deinit();
 
     try std.testing.expect(linker.imports.len == 1);
+    try std.testing.expect(std.mem.eql(u8, linker.imports[0].local_name, "localX"));
+    try std.testing.expect(std.mem.eql(u8, linker.imports[0].imported_name, "x"));
 }
 
 const ImportEdgeStub = struct { id: graph.ImportEdgeId };
