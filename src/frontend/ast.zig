@@ -1,4 +1,4 @@
-const tokens = @import("tokens.zig");
+pub const tokens = @import("tokens.zig");
 
 pub const NodeId = u32;
 pub const invalid_node: NodeId = std.math.maxInt(NodeId);

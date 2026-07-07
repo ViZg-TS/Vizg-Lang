@@ -20,6 +20,7 @@ pub const DiagnosticCode = enum {
     module_not_found,
     missing_export,
     circular_import,
+    unknown_type_name,
     internal_error,
 };
 
@@ -85,6 +86,7 @@ pub fn diagnosticCodeId(code: DiagnosticCode) []const u8 {
         .module_not_found => "VZG5001",
         .missing_export => "VZG5002",
         .circular_import => "VZG5003",
+        .unknown_type_name => "VZG6004",
         .internal_error => "VZG9001",
     };
 }
@@ -103,6 +105,7 @@ pub fn diagnosticCodeName(code: DiagnosticCode) []const u8 {
         .module_not_found => "module_not_found",
         .missing_export => "missing_export",
         .circular_import => "circular_import",
+        .unknown_type_name => "unknown_type_name",
         .internal_error => "internal_error",
     };
 }

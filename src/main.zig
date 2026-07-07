@@ -10,6 +10,8 @@ const diagnostics = vizg.diagnostics;
 const modules = vizg.modules;
 const resolver = vizg.resolver;
 const tokens = vizg.tokens;
+const semantics = vizg.semantics;
+const types_pkg = vizg.types;
 const Registry = modules.Registry;
 
 const max_source_bytes = 64 * 1024 * 1024;
@@ -23,6 +25,7 @@ const Command = enum {
     refs,
     cfg,
     modules,
+    types,
     help,
 };
 
@@ -131,6 +134,14 @@ pub fn main(init: std.process.Init) !void {
         .symbols => try printSymbols(stdout, result.bind, result.diagnostics),
         .references, .refs => try printReferences(stdout, result.source.path, result.bind, result.resolve, result.diagnostics),
         .cfg => try printCfg(stdout, result.ast, result.cfgs),
+        .types => {
+            const info = semantics.analyze(arena, text) catch |err| {
+                try stderr.print("{s}: types error: {s}\n", .{path, @errorName(err)});
+                return;
+            };
+            const bind_sym = result.bind.symbols;
+            try printTypes(stdout, path, info, bind_sym);
+        },
         .modules => unreachable, // handled earlier with early return
         .help => unreachable,
     }
@@ -145,6 +156,7 @@ fn parseCommand(text: []const u8) ?Command {
     if (std.mem.eql(u8, text, "refs")) return .refs;
     if (std.mem.eql(u8, text, "cfg")) return .cfg;
     if (std.mem.eql(u8, text, "modules")) return .modules;
+    if (std.mem.eql(u8, text, "types")) return .types;
     if (std.mem.eql(u8, text, "help")) return .help;
     if (std.mem.eql(u8, text, "--help")) return .help;
     if (std.mem.eql(u8, text, "-h")) return .help;
@@ -164,6 +176,7 @@ fn printHelp(writer: *Io.Writer, exe_name: []const u8) !void {
         \\  refs <file>       alias for references
         \\  cfg <file>      print function control-flow graphs
         \\  modules <file>  build and print the module graph
+        \\  types <file>    print declared and inferred type information
         \\  help            print this help
         \\
     , .{exe_name});
@@ -515,14 +528,26 @@ fn printDiagnostics(writer: *Io.Writer, path: []const u8, diags: []const diagnos
         if (diag_path.len > 0) {
             try writer.print("{s}:", .{diag_path});
         }
-        try writer.print("{}:{} {s} {s} {s}: {s}\n", .{
-            diag.span.line,
-            diag.span.column,
-            severityName(diag.severity),
-            diagnostics.diagnosticCodeId(diag.code),
-            diagnostics.diagnosticCodeName(diag.code),
-            diag.message,
-        });
+        if (diag.label) |l| {
+            try writer.print("{}:{} {s} {s} {s}: {s} \'{s}\'\n", .{
+                diag.span.line,
+                diag.span.column,
+                severityName(diag.severity),
+                diagnostics.diagnosticCodeId(diag.code),
+                diagnostics.diagnosticCodeName(diag.code),
+                diag.message,
+                l,
+            });
+        } else {
+            try writer.print("{}:{} {s} {s} {s}: {s}\n", .{
+                diag.span.line,
+                diag.span.column,
+                severityName(diag.severity),
+                diagnostics.diagnosticCodeId(diag.code),
+                diagnostics.diagnosticCodeName(diag.code),
+                diag.message,
+            });
+        }
     }
 }
 
@@ -820,3 +845,58 @@ test "printModules emits deterministic shape with module ids and status labels" 
     try std.testing.expect(std.mem.indexOf(u8, out, "\nDiagnostics\n") != null);
 }
 
+
+/// Returns the canonical type name for a TypeId drawn from
+/// `types_pkg.builtinKinds_static`. Falls back to "<unknown>".
+fn builtinNameFromId(type_id: types_pkg.TypeId) []const u8 {
+    const kinds = types_pkg.builtinKinds_static;
+    inline for (kinds) |kind| {
+        if (types_pkg.builtinKindTypeId(kind) == type_id) {
+            return switch (kind) {
+                .number => "number",
+                .string => "string",
+                .boolean => "boolean",
+                .null_ => "null",
+                .undefined => "undefined",
+                .void => "void",
+                .unknown => "unknown",
+                .any => "any",
+            };
+        }
+    }
+    return "<unknown>";
+}
+
+fn printTypes(
+    writer: *Io.Writer,
+    path: []const u8,
+    info: semantics.TypeInfo,
+    bind_symbols: []const binder.Symbol,
+) !void {
+    try writer.print("Types\n", .{});
+
+    for (info.symbols, 0..) |sym, i| {
+        const name = symbolNameFromSlice(bind_symbols, sym.symbol_id);
+        const decl_str = if (sym.declared_type) |t| builtinNameFromId(t) else "null";
+        const infer_str = if (sym.inferred_type) |t| builtinNameFromId(t) else "null";
+        const i_u32: u32 = @intCast(i);
+        try writer.print(
+            "  symbol {d} name=\"{s}\" declared={s} inferred={s}\n",
+            .{ i_u32, name, decl_str, infer_str },
+        );
+    }
+
+
+
+    if (info.diagnostics.len > 0) {
+        try writer.writeAll("\nDiagnostics\n");
+        try printDiagnostics(writer, path, info.diagnostics);
+    } else {
+        try writer.writeAll("\nDiagnostics\n  none\n");
+    }
+}
+
+fn symbolNameFromSlice(symbols: []const binder.Symbol, id: binder.SymbolId) []const u8 {
+    for (symbols) |s| if (s.id == id) return s.name;
+    return "<missing>";
+}
