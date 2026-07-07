@@ -28,6 +28,7 @@ fn resolveAnnotation(
     diag_list: *std.ArrayList(diagnostics_mod.Diagnostic),
     name: []const u8,
     span: ast_mod.tokens.Span,
+    source_path: ?[]const u8,
 ) !types.TypeId {
     inline for (builtin_kind.builtinKinds_static) |kind| {
         if (std.mem.eql(u8, name, builtin_kind.builtinKindName(kind))) {
@@ -42,6 +43,7 @@ fn resolveAnnotation(
         .message = "cannot find type name",
         .span = span,
         .label = name,
+        .path = source_path,
     });
 
     return types.builtin_instance.unknown;
@@ -75,7 +77,6 @@ pub fn collectDeclaredTypes(
     builtins: types.Builtins,
 ) !TypeInfoCollectResult {
     _ = builtins; // reserved — kept for API compatibility with the existing plan
-    _ = source;
 
     var diag_list: std.ArrayList(diagnostics_mod.Diagnostic) = .empty;
     errdefer diag_list.deinit(allocator); {
@@ -105,7 +106,7 @@ pub fn collectDeclaredTypes(
                         .VariableDeclarator => |vd| {
                             if (vd.type_annotation == null) continue;
                             const ann = vd.type_annotation.?;
-                            const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span);
+                            const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
                             _ = appendOrOom(&out_list, allocator, .{
                                 .symbol_id = symbol.id,
                                 .declared_type = t
@@ -118,7 +119,7 @@ pub fn collectDeclaredTypes(
             .VariableDeclarator => |vd| {
                 if (vd.type_annotation == null) continue;
                 const ann = vd.type_annotation.?;
-                const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span);
+                const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
                 _ = appendOrOom(&out_list, allocator, .{
                     .symbol_id = symbol.id,
                     .declared_type = t,
@@ -132,7 +133,7 @@ pub fn collectDeclaredTypes(
                         .Parameter => |param| {
                             if (param.type_annotation == null) continue;
                             const ann = param.type_annotation.?;
-                            const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span);
+                            const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
 
                             for (bind.node_symbols) |ns| {
                                 if (ns.node == param_id) {
@@ -155,7 +156,7 @@ pub fn collectDeclaredTypes(
                 // when the name is not a known builtin, which matches how the binder
                 // and resolver already handle this case for missing declarations.
                 if (decl.return_type) |ann| {
-                    const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span);
+                    const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
 
                     for (bind.node_symbols) |ns| {
                         if (ns.node == node_id) {
