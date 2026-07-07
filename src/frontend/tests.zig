@@ -864,3 +864,40 @@ test "frontend suite: facade integrates positive and negative analysis" {
     try std.testing.expect(bad.diagnostics.len > 0);
     try std.testing.expectEqual(TokenType.EOF, bad.tokens[bad.tokens.len - 1].kind);
 }
+
+test "frontend suite: parser preserves import specifier span" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    //           0         1
+    // 01234567890123456789012345678
+    // import { x } from "./a";\n
+    const source = "import { x } from \"./a\";\n";
+
+    const parsed = try parseOk(allocator, source);
+    const root = parsed.ast.node(parsed.ast.root);
+    const program = root.data.Program;
+    try expectNodeTag(parsed.ast, program.statements[0], .ImportDeclaration);
+
+    const node = parsed.ast.node(program.statements[0]);
+    const decl = node.data.ImportDeclaration;
+
+    // Source is unquoted specifier text.
+    try std.testing.expectEqualStrings("./a", decl.source);
+
+    // Source span covers the string literal token, not the full declaration.
+    // String literal "\./a" starts at byte 18 ("./a" with quotes spans bytes 18..23).
+    const specifier_start: usize = 18;
+    const specifier_end: usize = 23;
+    try std.testing.expectEqual(@as(u32, @intCast(specifier_start)), decl.source_span.start);
+    try std.testing.expectEqual(@as(u32, @intCast(specifier_end)), decl.source_span.end);
+
+    // Full import declaration starts at byte 0 ("import" keyword). Span must not equal specifier span.
+    const spans_differ = node.span.start != decl.source_span.start or node.span.end != decl.source_span.end;
+    try std.testing.expect(spans_differ);
+
+    // Source-text slicing using the preserved span must reproduce the lexeme with quotes.
+    const lexeme = source[specifier_start..specifier_end];
+    try std.testing.expectEqualStrings("\"./a\"", lexeme);
+}

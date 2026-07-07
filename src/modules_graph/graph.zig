@@ -102,7 +102,7 @@ const Builder = struct {
                             .to = null,
                             .specifier = import_decl.source,
                             .status = .external,
-                            .span = node.span,
+                            .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                         });
                         continue;
                     }
@@ -114,14 +114,14 @@ const Builder = struct {
                             .to = null,
                             .specifier = import_decl.source,
                             .status = .missing,
-                            .span = node.span,
+                            .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                         });
                         try self.diagnostics_list.append(self.allocator, .{
                             .severity = .@"error",
                             .code = .module_not_found,
                             .phase = .module_graph,
                             .message = try std.fmt.allocPrint(self.allocator, "module not found '{s}'", .{import_decl.source}),
-                            .span = node.span,
+                            .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                             .label = "relative import could not be resolved",
                             .path = module.source_path,
                         });
@@ -138,7 +138,7 @@ const Builder = struct {
                         .to = target_id,
                         .specifier = import_decl.source,
                         .status = .local,
-                        .span = node.span,
+                        .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                     });
 
                     if (self.states.items[@intCast(target_id)] == .visiting) {
@@ -147,7 +147,7 @@ const Builder = struct {
                             .code = .circular_import,
                             .phase = .module_graph,
                             .message = try std.fmt.allocPrint(self.allocator, "circular import through '{s}'", .{import_decl.source}),
-                            .span = node.span,
+                            .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                             .label = "import reaches a module already being analyzed",
                             .path = module.source_path,
                         });
@@ -275,6 +275,29 @@ test "module graph reports missing module" {
     try std.testing.expectEqual(@as(usize, 1), graph.imports.len);
     try std.testing.expectEqual(ImportStatus.missing, graph.imports[0].status);
     try std.testing.expectEqual(diagnostics.DiagnosticCode.module_not_found, graph.diagnostics[0].code);
+}
+
+test "module graph missing-module diagnostic uses specifier span" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    //           0         12345678901
+    // 012345678901234567890123456789012
+    try writeTmpFile(tmp, "main.ts", "import { value } from \"./missing\";\n");
+
+    const entry = try tmpEntryPath(std.testing.allocator, tmp, "main.ts");
+    defer std.testing.allocator.free(entry);
+
+    var graph = try build(std.testing.allocator, std.testing.io, entry, .{});
+    defer graph.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), graph.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.module_not_found, graph.diagnostics[0].code);
+
+    const diag = graph.diagnostics[0];
+    // String literal "\./missing" spans bytes [22, 33) (end exclusive).
+    try std.testing.expect(diag.span.start == 22);
+    try std.testing.expect(diag.span.end   == 33);
 }
 
 test "module graph reports missing export" {

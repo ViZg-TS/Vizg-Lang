@@ -25,6 +25,7 @@ pub const ImportDeclaration = struct {
     names: []const []const u8,
     specifiers: []const ImportSpecifier = &.{},
     source: []const u8,
+    source_span: tokens.Span,
 };
 
 pub const ImportSpecifier = struct {

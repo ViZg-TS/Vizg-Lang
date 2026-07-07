@@ -114,7 +114,14 @@ const Parser = struct {
         }
 
         if (needs_from) _ = self.expectContextualIdentifier("from", "expected from");
-        const source = if (self.at(.StringLiteral)) trimString(self.advance().lexeme) else "";
+
+        const tok: ?Token = if (self.at(.StringLiteral)) blk: {
+            break :blk self.advance();
+        } else null;
+        const source_span: tokens.Span = if (tok) |t| t.span else start;
+        var source_unquoted: []const u8 = "";
+        if (tok) |t| source_unquoted = trimString(t.lexeme);
+
         _ = self.eat(.Semicolon);
 
         return self.addNode(.{
@@ -122,7 +129,8 @@ const Parser = struct {
             .data = .{ .ImportDeclaration = .{
                 .names = try names.toOwnedSlice(self.allocator),
                 .specifiers = try specifiers.toOwnedSlice(self.allocator),
-                .source = source,
+                .source = source_unquoted,
+                .source_span = source_span,
             } },
         });
     }
