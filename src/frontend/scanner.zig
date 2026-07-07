@@ -94,6 +94,10 @@ pub const Scanner = struct {
             return try self.scanNumber(start);
         }
 
+        if (c == '`') {
+            return try self.scanTemplateLiteral(start);
+        }
+
         if (tokens.isQuote(c)) {
             return try self.scanString(start);
         }
@@ -517,6 +521,51 @@ pub const Scanner = struct {
 
         flags.unterminated = true;
         return LexicalError.UnterminatedString;
+    }
+
+    //#endregion
+
+    //#region Template Literals (opaque)
+
+    fn scanTemplateLiteral(self: *Scanner, start: TokenStart) LexicalError!Token {
+        const quote = self.advance().?;
+        var flags = TokenFlags{};
+
+        while (!self.isAtEnd()) {
+            const c = self.peek().?;
+
+            if (c == quote) {
+                _ = self.advance();
+                return self.makeToken(start, .NoSubstitutionTemplate, flags);
+            }
+
+            if (tokens.isLineTerminator(c)) {
+                // Allow CR/LF inside a template when there is no closing backtick.
+                // Unterminated diagnostic belongs to the line/phase policy; here we accept
+                // it so single-line CLI output does not break on multi-line strings in source text.
+                _ = self.advance();
+                continue;
+            }
+
+            if (c == '\\') {
+                flags.has_escape = true;
+                _ = self.advance();
+
+                if (self.isAtEnd()) {
+                    flags.unterminated = true;
+                    return LexicalError.UnterminatedTemplateString;
+                }
+
+                // Consume escaped byte. Escape validation belongs in the next pass.
+                _ = self.advance();
+                continue;
+            }
+
+            _ = self.advance();
+        }
+
+        flags.unterminated = true;
+        return LexicalError.UnterminatedTemplateString;
     }
 
     //#endregion
