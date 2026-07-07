@@ -1,11 +1,10 @@
 # Type Model v1 — Design Document
 
-**Status:** planned, not implemented.
-**Purpose:** scaffolding for a future Type Checker v1. Defines the shape of types and their storage in the existing frontend pipeline and module graph without changing either today.
+**Status:** Implemented at `src/types/` and `src/semantics/`. The type checker pass itself (inference, annotation resolution, semantic checking) is still planned. Defines the shape of types and their storage in the existing frontend pipeline and module graph without changing either today.
 
 ## Summary
 
-This document describes the minimal type model needed to support a future Type Checker v1 on top of `vizg`'s current frontend (scanner → parser → binder → resolver → CFG) and module graph. It does **not** implement the type checker, add any new AST nodes, or change existing phases. All decisions are grounded in the structure already present in `src/frontend/`, `src/modules/graph.zig`, `src/modules/linker.zig`, and `src/diagnostics/root.zig`.
+This document describes the minimal type model needed to support a future Type Checker v1 on top of `vizg`'s current frontend (scanner → parser → binder → resolver → CFG) and module graph. The type model itself is **implemented** in `src/types/`, with semantic mapping of symbols and nodes to types in `src/semantics/`. The actual Type Checker v1 pass (inference, annotation resolution, semantic checking) remains planned.
 
 ## Non-goals
 
@@ -41,7 +40,7 @@ Future additions that are **not** in v1: `symbol`, `bigint`, object types, tuple
 
 ### Node Representation
 
-Types will live in their own arena-owned struct hierarchy under a future `src/frontend/types.zig`. They will not be mixed into the existing AST structs. A type is referenced through an opaque handle:
+The type model is now implemented at `src/types/model.zig` with builtin kinds exported via `src/types/builtin.zig`, and semantic mappings of symbols/nodes to types in `src/semantics/type_info.zig`. Types will not be mixed into the existing AST structs. A type is referenced through an opaque handle:
 
 ```zig
 pub const TypeId = usize; // index into TypeArena
@@ -115,7 +114,8 @@ Closure expressions in source will be typed as an anonymous function signature w
 **Decision:**
 
 - A future `src/frontend/type_arena.zig` owns all types and signatures via a bump allocator pattern: allocate once per analyzed file, drop at end of frontend pass.
-- AST nodes will **not** carry type information in v1. The current architecture keeps the AST pure (parser output only). Types flow through binder → resolver → *type checker pass* as a separate layer that sits above `FrontendResult`.
+- AST nodes will **not** carry type information in v1. The current architecture keeps the AST pure (parser output only). Semantic mappings live in `src/semantics/type_info.zig` (per-symbol and per-node type info).
+- A future Type Checker pass owns inference, annotation resolution, and semantic checks; it consumes types from `src/types/` and writes symbol/node type mappings into `src/semantics/`.
 
 Planned evolution path:
 
@@ -254,7 +254,9 @@ No changes are required to existing code by this document. The following integra
 | Layer | File | Change at v1 time |
 | --- | --- | --- |
 | Frontend AST | `src/frontend/ast.zig` | None in v1; keep type fields off AST nodes. |
-| Frontend pipeline | `src/frontend/frontend.zig` | Optional field addition (`types: ?TypeArena`) — additive, backward compatible with all current CLI commands. |
+| Frontend pipeline | `src/frontend/frontend.zig` | Optional field addition (`types: ?TypeArena`) for when Type Checker v1 is wired in — additive, backward compatible with all current CLI commands. |
+| Module graph (plan) | `src/modules/graph.zig` | Topological order of modules passed to the type checker so cyclic files get fixpoint treatment instead of infinite recursion. |
+
 | Binder | `src/frontend/binder.zig` | Optional `declared_type: ?TypeId` slot on Symbol; defaults to `null`. |
 | Resolver | `src/frontend/resolver.zig` | None in v1 — resolver stays identifier-only. The type checker will read symbol types directly, bypassing the resolver for lookup purposes. |
 | Module graph | `src/modules/graph.zig` | Graph returns a topological order of modules to the type checker so cyclic files get fixpoint treatment instead of infinite recursion. |
@@ -284,7 +286,8 @@ These questions must be answered by whoever implements Type Checker v1; none blo
 
 ## Final Result
 
-- One new document created: `docs/type-model-v1.md` (this file).
-- No code changes, no test changes, no CLI changes.
-- All six design questions answered with a rationale tied to the existing frontend and module graph.
+- Design document created: `docs/type-model-v1.md` (this file).
+- Type model **implemented** at `src/types/`: pure data model with builtins, TypeId, FunctionSignature.
+- Semantic mapping **implemented** at `src/semantics/`: SymbolTypeInfo, NodeTypeInfo, TypeInfo map frontend symbols/nodes to types.
+- The actual Type Checker v1 pass (inference, annotation resolution, semantic checking) is still planned.
 - VZG6xxx diagnostic range reserved; three initial codes proposed but not yet registered in `src/diagnostics/root.zig`.

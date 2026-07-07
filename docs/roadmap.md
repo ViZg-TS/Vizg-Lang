@@ -46,7 +46,9 @@ Planned, not implemented:
 
 Planned, not implemented:
 
-- Represent types and symbols together.
+Types and semantics are already implemented at `src/types/` (pure type model) and `src/semantics/` (per-symbol / per-node mappings). The next work is the Type Checker pass itself:
+- Infer types via a forward/infer step.
+- Resolve type annotations beyond syntax capture.
 - Validate variable initializers, assignments, returns, and calls.
 - Resolve member accesses semantically.
 - Check exported API surfaces.

@@ -145,6 +145,16 @@ Current basic block kinds are `entry`, `exit`, `normal`, `condition`, and `unrea
 
 `frontend.analyze` remains single-file. Imports and exports are recorded as module metadata and forwarded to the linker layer below for cross-file resolution.
 
+## Note on Type Model Location
+
+The type model and semantic mapping do **not** live inside `src/frontend/`. They are separate layers:
+
+- Type model (primitives, function signatures): `src/types/root.zig`.
+- Semantic mappings (per-symbol, per-node types): `src/semantics/type_info.zig`.
+
+The frontend pipeline (`frontend.analyze`) produces syntax-level output only. Any type annotation syntax the parser captures remains AST structure; it does not trigger semantic analysis within this layer. Semantic typing is a future pass that sits above the module graph and consumes both types from `src/types/` and symbol/node mappings from `src/semantics/`.
+
+
 ## Module Graph And Linker (Cross-File Resolution)
 
 The multi-file flow lives in `src/modules/`:

@@ -67,6 +67,46 @@ The linker lives strictly inside the module layer. It owns no filesystem work an
 
 
 
+## Types And Semantics Layers
+
+Two dedicated layers above the frontend own type model and semantic mapping. They do not sit inside `src/frontend/`.
+
+```txt
+frontend/
+  lexical/syntax single-file structural analysis
+  owns AST syntax for type annotations (e.g. parameter types, interface shapes)
+  does not own semantic type model
+
+types/
+  pure type model
+  builtin primitive types
+  function signature model
+  no dependency on frontend
+
+semantics/
+  maps frontend symbols/nodes to types
+  future location for type annotation resolver, type collector, inference, and checker
+```
+
+- `src/types/builtin.zig`: builtin kind enum, name-to-id mappings.
+- `src/types/model.zig`: TypeId, TypeKind, FunctionSignature, Builtins.
+- `src/types/root.zig`: public re-export with precomputed builtins instance.
+
+**Important**: the type model types (`TypeId`, `Type`, `Builtins`) live in `src/types/`. They are not frontend-owned semantic types and should not be documented as such. Type annotation syntax can still be represented in `frontend/ast.zig` because it is syntax — but the semantic interpretation belongs to `types/` or `semantics/`.
+
+### `src/semantics/root.zig` (Semantic Mapping)
+
+The semantics layer maps frontend symbols and AST nodes to their associated types:
+
+- **SymbolTypeInfo**: declared and inferred type for a single symbol. Prefers declared over inferred when both are known.
+- **NodeTypeInfo**: type information attached to an AST node.
+- **TypeInfo**: container that aggregates per-symbol and per-node type info across one analyzed file.
+
+This layer imports from `src/types/` (the pure model) and from the frontend (`ast.zig`, `binder.zig`) for symbol/node identity. The direction is intentional: semantics consumes types, not the other way around.
+
+These are NOT a working type checker yet. The actual inference, annotation resolution, and semantic checking passes still belong to a future milestone; this layer provides the data structures to hold per-symbol / per-node mappings once that work lands.
+
+
 The frontend is split into small modules:
 
 - `tokens.zig`: token kinds, spans, token flags, and lexical error types.
@@ -82,14 +122,6 @@ The single-file pipeline does not require file system access except for CLI inpu
 Shared diagnostics live outside the frontend:
 
 - `src/diagnostics/root.zig`: severity, phase, stable diagnostic codes, messages, spans, and optional paths.
-
-The module graph layer is separate from the frontend:
-
-- `src/modules/root.zig`: public module layer API.
-- `src/modules/graph.zig`: graph structure, recursive traversal, import edges, export validation, and module diagnostics.
-- `src/modules/loader.zig`: source loading and single-file frontend analysis.
-- `src/modules/resolver.zig`: relative import resolution and path canonicalization.
-
 ## CLI Layer
 
 `src/main.zig` is an inspection CLI around the frontend and module layer. It reads one file, runs `frontend.analyze`, optionally loads imports via `graph.build` plus `linker.Linker` to resolve them, and prints one selected view:

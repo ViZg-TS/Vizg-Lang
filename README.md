@@ -97,6 +97,8 @@ src/modules/graph.zig     Minimal multi-file module graph
 src/modules/loader.zig    Source file loading and frontend analysis wrapper
 src/modules/resolver.zig  Relative module path resolution
 src/diagnostics/root.zig   Shared diagnostic model and stable codes
+src/types/root.zig                Type model (primitives, function signatures)
+src/semantics/root.zig            Semantic type info mapping symbols/nodes to types
 src/frontend/tests.zig    Frontend integration tests
 test/frontend/            TypeScript fixture files
 docs/                     Contributor and architecture documentation
