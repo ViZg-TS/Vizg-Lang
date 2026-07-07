@@ -275,6 +275,15 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, call.callee, depth + 1);
             for (call.arguments) |arg| try printAstNode(writer, tree, arg, depth + 1);
         },
+        .ElementAccessExpression => |elem_access| {
+            try writer.print("ElementAccessExpression #{} object=#{} index=#{} {}..{}\n", .{ node_id, elem_access.object, elem_access.index, node.span.start, node.span.end });
+            try printAstNode(writer, tree, elem_access.object, depth + 1);
+            try printAstNode(writer, tree, elem_access.index, depth + 1);
+        },
+        .NonNullExpression => |nonnull| {
+            try writer.print("NonNullExpression #{} expression=#{} {}..{}\n", .{ node_id, nonnull.expression, node.span.start, node.span.end });
+            try printAstNode(writer, tree, nonnull.expression, depth + 1);
+        },
         .MemberExpression => |member| {
             try writer.print("MemberExpression #{} object=#{} property=\"{s}\" {}..{}\n", .{ node_id, member.object, member.property, node.span.start, node.span.end });
             try printAstNode(writer, tree, member.object, depth + 1);
@@ -963,6 +972,8 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .Parameter => return "Parameter",
         .ReturnStatement => return "ReturnStatement",
         .CallExpression => return "CallExpression",
+        .ElementAccessExpression => return "ElementAccessExpression",
+        .NonNullExpression => return "NonNullExpression",
         .MemberExpression => return "MemberExpression",
         .BinaryExpression => return "BinaryExpression",
         .UpdateExpression => return "UpdateExpression",

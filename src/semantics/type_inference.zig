@@ -117,6 +117,11 @@ pub fn inferLiteralNodeTypes(
                 try stack.append(allocator, call.callee);
                 for (call.arguments) |arg| try stack.append(allocator, arg);
             },
+            .ElementAccessExpression => |elem_access| {
+                _ = try stack.append(allocator, elem_access.object);
+                _ = try stack.append(allocator, elem_access.index);
+            },
+            .NonNullExpression => |nonnull| _ = try stack.append(allocator, nonnull.expression),
             .MemberExpression => |member| { _ = member.property; try stack.append(allocator, member.object); },
             .BinaryExpression => |bin| {
                 _ = bin.operator;

@@ -176,6 +176,11 @@ const Binder = struct {
                 try self.bindNode(call.callee, scope);
                 for (call.arguments) |arg| try self.bindNode(arg, scope);
             },
+            .ElementAccessExpression => |elem_access| {
+                try self.bindNode(elem_access.object, scope);
+                try self.bindNode(elem_access.index, scope);
+            },
+            .NonNullExpression => |nonnull| try self.bindNode(nonnull.expression, scope),
             .MemberExpression => |member| try self.bindNode(member.object, scope),
             .BinaryExpression => |binary| {
                 try self.bindNode(binary.left, scope);

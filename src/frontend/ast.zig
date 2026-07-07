@@ -95,6 +95,15 @@ pub const MemberExpression = struct {
     property: []const u8,
 };
 
+pub const ElementAccessExpression = struct {
+    object: NodeId,
+    index: NodeId,
+};
+
+pub const NonNullExpression = struct {
+    expression: NodeId,
+};
+
 pub const BinaryExpression = struct {
     operator: tokens.TokenType,
     left: NodeId,
@@ -158,6 +167,8 @@ pub const NodeData = union(enum) {
     ReturnStatement: ReturnStatement,
     CallExpression: CallExpression,
     MemberExpression: MemberExpression,
+    ElementAccessExpression: ElementAccessExpression,
+    NonNullExpression: NonNullExpression,
     BinaryExpression: BinaryExpression,
     UpdateExpression: UpdateExpression,
     AssignmentExpression: AssignmentExpression,

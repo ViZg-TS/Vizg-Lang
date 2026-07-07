@@ -254,6 +254,78 @@ test "frontend suite: parser builds variable function import export and call sha
     try std.testing.expectEqualStrings("log", member.property);
 }
 
+test "frontend suite: parser accepts element access non-null assertion and chains" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source = \\let art = ["a"];
+        \\\\let i = 0;
+        \\\\let len = art[i]!.length;
+    ;
+    const scanned = try scanOk(allocator, source, false);
+    const parsed = try parser.parse(allocator, scanned.tokens, true);
+
+    // Goal: zero parser diagnostics on valid syntax.
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len) orelse {
+        var i: usize = 0;
+        while (i < parsed.diagnostics.len) : (i += 1) _ = "diag " ++ @tagName(parsed.diagnostics[i].code);
+    };
+
+    // Verify AST has ElementAccessExpression and NonNullExpression nodes.
+    {
+        var saw_element = false;
+        var saw_nonnull = false;
+        for (parsed.ast.nodes) |n| switch (n.data) {
+            .ElementAccessExpression => saw_element = true,
+            .NonNullExpression => saw_nonnull = true,
+            else => {},
+        };
+        try std.testing.expect(saw_element);
+        try std.testing.expect(saw_nonnull);
+    }
+
+    // Bind and resolve. Expect zero diagnostics on valid syntax.
+    const binder_result = binder.bind(allocator, parsed.ast) orelse return error.BindFailed;
+    const resolved = resolver.resolve(allocator, parsed.ast, binder_result);
+
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len) orelse {
+        var i: usize = 0;
+        while (i < resolved.diagnostics.len) : (i += 1) _ = "diag " ++ @tagName(resolved.diagnostics[i].code);
+    };
+
+    // Expect a read reference for 'art' and another for the inner 'i'. The member property name 'length' must not be resolved as a lexical variable.
+    try std.testing.expect(countReferences(resolved, "art", .read) > 0);
+    try std.testing.expect(countReferences(resolved, "i", .read) > 0);
+
+    // Confirm element access is structured: object resolves and index expression is traversed (the 'i' reference above proves this).
+    {
+        const program = parsed.ast.node(parsed.ast.root).data.Program;
+        var found_len_init: ?usize = null;
+        for (program.statements) |stmt_id| {
+            const stmt = parsed.ast.node(stmt_id);
+            if (@tagName(stmt.data) != "VariableDeclaration") continue;
+            const vd = stmt.data.VariableDeclaration;
+            for (vd.declarations) |d_id| {
+                const d = parsed.ast.node(d_id);
+                const vdec = d.data.VariableDeclarator;
+                if (!std.mem.eql(u8, vdec.name, "len")) continue;
+                found_len_init = vdec.init;
+            }
+        }
+        try std.testing.expect(found_len_init != null);
+
+        // Descend into the chain: NonNull -> MemberExpression (length) -> ElementAccessExpression (art[i]).
+        const nn_id = parsed.ast.node(found_len_init.?).data.VariableDeclarator.init orelse unreachable;
+        try std.testing.expect(@tagName(parsed.ast.node(nn_id).data) == "NonNullExpression");
+        try std.testing.expect(@tagName(parsed.ast.node(nn_id.data.NonNullExpression.expression).data) == "MemberExpression");
+
+        const elem_id = parsed.ast.node(parsed.ast.node(nn_id).data.NonNullExpression.expression).data.MemberExpression.object;
+        try std.testing.expect(@tagName(parsed.ast.node(elem_id).data) == "ElementAccessExpression");
+    }
+}
+
+
 test "frontend suite: parser validates contextual import syntax" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -102,6 +102,11 @@ const Resolver = struct {
                 try self.resolveCallee(call.callee, scope);
                 for (call.arguments) |arg| try self.resolveNode(arg, scope);
             },
+            .ElementAccessExpression => |elem_access| {
+                try self.resolveNode(elem_access.object, scope);
+                try self.resolveNode(elem_access.index, scope);
+            },
+            .NonNullExpression => |nonnull| try self.resolveNode(nonnull.expression, scope),
             .MemberExpression => |member| try self.resolveNode(member.object, scope),
             .BinaryExpression => |binary| {
                 try self.resolveNode(binary.left, scope);
@@ -111,6 +116,7 @@ const Resolver = struct {
                 // Postfix/PREFIX update is a read-modify-write; emit write ref on argument.
                 if (node_id == ast_mod.invalid_node) {} else switch (self.ast.node(update_expr.argument).data) {
                     .Identifier => |id| try self.addReference(update_expr.argument, id.name, scope, .write),
+                    .ElementAccessExpression => |elem_access| try self.resolveNode(elem_access.object, scope),
                     .MemberExpression => |member| try self.resolveNode(member.object, scope),
                     else => {},
                 }
@@ -148,6 +154,7 @@ const Resolver = struct {
         const node = self.ast.node(node_id);
         switch (node.data) {
             .Identifier => |identifier| try self.addReference(node_id, identifier.name, scope, .call),
+            .ElementAccessExpression => |elem_access| try self.resolveNode(elem_access.object, scope),
             .MemberExpression => |member| try self.resolveNode(member.object, scope),
             else => try self.resolveNode(node_id, scope),
         }
@@ -158,6 +165,7 @@ const Resolver = struct {
         const node = self.ast.node(node_id);
         switch (node.data) {
             .Identifier => |identifier| try self.addReference(node_id, identifier.name, scope, .write),
+            .ElementAccessExpression => |elem_access| try self.resolveNode(elem_access.object, scope),
             .MemberExpression => |member| try self.resolveNode(member.object, scope),
             else => try self.resolveNode(node_id, scope),
         }

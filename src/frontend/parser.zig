@@ -589,6 +589,23 @@ const Parser = struct {
                 });
                 continue;
             }
+            if (self.eat(.LBracket)) {
+                const index_expr = try self.parseExpression();
+                _ = self.expect(.RBracket, "expected ]");
+                node = try self.addNode(.{
+                    .span = joinSpans(self.nodes.items[@intCast(node)].span, self.previousOrCurrent().span),
+                    .data = .{ .ElementAccessExpression = .{ .object = node, .index = index_expr } },
+                });
+                continue;
+            }
+            if (self.eat(.Exclamation)) {
+                const non_null = try self.addNode(.{
+                    .span = joinSpans(self.nodes.items[@intCast(node)].span, self.previousOrCurrent().span),
+                    .data = .{ .NonNullExpression = .{ .expression = node } },
+                });
+                node = non_null;
+                continue;
+            }
             if (self.at(.PlusPlus) or self.at(.MinusMinus)) {
                 const op_tok = self.advance();
                 node = try self.addNode(.{
