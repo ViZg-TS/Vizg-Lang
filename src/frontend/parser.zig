@@ -543,7 +543,7 @@ const Parser = struct {
                 .span = token.span,
                 .data = .{ .Identifier = .{ .name = token.lexeme } },
             }),
-            .StringLiteral, .NumberLiteral, .BigIntLiteral, .TrueLiteral, .FalseLiteral, .NullLiteral => node = try self.addNode(.{
+            .StringLiteral, .NoSubstitutionTemplate, .NumberLiteral, .BigIntLiteral, .TrueLiteral, .FalseLiteral, .NullLiteral => node = try self.addNode(.{
                 .span = token.span,
                 .data = .{ .Literal = .{ .value = token.lexeme } },
             }),
@@ -613,6 +613,30 @@ const Parser = struct {
                     .data = .{ .UpdateExpression = .{ .operator = op_tok.kind, .argument = node, .prefix = false } },
                 });
                 continue;
+            }
+            // TypeScript `as` assertion: value as TypeAnnotation (v1 supports simple type identifiers).
+            if (self.atIdentifierText("as")) {
+                const as_tok = self.advance();
+                const type_token_opt = if (self.at(.Identifier) or self.at(.PrivateIdentifier)) self.advance() else null;
+                if (type_token_opt) |unwrapped_type_token| {
+                    const span: tokens.Span = .{
+                        .start = as_tok.span.start,
+                        .end = unwrapped_type_token.span.end,
+                        .line = as_tok.span.line,
+                        .column = as_tok.span.column,
+                    };
+                    node = try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(node)].span, span),
+                        .data = .{ .AsExpression = .{
+                            .expression = node,
+                            .type_annotation = .{ .name = unwrapped_type_token.lexeme, .span = span },
+                        } },
+                    });
+                    continue;
+                } else {
+                    self.reportAt(as_tok, "expected type name after 'as'", .expected_token);
+                    break;
+                }
             }
             break;
         }
