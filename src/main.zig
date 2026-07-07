@@ -712,18 +712,21 @@ test "printModules emits deterministic shape with module ids and status labels" 
 
     var edges = [_]modules.ImportEdge{
         .{
+            .id = @as(u32, 0),
             .from = 0, .to = 1,
             .specifier = "./a",
             .status = .local,
             .span = tokens.Span{ .start = 0, .end = 3, .line = 1, .column = 1 },
         },
         .{
+            .id = @as(u32, 1),
             .from = 0, .to = null,
             .specifier = "console",
             .status = .external,
             .span = tokens.Span{ .start = 0, .end = 8, .line = 2, .column = 1 },
         },
         .{
+            .id = @as(u32, 2),
             .from = 0, .to = null,
             .specifier = "./nonexistent",
             .status = .missing,
