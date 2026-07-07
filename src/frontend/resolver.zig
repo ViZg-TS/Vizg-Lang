@@ -106,6 +106,11 @@ const Resolver = struct {
                 try self.resolveNode(elem_access.object, scope);
                 try self.resolveNode(elem_access.index, scope);
             },
+            .AsExpression => |as_expr| {
+                // Resolve only the inner expression; do NOT resolve type_annotation as a value.
+                _ = as_expr.type_annotation;  // type names are not resolved at runtime
+                try self.resolveNode(as_expr.expression, scope);
+            },
             .NonNullExpression => |nonnull| try self.resolveNode(nonnull.expression, scope),
             .MemberExpression => |member| try self.resolveNode(member.object, scope),
             .BinaryExpression => |binary| {
