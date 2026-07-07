@@ -100,6 +100,11 @@ pub const ElementAccessExpression = struct {
     index: NodeId,
 };
 
+pub const AsExpression = struct {
+    expression: NodeId,
+    type_annotation: TypeAnnotation,
+};
+
 pub const NonNullExpression = struct {
     expression: NodeId,
 };
@@ -168,6 +173,7 @@ pub const NodeData = union(enum) {
     CallExpression: CallExpression,
     MemberExpression: MemberExpression,
     ElementAccessExpression: ElementAccessExpression,
+    AsExpression: AsExpression,
     NonNullExpression: NonNullExpression,
     BinaryExpression: BinaryExpression,
     UpdateExpression: UpdateExpression,
