@@ -1,6 +1,11 @@
 .codegraph
 .zig-cache
 zig-out
+
+## Generated logs ##
+logs/
+*.log
+
 AGENTS.md
 .codex
 .agents

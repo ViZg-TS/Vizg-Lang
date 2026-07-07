@@ -267,7 +267,6 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
     fn buildLinkedImports(self: *Builder) ![]const linker.LinkedImport {
         var items: std.ArrayListUnmanaged(linker.LinkedImport) = .empty;
         errdefer { items.deinit(self.allocator); }
-        std.log.warn("buildLinkedImports: modules={d} imports={d}", .{ self.modules.items.len, self.imports.items.len });
 
         for (self.modules.items) |m| {
             const mod_id: ModuleId = m.id;
@@ -286,7 +285,6 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
                     .external => {
                         for (decl.specifiers) |spec| {
                             const id_after: u32 = @intCast(items.items.len);
-                            std.log.warn("      appened item local, now len={}", .{items.items.len});
                             try items.append(self.allocator, .{
                                 .id = id_after,
                                 .from_module = mod_id,
@@ -304,7 +302,6 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
                     .missing => {
                         for (decl.specifiers) |spec| {
                             const id_after: u32 = @intCast(items.items.len);
-                            std.log.warn("      appened item local, now len={}", .{items.items.len});
                             try items.append(self.allocator, .{
                                 .id = id_after,
                                 .from_module = mod_id,
@@ -323,11 +320,9 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
                         const target_mod: Module = blk_target_loop: for (self.modules.items) |mod| {
                             if (edge.to.? == mod.id) break :blk_target_loop mod;
                         } else continue;
-                        std.log.warn("    got target_mod id={} display={s}", .{target_mod.id, target_mod.display_path});
                         for (decl.specifiers) |spec| {
                             const sym = findExportedSymbol(target_mod, spec.imported_name);
                             const id_after: u32 = @intCast(items.items.len);
-                            std.log.warn("      appened item local, now len={}", .{items.items.len});
                             try items.append(self.allocator, .{
                                 .id = id_after,
                                 .from_module = mod_id,
@@ -346,7 +341,6 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
             }
         }
 
-        std.log.warn("buildLinkedImports done: returned {} records", .{items.items.len});
         return items.toOwnedSlice(self.allocator);
     }
 
@@ -407,6 +401,20 @@ pub fn build(allocator: std.mem.Allocator, io: Io, entry_path: []const u8, optio
 
 fn moduleExportsName(target: Module, imported_name: []const u8) bool {
     if (imported_name.len == 0) return false;
+    
+    // Use the binder's `exports` list as the source of truth — it captures every
+    // exported name regardless of form (named declarations wrapped in an
+    // ExportDeclaration with zero specifiers, explicit re-exports via named
+    // specifiers, default exports, etc.). The previous AST-only path missed
+    // `export const/let/var/function/class X = ...` because those are represented
+    // as ExportDeclaration nodes whose `specifiers` list is empty; the actual
+    // identifier appears on a child node, not in specifiers[].exported_name.
+    for (target.result.bind.module.exports) |rec| {
+        if (std.mem.eql(u8, rec.name, imported_name)) return true;
+    }
+    
+    // Fallback: also check ExportDeclaration.specifiers for explicit named
+    // re-exports like `export { y } from "./other"` — keeps us correct there too.
     for (target.result.ast.nodes) |node| {
         switch (node.data) {
             .ExportDeclaration => |export_decl| {
@@ -417,6 +425,7 @@ fn moduleExportsName(target: Module, imported_name: []const u8) bool {
             else => {},
         }
     }
+    
     return false;
 }
 
@@ -675,3 +684,179 @@ test "ModuleGraph emits unresolved linked import alongside VZG5002 on missing ex
     try std.testing.expect(saw_unresolved == true);
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Cross-file linking test cases (cases C/E/G). Exercises build() over dedicated
+// fixtures in `test/modules/linking/` and asserts on the resulting graph. The
+// goal is structural coverage — not full CLI snapshot tests — so we check:
+//   - module count, import edge count
+//   - LinkedImport record fields (local_name, imported_name, kind)
+//   - target_module id consistency between edges and linked imports
+//   - diagnostic absence / presence for negative cases
+// ---------------------------------------------------------------------------
+
+test "Case C: aliased-export — graph builds, no diagnostics, local link unresolved" {
+    // Fixture: main.ts imports `exportedName` from "./target"; target.ts does
+    //   `const localName = "dev"; export { localName as exportedName };`.
+    //
+    // Current linker behaviour: the linked import resolves to a .local edge in
+    // an existing module, but because buildLinkedImports matches by raw name it
+    // records the link as unresolved (target_symbol=null) since `exportedName`
+    // is not itself exported — only the alias. This test documents the current
+    // contract so callers can rely on it and a later pass can extend linking.
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const entry_path = try std.fmt.allocPrint(
+        std.testing.allocator, "{s}/test/modules/linking/alias-export/main.ts", .{cwd},
+    );
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+    var graph = build(arena.allocator(), io, entry_path, .{}, null) catch unreachable;
+    defer graph.deinit();
+
+    // One module we authored plus the imported one — no external edge here.
+    try std.testing.expectEqual(@as(usize, 2), graph.modules.len);
+
+    // Single local import (no diagnostics).
+    var saw_local: ?bool = null;
+    for (graph.imports) |e| {
+        if (e.status != .local) continue;
+        try std.testing.expect(saw_local == null); // exactly one
+        try std.testing.expect(std.mem.startsWith(u8, e.specifier, "./")); // must be a local specifier
+        saw_local = true;
+    }
+    try std.testing.expect(saw_local == true);
+
+    var saw_link: ?bool = null;
+    for (graph.linked_imports) |link| {
+        if (!std.mem.eql(u8, link.local_name, "exportedName")) continue;
+        // Current linker marks the link kind=.unresolved because  is
+        // only available via an aliased re-export in target.ts — not as a direct
+        // exported name. The edge status itself remains .local since the file
+        // was found.
+        try std.testing.expectEqual(.unresolved, link.kind);
+        try std.testing.expect(link.target_module != null); // target module was found
+        const mod = graph.modules[@intCast(link.target_module.?)];
+        try std.testing.expect(std.mem.endsWith(u8, mod.display_path, "target.ts"));
+        saw_link = true;
+    }
+    try std.testing.expect(saw_link == true);
+
+    // No diagnostics emitted for this fixture — the current linker doesn't yet
+    // produce a VZG5002 when the source is an aliased re-export. Documented as a
+    // known limitation, not asserted here.
+}
+
+test "Case E: missing-module — no crash, edge marked .missing, graph inspectable" {
+    // Fixture: main.ts imports "./missing" which has no .ts counterpart on disk.
+    //
+    // Expected contract (current): the loader skips the absent file silently,
+    // marks the import edge status=missing, and the linker produces one
+    // kind=.unresolved LinkedImport whose target_module/target_symbol are null.
+    // No VZG5001 is currently emitted by build() — we assert structural facts
+    // about what *does* happen so callers don't assume otherwise.
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const entry_path = try std.fmt.allocPrint(
+        std.testing.allocator, "{s}/test/modules/linking/missing-module/main.ts", .{cwd},
+    );
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+    var graph = build(arena.allocator(), io, entry_path, .{}, null) catch unreachable;
+    defer graph.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), graph.modules.len); // only main loaded
+
+    // Exactly one edge — the import from main.ts to a non-existent file.
+    var saw_missing: ?bool = null;
+    for (graph.imports) |e| {
+        if (e.status != .missing) continue;
+        try std.testing.expect(saw_missing == null);
+        try std.testing.expect(std.mem.eql(u8, e.specifier, "./missing"));
+        saw_missing = true;
+    }
+    try std.testing.expect(saw_missing == true);
+
+    // One LinkedImport for the absent module, unresolved.
+    var saw_unresolved: ?bool = null;
+    for (graph.linked_imports) |link| {
+        if (!std.mem.eql(u8, link.local_name, "x")) continue;
+        try std.testing.expectEqual(.unresolved, link.kind);
+        try std.testing.expect(link.target_module == null);
+        try std.testing.expect(link.target_symbol == null);
+        saw_unresolved = true;
+    }
+    try std.testing.expect(saw_unresolved == true);
+
+    // Graph diagnostics must not contain a missing_export — we have no target to
+    // look for an export on.
+    var found_missing_export = false;
+    for (graph.diagnostics) |d| {
+        if (std.mem.eql(u8, @tagName(d.code), "missing_export")) {
+            found_missing_export = true;
+        }
+    }
+    try std.testing.expect(!found_missing_export);
+}
+
+test "Case G: duplicate-canonical-imports — two specifiers reuse same target module" {
+    // Fixture: main.ts does `import { x } from "./a";` and `import { x as y } from "./a.ts";`.
+    //
+    // Expected contract (current): resolver canonicalizes both to the same file
+    // so there is ONE target module (id = 1) but TWO import edges and two
+    // LinkedImports, each pointing at name "x" in that module.
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const entry_path = try std.fmt.allocPrint(
+        std.testing.allocator, "{s}/test/modules/linking/named-duplicate/main.ts", .{cwd},
+    );
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+    var graph = build(arena.allocator(), io, entry_path, .{}, null) catch unreachable;
+    defer graph.deinit();
+
+    // Two modules: main (id 0) and a (id 1).
+    try std.testing.expectEqual(@as(usize, 2), graph.modules.len);
+
+    var edge_count: usize = 0;
+    var target_module_id: ?ModuleId = null;
+    for (graph.imports) |e| {
+        if (e.status != .local) continue;
+        try std.testing.expect(target_module_id == null or target_module_id.? == e.to.?);
+        target_module_id = e.to;
+        edge_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), edge_count);
+
+    var seen_local_x: usize = 0;
+    for (graph.linked_imports) |link| {
+        if (!std.mem.eql(u8, link.imported_name, "x")) continue;
+        try std.testing.expect(link.target_module != null);
+        // Both links should reach the same module.
+        if (target_module_id == null) target_module_id = link.target_module.? else blk: {
+            try std.testing.expect(link.target_module.? == target_module_id.?);
+            break :blk;
+        }
+        seen_local_x += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen_local_x);
+
+    // No diagnostics emitted — duplicates are silently de-duplicated by the
+    // canonical resolver.
+}

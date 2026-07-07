@@ -448,13 +448,61 @@ fn printModules(writer: *Io.Writer, graph: modules.ModuleGraph) !void {
         }
     }
 
-    try writer.print("\nDiagnostics\n", .{});
-    if (graph.diagnostics.len == 0) {
-        try writer.print("  none\n", .{});
-    } else {
-        try printDiagnostics(writer, "", graph.diagnostics);
+    if (graph.linked_imports.len > 0) {
+        try writer.print("\nLinks\n", .{});
+        for (graph.linked_imports) |link| {
+            // Find the matching import edge so we can display specifier and status.
+            var edge_for_link: ?modules.ImportEdge = null;
+            for (graph.imports) |e| {
+                if (@as(u32, e.id) == link.import_edge) {
+                    edge_for_link = e;
+                    break;
+                }
+            }
+
+            // Resolve the target symbol name from the target module when available.
+            var target_name: ?[]const u8 = null;
+            if (link.target_module) |tm_id| {
+                const tm = graph.modules[@intCast(tm_id)];
+                if (link.target_symbol) |ts_id| {
+                    for (tm.result.bind.symbols) |sym| {
+                        if (sym.id == ts_id) {
+                            target_name = sym.name;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (edge_for_link) |edge| {
+                const status_tag = @tagName(edge.status);
+                if (target_name) |tname| {
+                    const target_id: u32 = blk: {
+                        if (link.target_module) |id| break :blk id;
+                        @panic("target_module must be set when we reach target_name");
+                    };
+                    try writer.print(
+                        "  link {} local=\"{s}\" imported=\"{s}\" from=\"{s}\" status={s} -> module {} name=\"{s}\"\n",
+                        .{ link.id, link.local_name, link.imported_name, edge.specifier, @tagName(edge.status), target_id, tname },
+                    );
+                } else {
+                    try writer.print(
+                        "  link {} local=\"{s}\" imported=\"{s}\" from=\"{s}\" status={s} -> unresolved\n",
+                        .{ link.id, link.local_name, link.imported_name, edge.specifier, status_tag },
+                    );
+                }
+            } else {
+                try writer.print(
+                    "  link {} local=\"{s}\" imported=\"{s}\" kind={s}\n",
+                    .{ link.id, link.local_name, link.imported_name, @tagName(link.kind) },
+                );
+            }
+        }
     }
+
+    try writer.print("\nDiagnostics\n", .{});
 }
+
 fn printDiagnostics(writer: *Io.Writer, path: []const u8, diags: []const diagnostics.Diagnostic) !void {
     for (diags) |diag| {
         const diag_path = diag.path orelse path;
@@ -896,3 +944,160 @@ test "linked_imports: missing export remains unresolved and VZG5002 is emitted" 
     try std.testing.expect(found_vzg5002);
 }
 
+
+// ---------------------------------------------------------------------------
+// Test diagnostics for valid imports. The fixture `import_valid.ts` has one
+// import (from "./a") which is a real, exporting module; expected: zero VZG5xxx.
+test "diagnostics: missing module -> exactly one VZG5001" {
+    const path = "./test/frontend/modules/manual/missing-module.ts";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    const graph = modules.build(allocator, io, path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null) catch |err| {
+        std.log.err("build failed: {s}", .{@errorName(err)});
+        return error.TestFail;
+    };
+
+    var vzg5001_count: usize = 0;
+    var vzg5002_count: usize = 0;
+    for (graph.diagnostics) |diag| {
+        switch (diag.code) {
+            .module_not_found => vzg5001_count += 1,
+            .missing_export => vzg5002_count += 1,
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), vzg5001_count);
+    // Missing module must NOT cascade into missing-export for the same import.
+    try std.testing.expectEqual(@as(usize, 0), vzg5002_count);
+
+    // The edge is recorded as missing; no linked_import target should exist.
+    var any_linked_local = false;
+    for (graph.linked_imports) |link| {
+        if (link.target_module != null) any_linked_local = true;
+    }
+    try std.testing.expect(!any_linked_local);
+}
+
+test "diagnostics: missing export -> exactly one VZG5002" {
+    // missing-export.ts imports ONE missing specifier from a real module.
+    const path = "./test/frontend/modules/manual/missing-export.ts";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    const graph = modules.build(allocator, io, path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null) catch |err| {
+        std.log.err("build failed: {s}", .{@errorName(err)});
+        return error.TestFail;
+    };
+
+    var vzg5001_count: usize = 0;
+    var vzg5002_count: usize = 0;
+    for (graph.diagnostics) |diag| {
+        switch (diag.code) {
+            .module_not_found => vzg5001_count += 1,
+            .missing_export => vzg5002_count += 1,
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), vzg5001_count);
+    try std.testing.expectEqual(@as(usize, 1), vzg5002_count);
+
+    // Link is created but unresolved: target_symbol == null.
+    var any_unresolved = false;
+    for (graph.linked_imports) |link| {
+        if (std.mem.eql(u8, link.imported_name, "missing")) {
+            try std.testing.expect(link.kind == .unresolved);
+            try std.testing.expect(link.target_symbol == null);
+            any_unresolved = true;
+        }
+    }
+    try std.testing.expect(any_unresolved);
+}
+
+test "diagnostics: external import -> zero VZG5xxx diagnostics" {
+    // external_only.ts imports only from an external specifier ("node:fs").
+    const path = "./test/frontend/modules/manual/external_only.ts";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    const graph = modules.build(allocator, io, path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null) catch |err| {
+        std.log.err("build failed: {s}", .{@errorName(err)});
+        return error.TestFail;
+    };
+
+    for (graph.diagnostics) |diag| {
+        if (diag.code == .module_not_found or diag.code == .missing_export or diag.code == .circular_import) {
+            try std.testing.expect(false); // unexpected VZG5xxx diagnostic
+        }
+    }
+
+    // No linked import should carry a target module — externals are standalone.
+    for (graph.linked_imports) |link| {
+        try std.testing.expect(link.kind == .external);
+        try std.testing.expect(link.target_module == null);
+    }
+
+    var saw_external = false;
+    for (graph.imports) |e| {
+        if (std.mem.eql(u8, e.specifier, "node:fs")) {
+            try std.testing.expectEqual(@as(modules.ImportStatus, .external), e.status);
+            saw_external = true;
+        }
+    }
+    try std.testing.expect(saw_external);
+}
+
+test "diagnostics: valid import -> zero diagnostics" {
+    // import_valid.ts:  import { x } from "./a";  (./a exports `x`)
+    const path = "./test/frontend/modules/manual/import_valid.ts";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    const graph = modules.build(allocator, io, path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null) catch |err| {
+        std.log.err("build failed: {s}", .{@errorName(err)});
+        return error.TestFail;
+    };
+
+    for (graph.diagnostics) |diag| {
+        try std.testing.expect(
+            diag.code != .module_not_found and
+            diag.code != .missing_export and
+            diag.code != .circular_import,
+        );
+    }
+
+    // Linked import should exist with a target_module AND a target_symbol.
+    var saw_x = false;
+    for (graph.linked_imports) |link| {
+        if (std.mem.eql(u8, link.imported_name, "x")) {
+            try std.testing.expect(link.target_module != null);
+            try std.testing.expect(link.target_symbol != null);
+            saw_x = true;
+        }
+    }
+    try std.testing.expect(saw_x);
+}

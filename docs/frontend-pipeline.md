@@ -1,6 +1,6 @@
 # Frontend Pipeline
 
-The implemented frontend analyzes one source file at a time. Its public entry point is `frontend.analyze` in `src/frontend/frontend.zig`. Multi-file loading lives one layer above it in `src/modules/`.
+The implemented frontend analyzes one source file at a time. Its public entry point is `frontend.analyze` in `src/frontend/frontend.zig`. Multi-file loading lives one layer above it in `src/modules/`. The linker (cross-file import resolution) sits on top of the module graph and runs before diagnostics are finalized for each build.
 
 ## Entry Point
 
@@ -143,12 +143,58 @@ Current basic block kinds are `entry`, `exit`, `normal`, `condition`, and `unrea
 
 ## Current Scope
 
-`frontend.analyze` remains single-file. Imports and exports are recorded as module metadata.
+`frontend.analyze` remains single-file. Imports and exports are recorded as module metadata and forwarded to the linker layer below for cross-file resolution.
 
-`modules.build` loads an entry file, analyzes it, follows static local imports, and caches modules by canonical path. Relative resolution tries:
+## Module Graph And Linker (Cross-File Resolution)
 
-- exact specifier when it ends in `.ts`
-- `specifier + ".ts"`
-- `specifier + "/index.ts"`
+The multi-file flow lives in `src/modules/`:
 
-Non-relative imports are recorded as external edges and are not loaded. The module graph validates named imports against target value-space exports, reports missing local modules as `VZG5001`, missing named exports as `VZG5002`, and simple cycles as `VZG5003`.
+```txt
+entry path
+  -> read source
+  -> frontend.analyze per file (single-file pipeline above)
+  -> collect static imports from each file's binder
+  -> resolve relative imports by canonical path
+  -> recursively analyze imported files
+  -> cache by canonical path
+  -> build import edges
+  -> link named/default/namespace imports to target symbols via linker.Linker
+  -> validate named imports against exports
+  -> module diagnostics (VZG5xxx)
+```
+
+The module graph layer exposes `ModuleGraph.linked_imports`, which is a snapshot of all per-build cross-file import links. Each link captures:
+
+- the local name and imported name in the source file
+- the kind (`named`, `default`, `namespace`, `external`, or `unresolved`)
+- the target module id (for resolved imports) and symbol id (when exported by the target)
+
+`vizg modules <file>` renders these links as a "Links" section after Imports in CLI output:
+
+```txt
+Modules
+  module 0 path="..."
+  module 1 path="..."
+
+Imports
+  module 0 -> module 1 specifier="./dep" status=local
+
+Links
+  link 0 local="value" imported="value" from="./dep" status=local -> module 1 name="value"
+  link 1 local="readFile" imported="readFile" from="node:fs" status=external -> unresolved
+
+Diagnostics
+  none
+```
+
+### Module Layer Files
+
+- `src/modules/root.zig`: public API re-export.
+- `src/modules/graph.zig`: graph structure, recursive traversal, import edges, export validation, module diagnostics (`VZG5xxx`).
+- `src/modules/loader.zig`: source loading and single-file frontend analysis.
+- `src/modules/resolver.zig`: relative import resolution and path canonicalization.
+- `src/modules/linker.zig`: cross-file import link construction (named/default/namespace imports resolve to exported symbols; external imports preserved as `.external`).
+
+### Diagnostics Scope
+
+Module graph validates named imports against target value-space exports, reports missing local modules as `VZG5001`, missing named exports as `VZG5002`, and simple cycles as `VZG5003`. The linker does not emit diagnostics itself — unresolved links surface through the importer's status tag only.

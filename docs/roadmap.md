@@ -16,6 +16,8 @@ Implemented:
 - Relative import resolution by `.ts` and `/index.ts`.
 - Module cache keyed by canonical file path.
 - Named import validation against target value-space exports.
+- Cross-file import linking via `src/modules/linker.zig`: each named/default/namespace or external import becomes a `LinkedImport` carrying local name, imported name, kind (`named`, `default`, `namespace`, `external`, or `unresolved`), and the resolved target module/symbol when available.
+- Linker output surfaced in CLI as the "Links" section on `vizg modules <file>`.
 - Module graph diagnostics `VZG5001`, `VZG5002`, and `VZG5003`.
 - CLI inspection commands.
 - Zig build and test wiring.
@@ -25,7 +27,7 @@ Useful next work inside this milestone:
 - Add more parser recovery tests.
 - Expand fixture coverage for unsupported syntax errors.
 - Improve CLI formatting consistency.
-- Add snapshot-style tests for CLI output.
+- Add snapshot-style tests for CLI output (including `modules` Links section).
 - Document each AST node in source comments or generated docs.
 - Add module graph snapshot tests.
 

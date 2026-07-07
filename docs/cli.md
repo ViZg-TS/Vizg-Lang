@@ -45,7 +45,7 @@ commands:
   references <file> print resolved identifier references
   refs <file>       alias for references
   cfg <file>      print function control-flow graphs
-  modules <file>  build and print the module graph
+  modules <file>  build module graph; print Modules, Imports, **Links**, and Diagnostics
   help            print this help
 ```
 
@@ -217,9 +217,11 @@ Exit behavior: exits `0` if the frontend command completes.
 
 ## `modules <file>`
 
-Purpose: build a minimal module graph from an entry file.
+Purpose: build a minimal module graph from an entry file and print the Modules, Imports, Links, and Diagnostics sections.
 
-Relative imports are resolved by canonical path. The resolver tries the exact specifier when it already ends in `.ts`, then `specifier + ".ts"`, then `specifier + "/index.ts"`. Non-relative imports are recorded as external edges and are not loaded or export-validated.
+The resolver tries the exact specifier when it already ends in `.ts`, then `specifier + ".ts"`, then `specifier + "/index.ts"`. Non-relative imports are recorded as external edges; they are not loaded or export-validated (they surface through the Links section with status=external and no resolved target).
+
+Cross-file import linking is performed by `src/modules/linker.zig` on top of the graph. Each static named/default/namespace import resolves to an exported symbol in a local module when available; external imports stay unresolved.
 
 Example:
 
@@ -231,16 +233,24 @@ Output shape:
 
 ```txt
 Modules
-  0 /absolute/path/test/frontend/modules/manual/success.ts
-  1 /absolute/path/test/frontend/modules/manual/dep.ts
+  module 0 path="test/frontend/modules/manual/success.ts"
+  module 1 path="test/frontend/modules/manual/dep.ts"
 
 Imports
-  0 -> 1 "./dep" [local]
-  0 -> external "node:fs" [external]
+  module 0 -> module 1 specifier="./dep" status=local
+  module 0 -> external specifier="node:fs" status=external
+
+Links
+  link 0 local="value" imported="value" from="./dep" status=local -> module 1 name="value"
+  link 1 local="readFile" imported="readFile" from="node:fs" status=external -> unresolved
 
 Diagnostics
-  none
 ```
+
+The Links section is omitted when there are no static named/default/namespace imports with an associated import symbol. When present, it prints one line per `LinkedImport`:
+
+- resolved link: `link <id> local="<local>" imported="<imported>" from="<specifier>" status=<status> -> module <target-id> name="<exported-name>"`
+- unresolved external or missing-export link: `link <id> local="<local>" imported="<imported>" from="<specifier>" status=<status> -> unresolved`
 
 Exit behavior: exits `0` when the graph has no error diagnostics. Exits `1` for module graph errors such as `VZG5001 module_not_found`, `VZG5002 missing_export`, or `VZG5003 circular_import`.
 

@@ -15,6 +15,7 @@ Implemented today:
 - Resolver for identifier references and missing-name diagnostics.
 - Preliminary control-flow graphs for function bodies.
 - Module graph v1 for relative static imports, canonical-path caching, named import validation, external import edges, missing modules, missing exports, and simple cycles.
+- Cross-file import linking layer that resolves local imports to their target module's exported symbols, tracks import kind (named, default, namespace, external, unresolved), and emits `VZG5001`, `VZG5002`, and `VZG5003` diagnostics alongside link records.
 - CLI inspection commands for checks, tokens, AST, symbols, references, CFGs, and modules.
 
 Supported syntax is best described by `test/frontend/vizg_capabilities_test.ts`: comments, named/default imports, `let`/`const`/`var`, exported variables and functions, typed parameters, primitive literals, binary expressions, assignments, calls, member expressions, `if`/`else`, `while`, `for`, `return`, named exports, and aliased exports.
@@ -34,6 +35,18 @@ zig build test
 ```
 
 The test step runs both the library module tests and the CLI module tests.
+
+## Validation
+
+A repeatable validation script builds, runs tests, and exercises the CLI on a handful of fixtures. All output goes to `logs/validate-YYYYMMDD-HHMMSS.log`.
+
+```sh
+sh tools/validate.sh
+ls -lh logs/
+tail -n 80 logs/validate-*.log
+```
+
+The script exits non-zero if the build or tests fail.
 
 ## CLI Examples
 

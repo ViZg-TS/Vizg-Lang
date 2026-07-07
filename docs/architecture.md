@@ -39,7 +39,33 @@ entry path
   -> module diagnostics
 ```
 
-## Frontend Pipeline
+### Cross-file Linking (Linker)
+
+Above the loader/resolver, `src/modules/linker.zig` builds per-build cross-file import links. Each link records a local name in one file and the symbol it resolves to (or will resolve to after further passes) inside another module:
+
+```txt
+entry path
+  -> read source
+  -> frontend.analyze
+  -> build linked imports
+    for each static named/default/namespace import:
+      classify kind as .named, .default, .namespace, or .external
+    record unresolved imports when no target is resolved yet
+  -> graph.zig exposes linked_imports to the CLI
+  -> `vizg modules` prints Links section in output
+```
+
+The linker lives strictly inside the module layer. It owns no filesystem work and produces immutable snapshots for one `Linker` instance. It does not bundle, execute, or resolve packages — it is a structural analysis pass.
+
+### Module Layer Files
+
+- `src/modules/root.zig`: public API re-export.
+- `src/modules/graph.zig`: graph structure, recursive traversal, import edges, export validation, module diagnostics (`VZG5xxx`).
+- `src/modules/loader.zig`: source loading and single-file frontend analysis.
+- `src/modules/resolver.zig`: relative import resolution and path canonicalization.
+- `src/modules/linker.zig`: per-build cross-file import link construction (named/default/namespace imports resolve to exported symbols; external imports preserved as `.external`).
+
+
 
 The frontend is split into small modules:
 
@@ -66,7 +92,7 @@ The module graph layer is separate from the frontend:
 
 ## CLI Layer
 
-`src/main.zig` is an inspection CLI around the frontend. It reads one file, runs `frontend.analyze` with source kind `module`, and prints one selected view:
+`src/main.zig` is an inspection CLI around the frontend and module layer. It reads one file, runs `frontend.analyze`, optionally loads imports via `graph.build` plus `linker.Linker` to resolve them, and prints one selected view:
 
 - `check`
 - `tokens`
@@ -75,7 +101,7 @@ The module graph layer is separate from the frontend:
 - `references`
 - `refs`
 - `cfg`
-- `modules`
+- `modules`: print modules + import edges + **Links** (per-link resolved target or unresolved for external imports) + diagnostics
 - `help`
 
 The CLI is intentionally diagnostic and exploratory. It is not a compiler driver.
