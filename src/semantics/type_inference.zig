@@ -123,7 +123,13 @@ pub fn inferLiteralNodeTypes(
                 _ = try stack.append(allocator, bin.left);
                 _ = try stack.append(allocator, bin.right);
             },
+            .UpdateExpression => |update_expr| {
+                _ = update_expr.operator;
+                _ = update_expr.prefix;
+                _ = try stack.append(allocator, update_expr.argument);
+            },
             .AssignmentExpression => |a| {
+                _ = a.operator;
                 _ = try stack.append(allocator, a.left);
                 _ = try stack.append(allocator, a.right);
             },

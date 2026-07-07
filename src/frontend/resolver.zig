@@ -107,6 +107,14 @@ const Resolver = struct {
                 try self.resolveNode(binary.left, scope);
                 try self.resolveNode(binary.right, scope);
             },
+            .UpdateExpression => |update_expr| {
+                // Postfix/PREFIX update is a read-modify-write; emit write ref on argument.
+                if (node_id == ast_mod.invalid_node) {} else switch (self.ast.node(update_expr.argument).data) {
+                    .Identifier => |id| try self.addReference(update_expr.argument, id.name, scope, .write),
+                    .MemberExpression => |member| try self.resolveNode(member.object, scope),
+                    else => {},
+                }
+            },
             .AssignmentExpression => |assignment| {
                 try self.resolveAssignmentTarget(assignment.left, scope);
                 try self.resolveNode(assignment.right, scope);

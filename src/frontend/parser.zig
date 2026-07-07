@@ -432,12 +432,27 @@ const Parser = struct {
 
     fn parseAssignmentExpression(self: *Parser) anyerror!NodeId {
         const left = try self.parseBinaryExpression();
+
+        // Compound assignment (+= -= *= /= %=).
+        if (self.current().kind == .PlusEqual or self.current().kind == .MinusEqual or
+            self.current().kind == .AsteriskEqual or self.current().kind == .SlashEqual or
+            self.current().kind == .PercentEqual)
+        {
+            const op_tok = self.advance();
+            const right = try self.parseExpression();
+            return self.addNode(.{
+                .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                .data = .{ .AssignmentExpression = .{ .operator = op_tok.kind, .left = left, .right = right } },
+            });
+        }
+
+        // Plain '=' only.
         if (!self.eat(.Equal)) return left;
 
         const right = try self.parseExpression();
         return self.addNode(.{
             .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
-            .data = .{ .AssignmentExpression = .{ .left = left, .right = right } },
+            .data = .{ .AssignmentExpression = .{ .operator = .Equal, .left = left, .right = right } },
         });
     }
 
@@ -571,6 +586,14 @@ const Parser = struct {
                 node = try self.addNode(.{
                     .span = joinSpans(self.nodes.items[@intCast(node)].span, property.span),
                     .data = .{ .MemberExpression = .{ .object = node, .property = property.lexeme } },
+                });
+                continue;
+            }
+            if (self.at(.PlusPlus) or self.at(.MinusMinus)) {
+                const op_tok = self.advance();
+                node = try self.addNode(.{
+                    .span = joinSpans(self.nodes.items[@intCast(node)].span, op_tok.span),
+                    .data = .{ .UpdateExpression = .{ .operator = op_tok.kind, .argument = node, .prefix = false } },
                 });
                 continue;
             }

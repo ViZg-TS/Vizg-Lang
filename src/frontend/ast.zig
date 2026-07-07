@@ -102,8 +102,15 @@ pub const BinaryExpression = struct {
 };
 
 pub const AssignmentExpression = struct {
+    operator: tokens.TokenType,
     left: NodeId,
     right: NodeId,
+};
+
+pub const UpdateExpression = struct {
+    operator: tokens.TokenType,
+    argument: NodeId,
+    prefix: bool,
 };
 
 pub const IfStatement = struct {
@@ -152,6 +159,7 @@ pub const NodeData = union(enum) {
     CallExpression: CallExpression,
     MemberExpression: MemberExpression,
     BinaryExpression: BinaryExpression,
+    UpdateExpression: UpdateExpression,
     AssignmentExpression: AssignmentExpression,
     IfStatement: IfStatement,
     WhileStatement: WhileStatement,

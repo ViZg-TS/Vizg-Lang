@@ -284,8 +284,13 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, expr.left, depth + 1);
             try printAstNode(writer, tree, expr.right, depth + 1);
         },
+        .UpdateExpression => |expr| {
+            const prefix_tag: []const u8 = if (expr.prefix) "Prefix" else "Postfix";
+            try writer.print("UpdateExpression #{} {s} operator={s} argument=#{} {}..{}\n", .{ node_id, prefix_tag, @tagName(expr.operator), expr.argument, node.span.start, node.span.end });
+            try printAstNode(writer, tree, expr.argument, depth + 1);
+        },
         .AssignmentExpression => |expr| {
-            try writer.print("AssignmentExpression #{} left=#{} right=#{} {}..{}\n", .{ node_id, expr.left, expr.right, node.span.start, node.span.end });
+            try writer.print("AssignmentExpression #{} operator={s} left=#{} right=#{} {}..{}\n", .{ node_id, @tagName(expr.operator), expr.left, expr.right, node.span.start, node.span.end });
             try printAstNode(writer, tree, expr.left, depth + 1);
             try printAstNode(writer, tree, expr.right, depth + 1);
         },
@@ -960,6 +965,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .CallExpression => return "CallExpression",
         .MemberExpression => return "MemberExpression",
         .BinaryExpression => return "BinaryExpression",
+        .UpdateExpression => return "UpdateExpression",
         .AssignmentExpression => return "AssignmentExpression",
         .IfStatement => return "IfStatement",
         .WhileStatement => return "WhileStatement",
