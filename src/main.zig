@@ -123,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
         .symbols => try printSymbols(stdout, result.bind, result.diagnostics),
         .references, .refs => try printReferences(stdout, result.source.path, result.bind, result.resolve, result.diagnostics),
         .cfg => try printCfg(stdout, result.ast, result.cfgs),
-        .modules => unreachable,
+        .modules => unreachable, // handled earlier with early return
         .help => unreachable,
     }
 }

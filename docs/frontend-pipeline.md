@@ -1,6 +1,6 @@
 # Frontend Pipeline
 
-The implemented frontend analyzes one source file at a time. Its public entry point is `frontend.analyze` in `src/frontend/frontend.zig`. Multi-file loading lives one layer above it in `src/modules/`.
+The implemented frontend analyzes one source file at a time. Its public entry point is `frontend.analyze` in `src/frontend/frontend.zig`. Multi-file loading lives one layer above it in `src/modules_graph/`.
 
 ## Entry Point
 

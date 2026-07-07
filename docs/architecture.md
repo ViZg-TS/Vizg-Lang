@@ -24,7 +24,7 @@ source text
 
 `src/frontend/frontend.zig` owns this orchestration through `frontend.analyze`.
 
-`src/modules/graph.zig` builds on `frontend.analyze`:
+`src/modules_graph/graph.zig` builds on `frontend.analyze`:
 
 ```txt
 entry path
@@ -59,10 +59,10 @@ Shared diagnostics live outside the frontend:
 
 The module graph layer is separate from the frontend:
 
-- `src/modules/root.zig`: public module layer API.
-- `src/modules/graph.zig`: graph structure, recursive traversal, import edges, export validation, and module diagnostics.
-- `src/modules/loader.zig`: source loading and single-file frontend analysis.
-- `src/modules/resolver.zig`: relative import resolution and path canonicalization.
+- `src/modules_graph/root.zig`: public module layer API.
+- `src/modules_graph/graph.zig`: graph structure, recursive traversal, import edges, export validation, and module diagnostics.
+- `src/modules_graph/loader.zig`: source loading and single-file frontend analysis.
+- `src/modules_graph/resolver.zig`: relative import resolution and path canonicalization.
 
 ## CLI Layer
 
