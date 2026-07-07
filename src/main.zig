@@ -284,6 +284,12 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try writer.print("NonNullExpression #{} expression=#{} {}..{}\n", .{ node_id, nonnull.expression, node.span.start, node.span.end });
             try printAstNode(writer, tree, nonnull.expression, depth + 1);
         },
+        .AsExpression => |as_expr| {
+            try writer.print("AsExpression #{} expr=#{} type={s} {}..{}\n", .{
+                node_id, as_expr.expression, as_expr.type_annotation.name,
+                node.span.start, node.span.end,
+            });
+        },
         .MemberExpression => |member| {
             try writer.print("MemberExpression #{} object=#{} property=\"{s}\" {}..{}\n", .{ node_id, member.object, member.property, node.span.start, node.span.end });
             try printAstNode(writer, tree, member.object, depth + 1);
@@ -974,6 +980,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .CallExpression => return "CallExpression",
         .ElementAccessExpression => return "ElementAccessExpression",
         .NonNullExpression => return "NonNullExpression",
+        .AsExpression => return "AsExpression",
         .MemberExpression => return "MemberExpression",
         .BinaryExpression => return "BinaryExpression",
         .UpdateExpression => return "UpdateExpression",
