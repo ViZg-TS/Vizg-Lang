@@ -135,12 +135,18 @@ pub fn main(init: std.process.Init) !void {
         .references, .refs => try printReferences(stdout, result.source.path, result.bind, result.resolve, result.diagnostics),
         .cfg => try printCfg(stdout, result.ast, result.cfgs),
         .types => {
-            const info = semantics.analyze(arena, text) catch |err| {
+            const info = semantics.analyzeFrontendResult(arena, result) catch |err| {
                 try stderr.print("{s}: types error: {s}\n", .{path, @errorName(err)});
-                return;
+                std.process.exit(1);
             };
             const bind_sym = result.bind.symbols;
-            try printTypes(stdout, path, info, bind_sym);
+            try printTypes(stdout, path, info, bind_sym, result.ast);
+
+            // Exit non-zero when semantic/type diagnostics contain errors.
+            if (hasErrors(info.diagnostics)) {
+                try stdout.flush();
+                std.process.exit(1);
+            }
         },
         .modules => unreachable, // handled earlier with early return
         .help => unreachable,
@@ -872,9 +878,11 @@ fn printTypes(
     path: []const u8,
     info: semantics.TypeInfo,
     bind_symbols: []const binder.Symbol,
+    tree: ast_mod.Ast,
 ) !void {
     try writer.print("Types\n", .{});
 
+    // Symbols — declared / inferred types per symbol.
     for (info.symbols, 0..) |sym, i| {
         const name = symbolNameFromSlice(bind_symbols, sym.symbol_id);
         const decl_str = if (sym.declared_type) |t| builtinNameFromId(t) else "null";
@@ -886,13 +894,56 @@ fn printTypes(
         );
     }
 
-
+    // Node types — inferred primitive type per literal/keyword node.
+    try writer.print("\nNodes\n", .{});
+    if (info.nodes.len == 0) {
+        try writer.writeAll("  none\n");
+    } else {
+        for (info.nodes, 0..) |entry, i| {
+            _ = i; // node_id field is the primary key.
+            const kind_name = nodeKindName(tree, entry.node_id);
+            const type_str = builtinNameFromId(entry.type_id);
+            try writer.print("  node {d} {s} type={s}\n", .{
+                entry.node_id, kind_name, type_str,
+            });
+        }
+    }
 
     if (info.diagnostics.len > 0) {
         try writer.writeAll("\nDiagnostics\n");
         try printDiagnostics(writer, path, info.diagnostics);
     } else {
         try writer.writeAll("\nDiagnostics\n  none\n");
+    }
+}
+
+/// Return the AST variant tag name for a node — used to label each inferred
+/// literal/keyword in the CLI output (e.g. "Literal", "Identifier"). Stored as
+/// an owned slice in the TypeInfo would require allocator plumbing; the cheaper
+/// path is computing it on demand from the tree, which `printTypes` already
+/// receives alongside the TypeInfo for exactly this purpose.
+fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
+    if (id >= tree.nodes.len) return "<unknown>";
+    switch (tree.node(id).data) {
+        .Program => return "Program",
+        .BlockStatement => return "BlockStatement",
+        .ExpressionStatement => return "ExpressionStatement",
+        .Identifier => return "Identifier",
+        .Literal => return "Literal",
+        .VariableDeclaration => return "VariableDeclaration",
+        .VariableDeclarator => return "VariableDeclarator",
+        .FunctionDeclaration => return "FunctionDeclaration",
+        .Parameter => return "Parameter",
+        .ReturnStatement => return "ReturnStatement",
+        .CallExpression => return "CallExpression",
+        .MemberExpression => return "MemberExpression",
+        .BinaryExpression => return "BinaryExpression",
+        .AssignmentExpression => return "AssignmentExpression",
+        .IfStatement => return "IfStatement",
+        .WhileStatement => return "WhileStatement",
+        .ForStatement => return "ForStatement",
+        .ImportDeclaration => return "ImportDeclaration",
+        .ExportDeclaration => return "ExportDeclaration",
     }
 }
 
