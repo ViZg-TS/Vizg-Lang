@@ -735,12 +735,14 @@ test "printModules emits deterministic shape with module ids and status labels" 
     };
 
     const diags: []const diagnostics.Diagnostic = &.{};
+    const empty_linked_imports: []const modules.linker.LinkedImport = &.{};
 
     const graph = modules.ModuleGraph{
         .arena = arena,
         .entry = 0,
         .modules = mods[0..],
         .imports = edges[0..],
+        .linked_imports = empty_linked_imports,
         .diagnostics = diags,
     };
 
@@ -762,5 +764,135 @@ test "printModules emits deterministic shape with module ids and status labels" 
 
     // Diagnostics section still present.
     try std.testing.expect(std.mem.indexOf(u8, out, "\nDiagnostics\n") != null);
+}
+
+test "linked_imports: named import links to target symbol" {
+    const path = "./test/frontend/modules/manual/main.ts";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    const graph = modules.build(allocator, io, path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null) catch |err| {
+        std.log.err("build failed: {s}", .{@errorName(err)});
+        return error.TestFail;
+    };
+
+    // Graph must contain at least one linked import (from the named "./a" import).
+    try std.testing.expect(graph.linked_imports.len > 0);
+
+    const named = graph.linked_imports[0];
+    try std.testing.expect(named.kind == .named);
+
+    // Edge specifier for this link must be the local module path.
+    var edge_found: bool = false;
+    for (graph.imports) |e| {
+        if (e.id == named.import_edge) {
+            try std.testing.expectEqualStrings("./a", e.specifier);
+            edge_found = true;
+            break;
+        }
+    }
+    try std.testing.expect(edge_found);
+
+    // Local name is 'x' (no alias in `import { x } from "./a"`).
+    try std.testing.expectEqualStrings("x", named.local_name);
+    try std.testing.expectEqualStrings("x", named.imported_name);
+
+    // Target module must be the file exporting `x`.
+    const target = graph.modules[named.target_module.?];
+    try std.testing.expect(std.mem.endsWith(u8, target.path, "/a.ts"));
+}
+
+test "linked_imports: aliased import links to exported target symbol" {
+    const path = "./test/frontend/modules/manual/aliased_main.ts";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    const graph = modules.build(allocator, io, path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null) catch |err| {
+        std.log.err("build failed: {s}", .{@errorName(err)});
+        return error.TestFail;
+    };
+
+    try std.testing.expect(graph.linked_imports.len > 0);
+
+    // The only specifier from the aliased import is the one we care about.
+    const aliased = graph.linked_imports[0];
+    try std.testing.expectEqualStrings("localSrc", aliased.local_name);
+    try std.testing.expectEqualStrings("source", aliased.imported_name);
+
+    // Target module should be ./aliased_target which exports `source`.
+    const target = graph.modules[aliased.target_module.?];
+    try std.testing.expect(std.mem.endsWith(u8, target.path, "/aliased_target.ts"));
+}
+
+test "linked_imports: external import has kind=external and no target" {
+    // success.ts imports from both a local "./dep" (exporting `value`) and the
+    // external "node:fs". We pick the link whose imported_name matches an external.
+    const path = "./test/frontend/modules/manual/success.ts";
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    const graph = modules.build(allocator, io, path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null) catch |err| {
+        std.log.err("build failed: {s}", .{@errorName(err)});
+        return error.TestFail;
+    };
+
+    var found_external: ?usize = null;
+    for (graph.linked_imports, 0..) |link, i| {
+        if (std.mem.eql(u8, link.imported_name, "readFile")) found_external = @intCast(i);
+    }
+    try std.testing.expect(found_external != null);
+
+    const ext = graph.linked_imports[found_external.?];
+    try std.testing.expect(ext.kind == .external);
+    try std.testing.expect(ext.target_module == null);
+    try std.testing.expect(ext.target_symbol == null);
+}
+
+test "linked_imports: missing export remains unresolved and VZG5002 is emitted" {
+    const path = "./test/frontend/modules/manual/missing-export.ts";  // imports `missing` from dep, which only exports `value`
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    const graph = modules.build(allocator, io, path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null) catch |err| {
+        std.log.err("build failed: {s}", .{@errorName(err)});
+        return error.TestFail;
+    };
+
+    try std.testing.expect(graph.linked_imports.len > 0);
+    const unres = graph.linked_imports[0];
+    try std.testing.expect(unres.kind == .unresolved);
+    try std.testing.expectEqualStrings("missing", unres.imported_name);
+    try std.testing.expect(unres.target_symbol == null);
+
+    // VZG5002 missing_export should exist in diagnostics.
+    var found_vzg5002 = false;
+    for (graph.diagnostics) |diag| {
+        if (diag.code == .missing_export) found_vzg5002 = true;
+    }
+    try std.testing.expect(found_vzg5002);
 }
 

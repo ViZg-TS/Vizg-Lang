@@ -10,6 +10,9 @@ const module_resolver = @import("resolver.zig");
 const tokens = @import("../frontend/tokens.zig");
 const externals_mod = @import("externals.zig");
 
+const binder = @import("../frontend/binder.zig");
+const linker = @import("linker.zig");
+
 pub const ModuleId = u32;
 pub const ImportEdgeId = u32;
 
@@ -48,6 +51,7 @@ pub const ModuleGraph = struct {
     entry: ModuleId,
     modules: []const Module,
     imports: []const ImportEdge,
+    linked_imports: []const linker.LinkedImport,
     diagnostics: []const diagnostics.Diagnostic,
 
     pub fn deinit(self: *ModuleGraph) void {
@@ -256,6 +260,117 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
         return null;
     }
 
+    /// Iterate every module's imports and produce `LinkedImport` records for the
+    /// graph. The graph is fully analyzed at this point — every edge carries its
+    /// final status / target resolution, so we can route external vs missing vs
+    /// local branches safely. Arena-owned slice returned to the caller.
+    fn buildLinkedImports(self: *Builder) ![]const linker.LinkedImport {
+        var items: std.ArrayListUnmanaged(linker.LinkedImport) = .empty;
+        errdefer { items.deinit(self.allocator); }
+        std.log.warn("buildLinkedImports: modules={d} imports={d}", .{ self.modules.items.len, self.imports.items.len });
+
+        for (self.modules.items) |m| {
+            const mod_id: ModuleId = m.id;
+            for (m.result.ast.nodes) |node| {
+                if (node.data != .ImportDeclaration) continue;
+                const decl = node.data.ImportDeclaration;
+                if (decl.source.len == 0) continue;
+
+                // Locate the edge representing this declaration's specifier.
+                const e_idx: ?usize = findEdgeForSourceIdx(self.imports.items, mod_id, decl.source);
+                if (e_idx == null) continue;
+                const edge = self.imports.items[e_idx.?];
+
+
+                switch (edge.status) {
+                    .external => {
+                        for (decl.specifiers) |spec| {
+                            const id_after: u32 = @intCast(items.items.len);
+                            std.log.warn("      appened item local, now len={}", .{items.items.len});
+                            try items.append(self.allocator, .{
+                                .id = id_after,
+                                .from_module = mod_id,
+                                .import_edge = edge.id,
+                                .import_symbol = findLocalImportSymbolId(m.result.bind.symbols, spec.local_name),
+                                .local_name = spec.local_name,
+                                .imported_name = spec.imported_name,
+                                .target_module = null,
+                                .target_symbol = null,
+                                .kind = .external,
+                                .span = spec.local_span,
+                            });
+                        }
+                    },
+                    .missing => {
+                        for (decl.specifiers) |spec| {
+                            const id_after: u32 = @intCast(items.items.len);
+                            std.log.warn("      appened item local, now len={}", .{items.items.len});
+                            try items.append(self.allocator, .{
+                                .id = id_after,
+                                .from_module = mod_id,
+                                .import_edge = edge.id,
+                                .import_symbol = findLocalImportSymbolId(m.result.bind.symbols, spec.local_name),
+                                .local_name = spec.local_name,
+                                .imported_name = spec.imported_name,
+                                .target_module = null,
+                                .target_symbol = null,
+                                .kind = .unresolved,
+                                .span = spec.local_span,
+                            });
+                        }
+                    },
+                    .local => {
+                        const target_mod: Module = blk_target_loop: for (self.modules.items) |mod| {
+                            if (edge.to.? == mod.id) break :blk_target_loop mod;
+                        } else continue;
+                        std.log.warn("    got target_mod id={} display={s}", .{target_mod.id, target_mod.display_path});
+                        for (decl.specifiers) |spec| {
+                            const sym = findExportedSymbol(target_mod, spec.imported_name);
+                            const id_after: u32 = @intCast(items.items.len);
+                            std.log.warn("      appened item local, now len={}", .{items.items.len});
+                            try items.append(self.allocator, .{
+                                .id = id_after,
+                                .from_module = mod_id,
+                                .import_edge = edge.id,
+                                .import_symbol = findLocalImportSymbolId(m.result.bind.symbols, spec.local_name),
+                                .local_name = spec.local_name,
+                                .imported_name = spec.imported_name,
+                                .target_module = target_mod.id,
+                                .target_symbol = sym,
+                                .kind = if (sym) |_| .named else .unresolved,
+                                .span = spec.local_span,
+                            });
+                        }
+                    },
+                }
+            }
+        }
+
+        std.log.warn("buildLinkedImports done: returned {} records", .{items.items.len});
+        return items.toOwnedSlice(self.allocator);
+    }
+
+    /// Locate the binder symbol for `imported_name` in `target`. The target module must have a
+    /// non-empty binder — that's guaranteed here because we only reach this code for resolved
+    /// (`.local`) import edges where the source file has been analyzed.
+    fn findExportedSymbol(target: Module, imported_name: []const u8) ?binder.SymbolId {
+        return findLocalImportSymbolId(target.result.bind.symbols, imported_name);
+    }
+
+    fn findEdgeForSourceIdx(edges: []const ImportEdge, from: ModuleId, specifier: []const u8) ?usize {
+        for (edges, 0..) |edge, i| {
+            if (edge.from == from and std.mem.eql(u8, edge.specifier, specifier)) return @intCast(i);
+        }
+        return null;
+    }
+
+    fn findLocalImportSymbolId(symbols: []const binder.Symbol, local_name: []const u8) ?binder.SymbolId {
+        for (symbols) |sym| {
+            if (std.mem.eql(u8, sym.name, local_name)) return sym.id;
+        }
+        return null;
+    }
+
 };
 
 /// `externals` is an optional pointer to an externally-managed registry of non-relative specifiers.
@@ -275,6 +390,7 @@ pub fn build(allocator: std.mem.Allocator, io: Io, entry_path: []const u8, optio
 
     _ = builder.analyzeModule(entry_path, entry_path) catch {};
 
+    const linked_imports: []const linker.LinkedImport = try builder.buildLinkedImports();
     const modules: []const Module = try builder.modules.toOwnedSlice(graph_allocator);
     const imports: []const ImportEdge = try builder.imports.toOwnedSlice(graph_allocator);
     const diags: []const diagnostics.Diagnostic = try builder.diagnostics_list.toOwnedSlice(graph_allocator);
@@ -284,6 +400,7 @@ pub fn build(allocator: std.mem.Allocator, io: Io, entry_path: []const u8, optio
         .entry = 0,
         .modules = modules,
         .imports = imports,
+        .linked_imports = linked_imports,
         .diagnostics = diags,
     };
 }
@@ -397,5 +514,164 @@ test "ImportEdgeId is a u32 alias" {
     // The annotation above would not compile if `ImportEdgeId` were not a
     // 32-bit unsigned integer type, so the body here just confirms round-trip.
     try std.testing.expectEqual(@as(u32, 42), @as(u32, @bitCast(id)));
+}
+
+
+
+// ---------------------------------------------------------------------------
+// LinkedImport integration tests — exercise `build()` end-to-end and assert on
+// the linked_imports slice produced by buildLinkedImports. Tests read fixture
+// TS files from test/frontend/modules/manual/ (on-disk) so they cover loader,
+// resolver, graph construction AND linker behavior together.
+// ---------------------------------------------------------------------------
+
+// Helper uses the file-scope `Io` alias defined at line 2 of graph.zig so
+// test helpers can ask for a real-path project root without re-importing std.
+fn projectRoot(allocator: std.mem.Allocator) ![:0]u8 {
+    var buf: [4096]u8 = undefined;
+    const n = @import("std").os.linux.readlink("/proc/self/cwd", &buf, buf.len);
+    if (n >= buf.len) return error.PathTooLong;
+    buf[n] = 0;
+    return allocator.dupeZ(u8, buf[0..n]);
+}
+
+test "ModuleGraph builds LinkedImport for named import → target symbol" {
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const entry_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/test/frontend/modules/manual/main.ts", .{cwd});
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const graph_allocator = arena.allocator();
+
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+    var graph = build(graph_allocator, io, entry_path, .{}, null) catch unreachable;
+    defer graph.deinit();
+
+    // main.ts imports: { x } from "./a"  +  { log } from "console".
+    // Expected: one named local import (status=.local), one external edge.
+    try std.testing.expectEqual(@as(usize, 2), graph.linked_imports.len);
+
+    var saw_named_x = false;
+    for (graph.linked_imports) |link| {
+        if (!std.mem.eql(u8, link.local_name, "x")) continue;
+        try std.testing.expectEqual(.named, link.kind);
+        try std.testing.expect(link.target_module != null);
+        const target_mod = graph.modules[@intCast(link.target_module.?)];
+
+        // Target module must be the resolved "./a". The canonical path is a
+        // realpath (via resolver.canonicalize), so display_path ends with /a.ts.
+        try std.testing.expect(std.mem.endsWith(u8, target_mod.display_path, "a.ts"));
+
+        // The import_symbol in source is the binder-bound local `x`. Target
+        // symbol must be a valid id (exported `const x` exists in target).
+        try std.testing.expect(link.import_symbol != null);
+        try std.testing.expect(link.target_symbol != null);
+        saw_named_x = true;
+    }
+    try std.testing.expect(saw_named_x); // expected one named LinkedImport for local_name="x"
+}
+
+test "ModuleGraph builds LinkedImport for aliased import with correct names" {
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const entry_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/test/frontend/modules/manual/aliased_main.ts", .{cwd});
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const graph_allocator = arena.allocator();
+
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+    var graph = build(graph_allocator, io, entry_path, .{}, null) catch unreachable;
+    defer graph.deinit();
+
+    // aliased_main.ts has ONE import: { source as localSrc } from "./aliased_target".
+    try std.testing.expectEqual(@as(usize, 1), graph.linked_imports.len);
+
+    const link = graph.linked_imports[0];
+    try std.testing.expect(std.mem.eql(u8, "localSrc", link.local_name));
+    try std.testing.expect(std.mem.eql(u8, "source", link.imported_name));
+    try std.testing.expectEqual(.named, link.kind);
+    try std.testing.expect(link.target_module != null);
+
+    const target_mod = graph.modules[@intCast(link.target_module.?)];
+    try std.testing.expect(std.mem.endsWith(u8, target_mod.display_path, "aliased_target.ts"));
+
+    // Target symbol must resolve — aliased_target exports `source`.
+    try std.testing.expect(link.target_symbol != null);
+}
+
+test "ModuleGraph emits external LinkedImport for unrecognized specifier" {
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    // Same main.ts as Test 1 — it has both a named import AND an external. Here we focus on the external side of the build().
+    const entry_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/test/frontend/modules/manual/main.ts", .{cwd});
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const graph_allocator = arena.allocator();
+
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+    var graph = build(graph_allocator, io, entry_path, .{}, null) catch unreachable;
+    defer graph.deinit();
+
+    var saw_external_log = false;
+    for (graph.linked_imports) |link| {
+        if (!std.mem.eql(u8, link.local_name, "log")) continue;
+        try std.testing.expectEqual(.external, link.kind);
+        try std.testing.expect(link.target_module == null);
+        try std.testing.expect(link.target_symbol == null);
+        saw_external_log = true;
+    }
+    try std.testing.expect(saw_external_log); // expected external LinkedImport for log from console
+}
+
+test "ModuleGraph emits unresolved linked import alongside VZG5002 on missing export" {
+    // imports_missing_export.ts:  import { notThere } from "./missing_export_target";
+    //   missing_export_target.ts exports only `x`. Expected per the task: an
+    //   existing VZG5002 diagnostic remains AND the linker records a kind=.unresolved
+    //   LinkedImport whose target_symbol is null. (No new diagnostics are emitted.)
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const entry_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/test/frontend/modules/manual/imports_missing_export.ts", .{cwd});
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const graph_allocator = arena.allocator();
+
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+    var graph = build(graph_allocator, io, entry_path, .{}, null) catch unreachable;
+    defer graph.deinit();
+
+    // Diagnostic gate — must remain as before this task landed (no regress).
+    var saw_vzg5002: ?bool = null;
+    for (graph.diagnostics) |d| {
+        if (std.mem.eql(u8, @tagName(d.code), "missing_export")) {
+            saw_vzg5002 = true;
+        }
+    }
+    try std.testing.expect(saw_vzg5002 == true);
+
+    // Link gate — an unresolved record exists for the missing export. The current
+    // buildLinkedImports implementation produces one (kind=.unresolved, target_symbol=null)
+    // whenever a local_name does not match any exported symbol in the target module. The
+    // test asserts that contract so downstream callers can detect broken imports without
+    // re-parsing diagnostics.
+    var saw_unresolved: ?bool = null;
+    for (graph.linked_imports) |link| {
+        if (!std.mem.eql(u8, link.local_name, "notThere")) continue;
+        try std.testing.expectEqual(.unresolved, link.kind);
+        try std.testing.expect(link.target_symbol == null);
+        saw_unresolved = true;
+    }
+    try std.testing.expect(saw_unresolved == true);
 }
 
