@@ -470,7 +470,8 @@ const Parser = struct {
     }
 
     fn parseObjectExpression(self: *Parser) anyerror!NodeId {
-        const start = self.expect(.LBrace, "expected {").span;
+        // The LBrace was already consumed by parsePrimary before dispatching here.
+        const start = self.previous().?.span;
         var properties: std.ArrayList(ast_mod.ObjectProperty) = .empty;
         errdefer properties.deinit(self.allocator);
         while (!self.at(.RBrace) and !self.at(.EOF)) {

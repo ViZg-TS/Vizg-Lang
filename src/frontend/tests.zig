@@ -1555,6 +1555,26 @@ test "frontend suite: scanner reports unterminated template literal" {
     try std.testing.expect(esc.diagnostics.len >= 1);
 }
 
+test "frontend suite: color_art.ts fixture — 0 diagnostics smoke test" {
+    // Fixture exercises: object literal, array literal, template interpolation,
+    // type annotations (let i: number), non-null assertion (!.length, !.j),
+    // 'as any' cast, ambient console.log. Must parse/analyze with 0 errors.
+    const fixture = @embedFile("../../test/frontend/realworld/color_art.ts");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try frontend.analyze(allocator, .{ .path = "color_art.ts", .text = fixture }, .{});
+
+    // Overall combined diagnostics (scanner + parser + binder + resolver) == 0
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    // Resolve phase specifically — catches regressions in the resolver layer.
+    try std.testing.expectEqual(@as(usize, 0), result.resolve.diagnostics.len);
+    // Fixture must produce a module AST with exports (exercise export default).
+    try std.testing.expect(result.bind.module.exports.len > 0);
+}
+
 
 fn symbolByName(bind: binder.BindResult, name: []const u8) ?binder.Symbol {
     for (bind.symbols) |sym| if (std.mem.eql(u8, sym.name, name)) return sym;

@@ -63,5 +63,12 @@ if [ -f "${REPO_ROOT}/${CAPABILITIES}" ]; then
     }
 fi
 
+echo "== vizg check color_art (object literal + template literal regression) ==" >> "${LOG}"
+"${BIN}" check test/frontend/realworld/color_art.ts >> "${LOG}" 2>&1 || { echo "FAIL: vizg check color_art" >> "${LOG}"; exit 1; }
+echo >> "${LOG}"
+
+"${BIN}" ast test/frontend/realworld/color_art.ts >> "${LOG}" 2>&1 || true
+echo >> "${LOG}"
+
 echo "== done ==" >> "${LOG}"
 echo "Log written to: ${LOG}" >&2
