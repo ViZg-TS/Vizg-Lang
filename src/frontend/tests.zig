@@ -1437,6 +1437,89 @@ test "frontend suite: array literals work with mixed element expressions" {
     try expectNodeTag(parsed.ast, arr.elements[0], .BinaryExpression);
 }
 
+
+test "frontend suite: scanner treats opaque template literals as a single token" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Source that previously exploded into $, {, }, and identifier tokens. Uses a backtick-literal
+    // followed by two embedded interpolations (opaque), then a semicolon terminator.
+    const BT = "\x60";  // backtick character via hex escape — avoids heredoc escaping pain.
+    const source: []const u8 = "let line = " ++ BT ++ "${a}${b};" ++ BT;
+
+    const scanned = try scanOk(allocator, source, false);
+
+    // The scanner must accept the whole template without interpolation parsing.
+    try std.testing.expectEqual(@as(usize, 0), scanned.diagnostics.len);
+
+    var saw_template: bool = false;
+    var no_mid: bool = true;
+    for (scanned.tokens) |tok| {
+        if (tok.kind == .NoSubstitutionTemplate) saw_template = true;
+        if (tok.kind == .TemplateMiddle or tok.kind == .TemplateTail) no_mid = false;
+    }
+    try std.testing.expect(saw_template);
+    try std.testing.expect(no_mid);
+
+    // The lexeme must span the entire backtick-delimited region so downstream phases see it as one unit.
+    const template_tok = blk: {
+        for (scanned.tokens) |tok| {
+            if (tok.kind == .NoSubstitutionTemplate) break :blk tok;
+        }
+        unreachable;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, &.{template_tok.lexeme}, "\${") != null);
+
+    // Verify the lexeme starts with backtick and ends with backtick — i.e. the quotes are included.
+    try std.testing.expect(template_tok.lexeme[0] == 0x60);
+    try std.testing.expect(template_tok.lexeme[template_tok.lexeme.len - 1] == 0x60);
+}
+
+test "frontend suite: opaque template literal parses and resolves without diagnostics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `name` inside the template must never become a read reference — it cannot fail resolution.
+    const BT = "\x60";
+    const source: []const u8 = "let s = " ++ BT ++ "hello ${name};" ++ BT;
+
+    const parsed = try parseOk(allocator, source);
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+
+    // The template must NOT appear in the list of resolved references.
+    try std.testing.expectEqual(@as(usize, 0), countReferences(resolved, "name", null));
+
+    // AST shape: one statement whose initializer is a Literal node containing the full backtick span.
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    try std.testing.expectEqual(@as(usize, 1), program.statements.len);
+
+    const var_decl_id = program.statements[0];
+    const declarator = parsed.ast.node(var_decl.declarations[0]).data.VariableDeclarator;
+    try expectNodeTag(parsed.ast, declarator.init.?, .Literal);
+}
+
+test "frontend suite: scanner reports unterminated template literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const BT = "\x60";
+    const scanned = try scanner.scanAll(allocator, BT ++ "unterminated", false);
+    try std.testing.expectEqual(@as(usize, 1), scanned.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.unterminated_string, scanned.diagnostics[0].code);
+
+    // Unterminated backslash inside a template also reports unterminated.
+    const esc = try scanner.scanAll(allocator, BT ++ "escaped\\", false);
+    try std.testing.expect(esc.diagnostics.len >= 1);
+}
+
+
 fn symbolByName(bind: binder.BindResult, name: []const u8) ?binder.Symbol {
     for (bind.symbols) |sym| if (std.mem.eql(u8, sym.name, name)) return sym;
     return null;
