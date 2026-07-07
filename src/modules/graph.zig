@@ -144,8 +144,13 @@ const Builder = struct {
                 .ImportDeclaration => |import_decl| {
                     if (import_decl.source.len == 0) continue;
                     if (!module_resolver.isRelativeSpecifier(import_decl.source)) {
-                        // If the specifier is registered as a known external, record it as such and skip unknown-external logging.
-                        if (self.tryLoadExternalModule(import_decl.source, if (import_decl.source.len > 0) import_decl.source_span else node.span)) continue;
+                        // Register the external with the externals registry so any
+                        // downstream pass can consult it (e.g. future declaration-file
+                        // support). Either way, every non-relative specifier becomes an
+                        // `.external` edge — registered or not — so nothing vanishes from
+                        // the graph when a known-external name is encountered. The call
+                        // below does NOT gate edge creation; it's purely informational.
+                        _ = self.tryLoadExternalModule(import_decl.source, if (import_decl.source.len > 0) import_decl.source_span else node.span);
 try self.imports.append(self.allocator, .{
 .id = @intCast(self.imports.items.len),
                             .from = module_id,
@@ -347,8 +352,11 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
     /// Locate the binder symbol for `imported_name` in `target`. The target module must have a
     /// non-empty binder — that's guaranteed here because we only reach this code for resolved
     /// (`.local`) import edges where the source file has been analyzed.
+    /// Resolve an exported name in `target` through the binder's export records so
+    /// aliased exports (e.g. `export { localName as exportedName }`) link to
+    /// the actual local symbol instead of resolving against the alias itself.
     fn findExportedSymbol(target: Module, imported_name: []const u8) ?binder.SymbolId {
-        return findLocalImportSymbolId(target.result.bind.symbols, imported_name);
+        return linker.findExportedSymbol(&target, imported_name);
     }
 
     fn findEdgeForSourceIdx(edges: []const ImportEdge, from: ModuleId, specifier: []const u8) ?usize {
@@ -382,16 +390,17 @@ pub fn build(allocator: std.mem.Allocator, io: Io, entry_path: []const u8, optio
         .externals = externals,
     };
 
-    _ = builder.analyzeModule(entry_path, entry_path) catch {};
+    const entry_id: ModuleId = try builder.analyzeModule(entry_path, entry_path);
 
     const linked_imports: []const linker.LinkedImport = try builder.buildLinkedImports();
     const modules: []const Module = try builder.modules.toOwnedSlice(graph_allocator);
     const imports: []const ImportEdge = try builder.imports.toOwnedSlice(graph_allocator);
     const diags: []const diagnostics.Diagnostic = try builder.diagnostics_list.toOwnedSlice(graph_allocator);
 
+    const entry: ModuleId = if (modules.len > 0) entry_id else 0;
     return .{
         .arena = arena,
-        .entry = 0,
+        .entry = entry,
         .modules = modules,
         .imports = imports,
         .linked_imports = linked_imports,
@@ -696,15 +705,14 @@ test "ModuleGraph emits unresolved linked import alongside VZG5002 on missing ex
 //   - diagnostic absence / presence for negative cases
 // ---------------------------------------------------------------------------
 
-test "Case C: aliased-export — graph builds, no diagnostics, local link unresolved" {
+test "Case C: aliased-export — graph builds, alias link resolves to local symbol" {
     // Fixture: main.ts imports `exportedName` from "./target"; target.ts does
     //   `const localName = "dev"; export { localName as exportedName };`.
     //
-    // Current linker behaviour: the linked import resolves to a .local edge in
-    // an existing module, but because buildLinkedImports matches by raw name it
-    // records the link as unresolved (target_symbol=null) since `exportedName`
-    // is not itself exported — only the alias. This test documents the current
-    // contract so callers can rely on it and a later pass can extend linking.
+    // Expected (post-fix): the linked import resolves through binder.export records so
+    // kind == .named and target_symbol points at the actual local symbol for
+    // `localName`. The binder exports list is authoritative, so aliased names
+    // are no longer treated as missing.
     const cwd = try projectRoot(std.testing.allocator);
     defer std.testing.allocator.free(cwd);
 
@@ -736,21 +744,42 @@ test "Case C: aliased-export — graph builds, no diagnostics, local link unreso
     var saw_link: ?bool = null;
     for (graph.linked_imports) |link| {
         if (!std.mem.eql(u8, link.local_name, "exportedName")) continue;
-        // Current linker marks the link kind=.unresolved because  is
-        // only available via an aliased re-export in target.ts — not as a direct
-        // exported name. The edge status itself remains .local since the file
-        // was found.
-        try std.testing.expectEqual(.unresolved, link.kind);
-        try std.testing.expect(link.target_module != null); // target module was found
-        const mod = graph.modules[@intCast(link.target_module.?)];
-        try std.testing.expect(std.mem.endsWith(u8, mod.display_path, "target.ts"));
+
+        // Link kind must be named — the alias resolves through binder.export records.
+        try std.testing.expectEqual(.named, link.kind);
+
+        try std.testing.expect(link.target_module != null);
+        const target_mod = graph.modules[@intCast(link.target_module.?)];
+        try std.testing.expect(std.mem.endsWith(u8, target_mod.display_path, "target.ts"));
+
+        // Target symbol must resolve to the actual local name in target.ts.
+        try std.testing.expect(link.target_symbol != null);
+
+        // Locate the symbol entry for the bound id and verify its verbatim name is
+        // `localName`, not the alias `exportedName`.
+        const sym_id = link.target_symbol.?;
+        var found_sym: ?bool = null;
+        for (target_mod.result.bind.symbols) |sym| {
+            if (sym.id == sym_id) {
+                try std.testing.expect(std.mem.eql(u8, sym.name, "localName"));
+                found_sym = true;
+                break;
+            }
+        }
+        try std.testing.expect(found_sym == true);
+
         saw_link = true;
     }
     try std.testing.expect(saw_link == true);
 
-    // No diagnostics emitted for this fixture — the current linker doesn't yet
-    // produce a VZG5002 when the source is an aliased re-export. Documented as a
-    // known limitation, not asserted here.
+    // VZG5002 (missing_export) must NOT be emitted — the alias resolves cleanly.
+    var found_vzg5002: bool = false;
+    for (graph.diagnostics) |d| {
+        if (std.mem.eql(u8, @tagName(d.code), "missing_export")) {
+            found_vzg5002 = true;
+        }
+    }
+    try std.testing.expect(!found_vzg5002);
 }
 
 test "Case E: missing-module — no crash, edge marked .missing, graph inspectable" {
@@ -859,4 +888,216 @@ test "Case G: duplicate-canonical-imports — two specifiers reuse same target m
 
     // No diagnostics emitted — duplicates are silently de-duplicated by the
     // canonical resolver.
+}
+// ---------------------------------------------------------------------------
+// External-import edge coverage — registered and unregistered externals must
+// still produce import edges / LinkedImports so downstream callers can observe
+// them. Regression gate for the case where a known-external name caused the
+// graph builder to skip edge creation entirely (registered external would then
+// vanish from the graph).
+
+test "External: unregistered non-relative specifier produces external edge and link" {
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const entry_path = try std.fmt.allocPrint(
+        std.testing.allocator, "{s}/test/modules/linking/external/main.ts", .{cwd},
+    );
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+    // externals=null: nothing is registered, so "console" lands in the default
+    // external-import path (non-relative specifier -> status=.external). The fix
+    // under test here is that non-relative specifiers keep producing edges even
+    // without registry membership.
+    var graph = build(arena.allocator(), io, entry_path, .{}, null) catch unreachable;
+    defer graph.deinit();
+
+    // Exactly one import edge (import { log } from "console") with status=.external.
+    var saw_external_edge: ?bool = null;
+    for (graph.imports) |e| {
+        if (!std.mem.eql(u8, e.specifier, "console")) continue;
+        try std.testing.expectEqual(.external, e.status);
+        try std.testing.expect(e.to == null);
+        saw_external_edge = true;
+    }
+    try std.testing.expect(saw_external_edge == true);
+
+    // Linked-import record must also exist for the specifier so callers see the
+    // import regardless of registry membership. Kind is `.external` and both
+    // target pointers stay null (no declaration file loaded in this test).
+    var saw_external_link: ?bool = null;
+    for (graph.linked_imports) |link| {
+        if (!std.mem.eql(u8, link.imported_name, "log")) continue;
+        try std.testing.expectEqual(.external, link.kind);
+        try std.testing.expect(link.target_module == null);
+        try std.testing.expect(link.target_symbol == null);
+        saw_external_link = true;
+    }
+    try std.testing.expect(saw_external_link == true);
+
+    // No false diagnostics about a missing module or missing export.
+    for (graph.diagnostics) |d| {
+        const tag = @tagName(d.code);
+        try std.testing.expect(!std.mem.eql(u8, tag, "module_not_found"));
+        try std.testing.expect(!std.mem.eql(u8, tag, "missing_export"));
+    }
+}
+
+test "External: registered non-relative specifier produces external edge and link" {
+    // Drive the EXACT same fixture as the unregistered case, but now register
+    // `console` in the externals registry before calling build(). Regression
+    // target: when `tryLoadExternalModule(...)` returned true the previous code
+    // did `continue;` BEFORE emitting the edge, so registered externals vanished.
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const entry_path = try std.fmt.allocPrint(
+        std.testing.allocator, "{s}/test/modules/linking/external/main.ts", .{cwd},
+    );
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Externals registry with `console` registered. The registry is owned by the
+    // test arena so its lifetime ends with the test; we must hand a stable pointer
+    // to build() before deinit runs.
+    var externals = externals_mod.Registry.init();
+    externals.add(std.testing.allocator, "console", null);
+
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+    const graph = build(arena.allocator(), io, entry_path, .{}, &externals) catch unreachable;
+    defer externals.deinit(std.testing.allocator);
+
+    // Identical structural assertions to the unregistered case — both paths must
+    // produce a stable external edge + LinkedImport regardless of registry state.
+    var saw_external_edge: ?bool = null;
+    for (graph.imports) |e| {
+        if (!std.mem.eql(u8, e.specifier, "console")) continue;
+        try std.testing.expectEqual(.external, e.status);
+        try std.testing.expect(e.to == null);
+        saw_external_edge = true;
+    }
+    try std.testing.expect(saw_external_edge == true);
+
+    var saw_external_link: ?bool = null;
+    for (graph.linked_imports) |link| {
+        if (!std.mem.eql(u8, link.imported_name, "log")) continue;
+        try std.testing.expectEqual(.external, link.kind);
+        try std.testing.expect(link.target_module == null);
+        try std.testing.expect(link.target_symbol == null);
+        saw_external_link = true;
+    }
+    try std.testing.expect(saw_external_link == true);
+
+    // No false diagnostics for a known-external specifier.
+    for (graph.diagnostics) |d| {
+        const tag = @tagName(d.code);
+        try std.testing.expect(!std.mem.eql(u8, tag, "module_not_found"));
+        try std.testing.expect(!std.mem.eql(u8, tag, "missing_export"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry-failure contract — regression guard for Goal 06. Two cases to cover:
+//   (A) Missing entry file must abort graph build entirely so no invalid
+//       ModuleGraph leaks through. This matches the preferred contract in the
+//       goal: "missing entry file -> modules.build returns an error". The CLI
+//       already catches this with `module graph error: <err>` and exits non-zero,
+//       so downstream callers never see a graph with .entry == 0 and zero modules.
+//   (B) Missing imported module must NOT abort build — it becomes VZG5001 inside
+//       an otherwise valid graph. This keeps the "diagnose the graph, not crash"
+//       property for partial failures.
+// ---------------------------------------------------------------------------
+
+test "Entry contract: missing entry path returns FileNotFound, no graph leaked" {
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+
+    // Absolute path that definitely does not exist on any machine. Picking an
+    // unusual prefix keeps the test hermetic — it will never collide with a real
+    // file at runtime, so the FileNotFound error is deterministic.
+    const absent = "/does/not/exist/vizg_test_entry_placeholder_404d1e7c.ts";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // build() must propagate the underlying IO error; callers should never see a
+    // graph with .entry == 0 and zero modules — that is precisely the invalid
+    // shape this test gates against (Goal 06 acceptance criterion).
+    if (build(arena.allocator(), io, absent, .{}, null)) |_| {
+        try std.testing.expect(false);
+    } else |_| {}
+
+    // Sanity gate: confirm the captured error name is FileNotFound so we know
+    // exactly which IO failure surfaced (and a permission-denied variant would
+    // not falsely pass this assertion). Reuse the same arena — build returns on
+    // the first file read attempt, before it consumes additional memory.
+    var seen_file_not_found = false;
+    _ = build(arena.allocator(), io, absent, .{}, null) catch |err| {
+        if (std.mem.eql(u8, @errorName(err), "FileNotFound")) seen_file_not_found = true;
+    };
+    try std.testing.expect(seen_file_not_found);
+}
+
+test "Entry contract: missing imported module still builds graph with VZG5001" {
+    // Re-use the existing fixture under test/modules/linking/missing-module which
+    // imports a non-existent "./missing". The goal requires this path to yield
+    // (a) an edge with status=missing, and (b) exactly one VZG5001 diagnostic —
+    // the graph itself must remain valid. This is the alternative contract from
+    // Goal 06 ("graph.entry is optional/null and graph has VZG5001"), exercised
+    // on a missing IMPORTED module rather than the entry, which is the path that
+    // must continue to produce an inspectable graph per the goal wording.
+    const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
+
+    const cwd = try projectRoot(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const entry_path = try std.fmt.allocPrint(
+        std.testing.allocator, "{s}/test/modules/linking/missing-module/main.ts", .{cwd},
+    );
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // build() must succeed — failure here would mean we are re-aggregating the
+    // entry-only regression (Goal 06) onto a negative-import path that should
+    // stay valid per the alternative contract in the goal doc.
+    var graph = build(arena.allocator(), io, entry_path, .{}, null) catch unreachable;
+    defer graph.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), graph.modules.len); // only main loaded
+    try std.testing.expect(graph.modules[0].id == graph.entry);   // valid graph shape — entry points at a real module
+
+    var saw_missing_edge: ?bool = null;
+    for (graph.imports) |e| {
+        if (e.status != .missing) continue;
+        try std.testing.expect(saw_missing_edge == null);
+        try std.testing.expect(std.mem.eql(u8, e.specifier, "./missing"));
+        saw_missing_edge = true;
+    }
+    try std.testing.expect(saw_missing_edge == true);
+
+    // Exactly one VZG5001 diagnostic — the missing ./missing specifier. The goal
+    // requires this structured diagnostic to appear inside a valid graph for any
+    // non-entry module lookup failure, so we assert both presence and stability.
+    var seen_vzg5001 = false;
+    for (graph.diagnostics) |d| {
+        if (std.mem.eql(u8, @tagName(d.code), "module_not_found")) {
+            try std.testing.expectEqual(.module_graph, d.phase);
+            seen_vzg5001 = true;
+        }
+    }
+    try std.testing.expect(seen_vzg5001);
+
+    // Negative gate: a missing-import case must NOT also surface a `missing_export`
+    // diagnostic — that phase fires only after a target module resolves. Absence
+    // of one confirms the edge short-circuited correctly on the load path.
+    for (graph.diagnostics) |d| {
+        try std.testing.expect(!std.mem.eql(u8, @tagName(d.code), "missing_export"));
+    }
 }

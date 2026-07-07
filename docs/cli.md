@@ -223,6 +223,15 @@ The resolver tries the exact specifier when it already ends in `.ts`, then `spec
 
 Cross-file import linking is performed by `src/modules/linker.zig` on top of the graph. Each static named/default/namespace import resolves to an exported symbol in a local module when available; external imports stay unresolved.
 
+External declarations (optional):
+
+The CLI accepts two flags for registering externals — API contracts only, never executed or bundled:
+
+```txt
+vizg modules <file> --add-external "name=path"
+vizg modules <file> --externals-dir ./externals
+```
+
 Example:
 
 ```sh

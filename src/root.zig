@@ -26,5 +26,7 @@ test {
     _ = @import("modules/loader.zig");
     _ = @import("modules/resolver.zig");
     _ = @import("modules/root.zig");
+    _ = @import("modules/tests.zig");
+    _ = @import("modules/contracts_test.zig");
     _ = frontend;
 }
