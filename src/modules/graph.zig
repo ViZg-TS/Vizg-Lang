@@ -11,6 +11,7 @@ const tokens = @import("../frontend/tokens.zig");
 const externals_mod = @import("externals.zig");
 
 pub const ModuleId = u32;
+pub const ImportEdgeId = u32;
 
 pub const ImportStatus = enum {
     local,
@@ -34,6 +35,7 @@ pub const Module = struct {
 };
 
 pub const ImportEdge = struct {
+    id: ImportEdgeId,
     from: ModuleId,
     to: ?ModuleId,
     specifier: []const u8,
@@ -140,7 +142,8 @@ const Builder = struct {
                     if (!module_resolver.isRelativeSpecifier(import_decl.source)) {
                         // If the specifier is registered as a known external, record it as such and skip unknown-external logging.
                         if (self.tryLoadExternalModule(import_decl.source, if (import_decl.source.len > 0) import_decl.source_span else node.span)) continue;
-                        try self.imports.append(self.allocator, .{
+try self.imports.append(self.allocator, .{
+.id = @intCast(self.imports.items.len),
                             .from = module_id,
                             .to = null,
                             .specifier = import_decl.source,
@@ -152,7 +155,8 @@ const Builder = struct {
 
                     const resolved = try self.resolver.resolveRelative(module.path, import_decl.source);
                     if (resolved == null) {
-                        try self.imports.append(self.allocator, .{
+try self.imports.append(self.allocator, .{
+.id = @intCast(self.imports.items.len),
                             .from = module_id,
                             .to = null,
                             .specifier = import_decl.source,
@@ -176,7 +180,8 @@ const Builder = struct {
                         break :target try self.analyzeModule(target_path, target_path);
                     };
 
-                    try self.imports.append(self.allocator, .{
+try self.imports.append(self.allocator, .{
+.id = @intCast(self.imports.items.len),
                         .from = module_id,
                         .to = target_id,
                         .specifier = import_decl.source,
@@ -361,3 +366,36 @@ test "VZG5003 circular_import diagnostic shape" {
     try std.testing.expectEqual(diagnostics.DiagnosticCode.circular_import, .circular_import);
     try std.testing.expect(std.mem.indexOf(u8, d.message, "./cycle_a") != null or std.mem.indexOf(u8, d.message, "import detected through") != null);
 }
+
+
+test "ImportEdge accepts an id field" {
+    const edge = ImportEdge{
+        .id = @as(ImportEdgeId, 0),
+        .from = @as(ModuleId, 1),
+        .to = @as(?ModuleId, 2),
+        .specifier = "x",
+        .status = .local,
+        .span = .{ .start = 0, .end = 1, .line = 0, .column = 0 },
+    };
+    try std.testing.expect(edge.id == 0);
+    try std.testing.expect(std.mem.eql(u8, edge.specifier, "x"));
+
+    // Deterministic assignment: id values are plain u32 and round-trip.
+    const e2 = ImportEdge{
+        .id = @as(ImportEdgeId, 1),
+        .from = @as(ModuleId, 0),
+        .to = null,
+        .specifier = "y",
+        .status = .external,
+        .span = .{ .start = 2, .end = 3, .line = 0, .column = 1 },
+    };
+    try std.testing.expect(e2.id == 1);
+}
+
+test "ImportEdgeId is a u32 alias" {
+    const id: ImportEdgeId = @intCast(42);
+    // The annotation above would not compile if `ImportEdgeId` were not a
+    // 32-bit unsigned integer type, so the body here just confirms round-trip.
+    try std.testing.expectEqual(@as(u32, 42), @as(u32, @bitCast(id)));
+}
+
