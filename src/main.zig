@@ -10,6 +10,7 @@ const diagnostics = vizg.diagnostics;
 const modules = vizg.modules;
 const resolver = vizg.resolver;
 const tokens = vizg.tokens;
+const Registry = modules.Registry;
 
 const max_source_bytes = 64 * 1024 * 1024;
 
@@ -65,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (args.len != 3) {
+    if (args.len < 3) {
         try stderr.print("error: expected file path for '{s}'\n\n", .{args[1]});
         try printHelp(stderr, exe_name);
         try stderr.flush();
@@ -73,12 +74,19 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const path = args[2];
+
+    // Parse --add-external "name=path" flags. These populate the externals
+    // registry used by the module graph to validate non-relative imports.
+    var externals: ?*Registry = null;
+    defer if (externals) |reg| reg.deinit(arena);
+    externals = try parseExternalsArgs(args, arena, io);
+
     if (command == .modules) {
         const graph = modules.build(arena, io, path, .{
             .collect_comments = false,
             .recover_errors = true,
             .max_source_bytes = max_source_bytes,
-        }) catch |err| {
+        }, externals) catch |err| {
             try stderr.print("{s}: module graph error: {s}\n", .{ path, @errorName(err) });
             try stderr.flush();
             std.process.exit(1);
@@ -412,7 +420,10 @@ fn printCfg(writer: *Io.Writer, tree: ast_mod.Ast, cfgs: []const cfg.FunctionCfg
 fn printModules(writer: *Io.Writer, graph: modules.ModuleGraph) !void {
     try writer.print("Modules\n", .{});
     for (graph.modules) |module| {
-        try writer.print("  {} {s}\n", .{ module.id, module.source_path });
+        try writer.print(
+            "  module {} path=\"{s}\"\n",
+            .{ module.id, module.display_path },
+        );
     }
 
     try writer.print("\nImports\n", .{});
@@ -421,16 +432,19 @@ fn printModules(writer: *Io.Writer, graph: modules.ModuleGraph) !void {
     } else {
         for (graph.imports) |edge| {
             const from = graph.modules[@intCast(edge.from)];
-            try writer.print("  {s} -> ", .{from.source_path});
+            try writer.print("  module {} -> ", .{from.id});
             if (edge.to) |to| {
                 const target = graph.modules[@intCast(to)];
-                try writer.print("{s}", .{target.source_path});
+                try writer.print("module {}", .{target.id});
             } else switch (edge.status) {
                 .external => try writer.print("external", .{}),
                 .missing => try writer.print("missing", .{}),
-                .local => try writer.print("missing", .{}),
+                .local => unreachable,
             }
-            try writer.print(" \"{s}\" [{s}]\n", .{ edge.specifier, @tagName(edge.status) });
+            try writer.print(
+                " specifier=\"{s}\" status={s}\n",
+                .{ edge.specifier, @tagName(edge.status) },
+            );
         }
     }
 
@@ -441,7 +455,6 @@ fn printModules(writer: *Io.Writer, graph: modules.ModuleGraph) !void {
         try printDiagnostics(writer, "", graph.diagnostics);
     }
 }
-
 fn printDiagnostics(writer: *Io.Writer, path: []const u8, diags: []const diagnostics.Diagnostic) !void {
     for (diags) |diag| {
         const diag_path = diag.path orelse path;
@@ -532,6 +545,76 @@ fn printImportSpecifiers(writer: *Io.Writer, values: []const ast_mod.ImportSpeci
     }
 }
 
+/// Parse extra CLI flags for externals registry. Returns an owned Registry when
+/// any --add-external or --externals-dir flag is present; otherwise returns null.
+fn parseExternalsArgs(args: []const []const u8, allocator: std.mem.Allocator, io: Io) !?*Registry {
+    var seen = false;
+    for (args[2..]) |arg| {
+        if (arg.len < 2 or arg[0] != '-') continue;
+        const rest = arg[2..];
+        if (std.mem.startsWith(u8, rest, "add-external") or std.mem.startsWith(u8, rest, "externals-dir")) {
+            seen = true;
+            break;
+        }
+    }
+    if (!seen) return null;
+
+    const reg = try allocator.create(Registry);
+    reg.* = Registry.init();
+
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (!std.mem.startsWith(u8, arg, "--")) continue;
+        if (std.mem.eql(u8, arg, "--add-external")) {
+            if (i + 1 >= args.len) {
+                reg.deinit(allocator);
+                return null;
+            }
+            i += 1;
+            parseExternalEntry(args[i], allocator, reg);
+        } else if (std.mem.eql(u8, arg, "--externals-dir")) {
+            if (i + 1 >= args.len) {
+                reg.deinit(allocator);
+                return null;
+            }
+            i += 1;
+            loadExternalsDir(io, args[i], allocator, reg);
+        }
+    }
+
+    // Return non-owning pointer. The caller keeps `reg` alive via the deferred deinit below.
+    return @ptrCast(reg);
+}
+
+/// Parse "name=path"; bare name also accepted (decl_path becomes null).
+fn parseExternalEntry(entry: []const u8, allocator: std.mem.Allocator, reg: *Registry) void {
+    const eq = std.mem.indexOfScalar(u8, entry, '=');
+    if (eq != null) {
+        const name = entry[0..eq.?];
+        const decl_path = entry[(eq.? + 1)..];
+        reg.add(allocator, name, decl_path);
+        return;
+    }
+    // bare name — register without declaration file
+    reg.add(allocator, entry, null);
+}
+
+fn loadExternalsDir(io: Io, dir_path: []const u8, allocator: std.mem.Allocator, reg: *Registry) void {
+    var dir = Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var iter = Io.Dir.iterate(dir);
+    while (true) {
+        const maybe_entry = iter.next(io) catch break;
+        if (maybe_entry == null) continue;
+        const entry = maybe_entry.?;
+        if (!std.mem.endsWith(u8, entry.name, ".ts")) continue;
+        const name = entry.name[0..(entry.name.len - 3)]; // strip .ts
+        reg.add(allocator, name, null);
+    }
+}
+
 test "printExportSpecifiers shows local and exported names" {
     var buffer: [128]u8 = undefined;
     var writer = Io.Writer.fixed(&buffer);
@@ -600,3 +683,81 @@ test "diagnostic error count controls check status" {
     try std.testing.expectEqual(@as(usize, 1), counts.errors);
     try std.testing.expectEqual(@as(usize, 1), counts.warnings);
 }
+
+test "printModules emits deterministic shape with module ids and status labels" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    // arena kept alive; no direct allocations needed in this test path
+
+    // Construct minimal modules using zeroes on the complex FrontendResult sub-struct;
+    // printModules only reads id and display_path, so any valid value works here.
+    var mods = [_]modules.Module{
+        .{
+            .id = 0,
+            .path = "/abs/main.ts",
+            .display_path = "main.ts",
+            .source_path = "./main.ts",
+            .text = "",
+            .result = std.mem.zeroes(frontend.FrontendResult),
+        },
+        .{
+            .id = 1,
+            .path = "/abs/a.ts",
+            .display_path = "a.ts",
+            .source_path = "./a.ts",
+            .text = "",
+            .result = std.mem.zeroes(frontend.FrontendResult),
+        },
+    };
+
+    var edges = [_]modules.ImportEdge{
+        .{
+            .from = 0, .to = 1,
+            .specifier = "./a",
+            .status = .local,
+            .span = tokens.Span{ .start = 0, .end = 3, .line = 1, .column = 1 },
+        },
+        .{
+            .from = 0, .to = null,
+            .specifier = "console",
+            .status = .external,
+            .span = tokens.Span{ .start = 0, .end = 8, .line = 2, .column = 1 },
+        },
+        .{
+            .from = 0, .to = null,
+            .specifier = "./nonexistent",
+            .status = .missing,
+            .span = tokens.Span{ .start = 0, .end = 13, .line = 3, .column = 1 },
+        },
+    };
+
+    const diags: []const diagnostics.Diagnostic = &.{};
+
+    const graph = modules.ModuleGraph{
+        .arena = arena,
+        .entry = 0,
+        .modules = mods[0..],
+        .imports = edges[0..],
+        .diagnostics = diags,
+    };
+
+    var buf: [4096]u8 = undefined;
+    var writer = Io.Writer.fixed(&buf);
+
+    try printModules(&writer, graph);
+
+    const out = std.mem.sliceTo(writer.buffered(), 0);
+
+    // Module lines use "module <id> path=" form (not display_path=).
+    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 path=\"main.ts\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "module 1 path=\"a.ts\"") != null);
+
+    // Import edges show target as module id / external / missing, plus status=.
+    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> module 1 specifier=\"./a\" status=local") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> external specifier=\"console\" status=external") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> missing specifier=\"./nonexistent\" status=missing") != null);
+
+    // Diagnostics section still present.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\nDiagnostics\n") != null);
+}
+

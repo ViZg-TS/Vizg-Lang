@@ -1,0 +1,10 @@
+# Replace lines 219-230 of graph.zig (the broken displayForCanonical) with a proper implementation.
+
+OLD_BLOCK_START="    fn displayForCanonical"
+NEW_IMPLEMENTATION="""\
+    /// Compute user-facing relative path from `cwd_abs` for `canonical`. Falls back to `canonical` unchanged.
+    pub fn displayPath(allocator_: std.mem.Allocator, cwd_abs: []const u8, canonical: []const u8) ![]const u8 {
+        // Strip the absolute working directory prefix from `canonical` when possible.
+        if (std.mem.eql(u8, canonical, "")) return "";
+
+"""

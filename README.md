@@ -79,11 +79,11 @@ src/frontend/ast.zig      AST node model
 src/frontend/binder.zig   Scope, symbol, import, and export binding
 src/frontend/resolver.zig Identifier reference resolution
 src/frontend/cfg.zig      Preliminary function control-flow graph builder
-src/modules_graph/root.zig      Module graph public API
-src/modules_graph/graph.zig     Minimal multi-file module graph
-src/modules_graph/loader.zig    Source file loading and frontend analysis wrapper
-src/modules_graph/resolver.zig  Relative module path resolution
-src/diagnostic/root.zig   Shared diagnostic model and stable codes
+src/modules/root.zig      Module graph public API
+src/modules/graph.zig     Minimal multi-file module graph
+src/modules/loader.zig    Source file loading and frontend analysis wrapper
+src/modules/resolver.zig  Relative module path resolution
+src/diagnostics/root.zig   Shared diagnostic model and stable codes
 src/frontend/tests.zig    Frontend integration tests
 test/frontend/            TypeScript fixture files
 docs/                     Contributor and architecture documentation
