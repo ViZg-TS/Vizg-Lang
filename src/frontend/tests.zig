@@ -901,3 +901,120 @@ test "frontend suite: parser preserves import specifier span" {
     const lexeme = source[specifier_start..specifier_end];
     try std.testing.expectEqualStrings("\"./a\"", lexeme);
 }
+
+test "frontend suite: parameter annotation captured" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Source exercises one named parameter with an inline ': string' annotation.
+    const source = "function f(x: string) { return x; }";
+
+    const parsed = try parseOk(allocator, source);
+    const root = parsed.ast.node(parsed.ast.root).data.Program;
+
+    const func_id = root.statements[0];
+    try expectNodeTag(parsed.ast, func_id, .FunctionDeclaration);
+    const func_node = parsed.ast.node(func_id);
+    const params = func_node.data.FunctionDeclaration.params;
+    try std.testing.expect(params.len == 1);
+
+    const param_node = parsed.ast.node(params[0]);
+    try expectNodeTag(parsed.ast, params[0], .Parameter);
+    try std.testing.expect(param_node.data.Parameter.type_annotation != null);
+    const ann = param_node.data.Parameter.type_annotation.?;
+    try std.testing.expectEqualStrings("string", ann.name);
+}
+
+test "frontend suite: variable annotation captured" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source = "let x: string;";
+
+    const parsed = try parseOk(allocator, source);
+    const root = parsed.ast.node(parsed.ast.root).data.Program;
+
+    const var_decl_id = root.statements[0];
+    try expectNodeTag(parsed.ast, var_decl_id, .VariableDeclaration);
+    const decls_node = parsed.ast.node(var_decl_id);
+    const declarators = decls_node.data.VariableDeclaration.declarations;
+    try std.testing.expect(declarators.len == 1);
+
+    const vd_id = declarators[0];
+    const vd_node = parsed.ast.node(vd_id);
+    try expectNodeTag(parsed.ast, vd_id, .VariableDeclarator);
+    try std.testing.expect(vd_node.data.VariableDeclarator.type_annotation != null);
+    const ann = vd_node.data.VariableDeclarator.type_annotation.?;
+    try std.testing.expectEqualStrings("string", ann.name);
+}
+
+test "frontend suite: function return annotation captured" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Trailing ': boolean' is consumed as a return type annotation.
+    const source = "function f(): boolean { return true; }";
+
+    const parsed = try parseOk(allocator, source);
+    const root = parsed.ast.node(parsed.ast.root).data.Program;
+
+    const func_id = root.statements[0];
+    try expectNodeTag(parsed.ast, func_id, .FunctionDeclaration);
+    const func_node = parsed.ast.node(func_id);
+    try std.testing.expect(func_node.data.FunctionDeclaration.return_type != null);
+    const ret_ann = func_node.data.FunctionDeclaration.return_type.?;
+    try std.testing.expectEqualStrings("boolean", ret_ann.name);
+}
+
+test "frontend suite: untyped function has no return_type annotation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // No trailing ': boolean' — source parses as a bare return inside the body.
+    const source = "function f() { return 0; }";
+
+    const parsed = try parseOk(allocator, source);
+    const root = parsed.ast.node(parsed.ast.root).data.Program;
+
+    const func_id = root.statements[0];
+    try expectNodeTag(parsed.ast, func_id, .FunctionDeclaration);
+    const func_node = parsed.ast.node(func_id);
+    const ret_ann = func_node.data.FunctionDeclaration.return_type;
+    try std.testing.expectEqual(@as(?ast_mod.TypeAnnotation, null), ret_ann);
+}
+
+test "frontend suite: simple type annotation fixture" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Combined fixture exercising a variable annotation, a parameter
+    // annotation, and a return-type annotation together.
+    const source = "let x: number = 1;" ++ "\nfunction f(name: string): boolean {" ++ "\n    return true;" ++ "\n}";
+
+    const parsed = try parseOk(allocator, source);
+    const root = parsed.ast.node(parsed.ast.root).data.Program;
+
+    // Variable annotation captured.
+    const var_decl_id = root.statements[0];
+    const vd_id = parsed.ast.node(var_decl_id).data.VariableDeclaration.declarations[0];
+    const vd_node = parsed.ast.node(vd_id);
+    try std.testing.expect(vd_node.data.VariableDeclarator.type_annotation != null);
+    try std.testing.expectEqualStrings("number", vd_node.data.VariableDeclarator.type_annotation.?.name);
+
+    // Parameter annotation captured (f's `name` parameter).
+    const func_id = root.statements[1];
+    const param_id = parsed.ast.node(func_id).data.FunctionDeclaration.params[0];
+    const param_node = parsed.ast.node(param_id);
+    try std.testing.expect(param_node.data.Parameter.type_annotation != null);
+    try std.testing.expectEqualStrings("string", param_node.data.Parameter.type_annotation.?.name);
+
+    // Return type annotation captured.
+    const ret_ann = parsed.ast.node(func_id).data.FunctionDeclaration.return_type;
+    try std.testing.expect(ret_ann != null);
+    try std.testing.expectEqualStrings("boolean", ret_ann.?.name);
+}

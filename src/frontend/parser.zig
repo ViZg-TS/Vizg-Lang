@@ -247,14 +247,16 @@ const Parser = struct {
         errdefer params.deinit(self.allocator);
         while (!self.at(.RParen) and !self.at(.EOF)) {
             const param_token = self.expectIdentifierLike("expected parameter name");
+            const param_type: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
             while (!self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) _ = self.advance();
             try params.append(self.allocator, try self.addNode(.{
                 .span = param_token.span,
-                .data = .{ .Parameter = .{ .name = param_token.lexeme } },
+                .data = .{ .Parameter = .{ .name = param_token.lexeme, .type_annotation = param_type } },
             }));
             _ = self.eat(.Comma);
         }
         _ = self.expect(.RParen, "expected )");
+        const return_type: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
 
         const body = if (self.at(.LBrace)) try self.parseBlockStatement() else ast_mod.invalid_node;
         const end_span = if (body == ast_mod.invalid_node)
@@ -268,8 +270,25 @@ const Parser = struct {
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
                 .exported = exported,
+                .return_type = return_type,
             } },
         });
+    }
+    fn parseOptionalTypeAnnotation(self: *Parser) ?ast_mod.TypeAnnotation {
+        if (!self.at(.Colon)) return null;
+        _ = self.advance(); // consume colon
+        if (self.at(.Identifier) or self.at(.PrivateIdentifier)) {
+            const type_token = self.advance();
+            const span: tokens.Span = .{
+                .start = type_token.span.start,
+                .end = type_token.span.end,
+                .line = type_token.span.line,
+                .column = type_token.span.column,
+            };
+            return .{ .name = type_token.lexeme, .span = span };
+        }
+        self.report("expected type name after ':'", .expected_token);
+        return null;
     }
 
     fn parseBlockStatement(self: *Parser) anyerror!NodeId {
@@ -293,11 +312,12 @@ const Parser = struct {
 
         while (!self.at(.Semicolon) and !self.at(.EOF)) {
             const name = self.expectIdentifierLike("expected variable name");
+            const type_annotation: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
             while (!self.at(.Equal) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.EOF)) _ = self.advance();
             const init = if (self.eat(.Equal)) try self.parseExpression() else null;
             try declarations.append(self.allocator, try self.addNode(.{
                 .span = joinSpans(name.span, self.previousOrCurrent().span),
-                .data = .{ .VariableDeclarator = .{ .name = name.lexeme, .init = init } },
+                .data = .{ .VariableDeclarator = .{ .name = name.lexeme, .init = init, .type_annotation = type_annotation } },
             }));
             if (!self.eat(.Comma)) break;
         }

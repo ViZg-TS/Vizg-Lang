@@ -9,6 +9,11 @@ pub const Program = struct {
     statements: []const NodeId,
 };
 
+pub const TypeAnnotation = struct {
+    name: []const u8,
+    span: tokens.Span,
+};
+
 pub const BlockStatement = struct {
     statements: []const NodeId,
 };
@@ -56,6 +61,7 @@ pub const VariableDeclaration = struct {
 pub const VariableDeclarator = struct {
     name: []const u8,
     init: ?NodeId,
+    type_annotation: ?TypeAnnotation = null,
 };
 
 pub const FunctionDeclaration = struct {
@@ -63,10 +69,12 @@ pub const FunctionDeclaration = struct {
     params: []const NodeId,
     body: NodeId,
     exported: bool = false,
+    return_type: ?TypeAnnotation = null,
 };
 
 pub const Parameter = struct {
     name: []const u8,
+    type_annotation: ?TypeAnnotation = null,
 };
 
 pub const ReturnStatement = struct {

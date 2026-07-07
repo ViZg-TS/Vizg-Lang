@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const ast = @import("frontend/ast.zig");
+pub const builtin_kind = @import("builtins.builtin_kind.zig");
 pub const binder = @import("frontend/binder.zig");
 pub const cfg = @import("frontend/cfg.zig");
 pub const diagnostics = @import("diagnostics/root.zig");
@@ -12,6 +13,7 @@ pub const parser = @import("frontend/parser.zig");
 pub const resolver = @import("frontend/resolver.zig");
 pub const scanner = @import("frontend/scanner.zig");
 pub const tokens = @import("frontend/tokens.zig");
+pub const types = @import("frontend/types.zig");
 
 test {
     _ = @import("diagnostics/root.zig");
@@ -22,6 +24,8 @@ test {
     _ = @import("frontend/scanner.zig");
     _ = @import("frontend/tests.zig");
     _ = @import("frontend/tokens.zig");
+    _ = @import("frontend/types.zig");
+    // Keep existing modules graph test registration.
     _ = @import("modules/graph.zig");
     _ = @import("modules/loader.zig");
     _ = @import("modules/resolver.zig");
