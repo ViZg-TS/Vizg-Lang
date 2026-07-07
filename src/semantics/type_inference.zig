@@ -121,6 +121,11 @@ pub fn inferLiteralNodeTypes(
                 _ = try stack.append(allocator, elem_access.object);
                 _ = try stack.append(allocator, elem_access.index);
             },
+            // as-expression: type annotation is syntax-only; only descend into the cast expression.
+            .AsExpression => |as_expr| {
+                _ = as_expr.type_annotation;
+                _ = try stack.append(allocator, as_expr.expression);
+            },
             .NonNullExpression => |nonnull| _ = try stack.append(allocator, nonnull.expression),
             .MemberExpression => |member| { _ = member.property; try stack.append(allocator, member.object); },
             .BinaryExpression => |bin| {
