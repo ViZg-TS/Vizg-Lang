@@ -2,7 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const ast_mod = @import("../frontend/ast.zig");
-const diagnostics = @import("../diagnostic/root.zig");
+const diagnostics = @import("../diagnostics/root.zig");
 const frontend = @import("../frontend/frontend.zig");
 const loader = @import("loader.zig");
 const module_resolver = @import("resolver.zig");

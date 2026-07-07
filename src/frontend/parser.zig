@@ -1,6 +1,6 @@
 const std = @import("std");
 const ast_mod = @import("ast.zig");
-const diagnostics = @import("../diagnostic/root.zig");
+const diagnostics = @import("../diagnostics/root.zig");
 const tokens = @import("tokens.zig");
 
 const Token = tokens.Token;

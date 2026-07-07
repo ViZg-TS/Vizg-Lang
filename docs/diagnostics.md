@@ -1,6 +1,6 @@
 # Diagnostics
 
-Diagnostics are structured records defined in `src/diagnostic/root.zig`.
+Diagnostics are structured records defined in `src/diagnostics/root.zig`.
 
 ## Model
 

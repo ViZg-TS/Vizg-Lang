@@ -55,7 +55,7 @@ The single-file pipeline does not require file system access except for CLI inpu
 
 Shared diagnostics live outside the frontend:
 
-- `src/diagnostic/root.zig`: severity, phase, stable diagnostic codes, messages, spans, and optional paths.
+- `src/diagnostics/root.zig`: severity, phase, stable diagnostic codes, messages, spans, and optional paths.
 
 The module graph layer is separate from the frontend:
 

@@ -6,7 +6,7 @@ const Token = tokens.Token;
 const Span = tokens.Span;
 const TokenFlags = tokens.TokenFlags;
 const LexicalError = tokens.LexicalError;
-const diagnostics = @import("../diagnostic/root.zig");
+const diagnostics = @import("../diagnostics/root.zig");
 
 pub const Comment = struct {
     kind: TokenType,

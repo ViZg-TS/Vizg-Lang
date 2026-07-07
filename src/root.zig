@@ -5,7 +5,7 @@ const Io = std.Io;
 pub const ast = @import("frontend/ast.zig");
 pub const binder = @import("frontend/binder.zig");
 pub const cfg = @import("frontend/cfg.zig");
-pub const diagnostics = @import("diagnostic/root.zig");
+pub const diagnostics = @import("diagnostics/root.zig");
 pub const frontend = @import("frontend/frontend.zig");
 pub const modules = @import("modules_graph/root.zig");
 pub const parser = @import("frontend/parser.zig");
@@ -14,7 +14,7 @@ pub const scanner = @import("frontend/scanner.zig");
 pub const tokens = @import("frontend/tokens.zig");
 
 test {
-    _ = @import("diagnostic/root.zig");
+    _ = @import("diagnostics/root.zig");
     _ = @import("frontend/binder.zig");
     _ = @import("frontend/cfg.zig");
     _ = @import("frontend/parser.zig");
