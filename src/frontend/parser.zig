@@ -430,43 +430,213 @@ const Parser = struct {
         return self.parseAssignmentExpression();
     }
 
-    fn parseAssignmentExpression(self: *Parser) anyerror!NodeId {
-        const left = try self.parseBinaryExpression();
+    fn binaryPrecedence(kind: TokenType) ?u8 {
+        return switch (kind) {
+            .PlusEqual, .MinusEqual, .AsteriskEqual, .SlashEqual, .PercentEqual => @as(u8, 0),
+            .BarBar => @as(u8, 1),
+            .AmpersandAmpersand => @as(u8, 2),
+            .EqualsEquals, .ExclamationEquals, .EqualsEqualsEquals, .ExclamationEqualsEquals => @as(u8, 4),
+            .LessThan, .LessThanEquals, .GreaterThan, .GreaterThanEquals => @as(u8, 5),
+            .Plus, .Minus => @as(u8, 6),
+            .Asterisk, .Slash, .Percent => @as(u8, 7),
+            else => null,
+        };
+    }
 
-        // Compound assignment (+= -= *= /= %=).
-        if (self.current().kind == .PlusEqual or self.current().kind == .MinusEqual or
-            self.current().kind == .AsteriskEqual or self.current().kind == .SlashEqual or
+    fn parseAssignmentExpression(self: *Parser) anyerror!NodeId {
+        const left = try self.parseLogicalOrExpression();
+
+        // Assignment (=, +=, -=, *=, /= %=). Right-associative.
+        if (self.current().kind == .Equal or
+            self.current().kind == .PlusEqual or
+            self.current().kind == .MinusEqual or
+            self.current().kind == .AsteriskEqual or
+            self.current().kind == .SlashEqual or
             self.current().kind == .PercentEqual)
         {
             const op_tok = self.advance();
-            const right = try self.parseExpression();
+            // RHS is at the SAME level (assignment), not lower. This makes `a = b = c` group as `a = (b = c)`.
+            const right = try self.parseAssignmentExpression();
             return self.addNode(.{
                 .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
                 .data = .{ .AssignmentExpression = .{ .operator = op_tok.kind, .left = left, .right = right } },
             });
         }
-
-        // Plain '=' only.
-        if (!self.eat(.Equal)) return left;
-
-        const right = try self.parseExpression();
-        return self.addNode(.{
-            .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
-            .data = .{ .AssignmentExpression = .{ .operator = .Equal, .left = left, .right = right } },
-        });
+        return left;
     }
 
-    fn parseBinaryExpression(self: *Parser) anyerror!NodeId {
-        var left = try self.parsePrimary();
-        while (self.isBinaryOperator(self.current().kind)) {
-            const op = self.advance();
-            const right = try self.parsePrimary();
+    fn parseLogicalOrExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseLogicalAndExpression();
+        while (self.at(.BarBar)) {
+            const op_tok = self.advance();
+            const right = try self.parseLogicalAndExpression();
             left = try self.addNode(.{
                 .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
-                .data = .{ .BinaryExpression = .{ .operator = op.kind, .left = left, .right = right } },
+                .data = .{ .BinaryExpression = .{ .operator = op_tok.kind, .left = left, .right = right } },
             });
         }
         return left;
+    }
+
+    fn parseLogicalAndExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseEqualityExpression();
+        while (self.at(.AmpersandAmpersand)) {
+            const op_tok = self.advance();
+            const right = try self.parseEqualityExpression();
+            left = try self.addNode(.{
+                .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                .data = .{ .BinaryExpression = .{ .operator = op_tok.kind, .left = left, .right = right } },
+            });
+        }
+        return left;
+    }
+
+    fn parseEqualityExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseRelationalExpression();
+        while (true) {
+            left = switch (self.current().kind) {
+                .EqualsEquals => blk: {
+                    _ = self.advance();
+                    const right = try self.parseRelationalExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .EqualsEquals, .left = left, .right = right } },
+                    });
+                },
+                .ExclamationEquals => blk: {
+                    _ = self.advance();
+                    const right = try self.parseRelationalExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .ExclamationEquals, .left = left, .right = right } },
+                    });
+                },
+                .EqualsEqualsEquals => blk: {
+                    _ = self.advance();
+                    const right = try self.parseRelationalExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .EqualsEqualsEquals, .left = left, .right = right } },
+                    });
+                },
+                .ExclamationEqualsEquals => blk: {
+                    _ = self.advance();
+                    const right = try self.parseRelationalExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .ExclamationEqualsEquals, .left = left, .right = right } },
+                    });
+                },
+                else => break,
+            };
+        }
+        return left;
+    }
+
+    fn parseRelationalExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseAdditiveExpression();
+        while (true) {
+            left = switch (self.current().kind) {
+                .LessThan => blk: {
+                    _ = self.advance();
+                    const right = try self.parseAdditiveExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .LessThan, .left = left, .right = right } },
+                    });
+                },
+                .LessThanEquals => blk: {
+                    _ = self.advance();
+                    const right = try self.parseAdditiveExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .LessThanEquals, .left = left, .right = right } },
+                    });
+                },
+                .GreaterThan => blk: {
+                    _ = self.advance();
+                    const right = try self.parseAdditiveExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .GreaterThan, .left = left, .right = right } },
+                    });
+                },
+                .GreaterThanEquals => blk: {
+                    _ = self.advance();
+                    const right = try self.parseAdditiveExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .GreaterThanEquals, .left = left, .right = right } },
+                    });
+                },
+                else => break,
+            };
+        }
+        return left;
+    }
+
+    fn parseAdditiveExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseMultiplicativeExpression();
+        while (true) {
+            left = switch (self.current().kind) {
+                .Plus => blk: {
+                    _ = self.advance();
+                    const right = try self.parseMultiplicativeExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .Plus, .left = left, .right = right } },
+                    });
+                },
+                .Minus => blk: {
+                    _ = self.advance();
+                    const right = try self.parseMultiplicativeExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .Minus, .left = left, .right = right } },
+                    });
+                },
+                else => break,
+            };
+        }
+        return left;
+    }
+
+    fn parseMultiplicativeExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parsePrimary();
+        while (true) {
+            left = switch (self.current().kind) {
+                .Asterisk => blk: {
+                    _ = self.advance();
+                    const right = try self.parsePrimary();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .Asterisk, .left = left, .right = right } },
+                    });
+                },
+                .Slash => blk: {
+                    _ = self.advance();
+                    const right = try self.parsePrimary();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .Slash, .left = left, .right = right } },
+                    });
+                },
+                .Percent => blk: {
+                    _ = self.advance();
+                    const right = try self.parsePrimary();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .BinaryExpression = .{ .operator = .Percent, .left = left, .right = right } },
+                    });
+                },
+                else => break,
+            };
+        }
+        return left;
+    }
+
+    fn isLogicalOrOperator(_: *const Parser, kind: TokenType) bool {
+        return kind == .BarBar or kind == .AmpersandAmpersand;
     }
 
     fn parseObjectExpression(self: *Parser) anyerror!NodeId {
