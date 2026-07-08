@@ -88,9 +88,16 @@ pub fn collectDeclaredTypes(
     errdefer out_list.deinit(allocator);
 
 
-    const global_scope = bind.scopes[0];
+    // Iterate every binder scope — function bodies, block statements, and the
+    // global module body each carry their own symbols with type annotations.
+    // This replaces the prior single-scope pass so declared types from local
+    // declarations (e.g., for-loop inits) are also captured.
 
-    for (global_scope.symbols) |sym_idx| {
+    var i_scope: usize = 0;
+    while (i_scope < bind.scopes.len) : (i_scope += 1) {
+        const scope = bind.scopes[i_scope];
+
+        for (scope.symbols) |sym_idx| {
         if (sym_idx >= bind.symbols.len) continue;
         const symbol = bind.symbols[sym_idx];
         const node_id = symbol.declaration;
@@ -181,6 +188,8 @@ pub fn collectDeclaredTypes(
             else => {},
         }
     }
+
+    } // end i_scope (all scopes)
 
     return .{
         .symbol_declared_types = try out_list.toOwnedSlice(allocator),

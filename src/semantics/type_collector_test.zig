@@ -115,3 +115,36 @@ test "untyped variable is omitted from declared types" {
 
     try testing.expect(!any_annotated);
 }
+
+test "declared type in for-loop init is collected" {
+    var arena = try testing.allocator.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // The `i` declared as `number` inside the for-loop init sits in a local
+    // (function) scope rather than the global module body, so this test
+    // confirms that collectDeclaredTypes now walks every binder scope and not
+    // just the global one.
+    const src = "function f() { for (let i: number = 0; false; ) {} }\n";
+    const result = frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+
+    const collected = type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        builtin_kind.builtin_instance,
+    );
+
+    // We expect exactly one symbol with a declared_type set: `i` as number.
+    try testing.expect(collected.symbol_declared_types.len == 1);
+    const entry = &collected.symbol_declared_types[0];
+    if (entry.declared_type) |t| {
+        try testing.expectEqual(
+            builtin_kind.builtinKindTypeId(.number),
+            t,
+        );
+    } else unreachable;
+
+    _ = collected.diagnostics;
+}
