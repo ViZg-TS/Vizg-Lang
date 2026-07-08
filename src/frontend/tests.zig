@@ -37,6 +37,178 @@ fn expectNodeTag(tree: ast_mod.Ast, id: NodeId, comptime tag: std.meta.Tag(ast_m
     try std.testing.expectEqual(tag, std.meta.activeTag(tree.node(id).data));
 }
 
+
+// -- Binary expression precedence --------------------------------------------------------
+
+/// Look inside `tree` for the first node whose active tag equals `tag`. Returns its id or invalid_node.
+fn findFirst(tree: ast_mod.Ast, tag: std.meta.Tag(ast_mod.NodeData)) !NodeId {
+    for (tree.nodes) |n| if (@intFromEnum(std.meta.activeTag(n.data)) == @intFromEnum(tag)) return n.id;
+    return ast_mod.invalid_node;
+}
+
+fn binaryOperatorId(tree: ast_mod.Ast, id: NodeId) TokenType {
+    const op = tree.node(id).data.BinaryExpression.operator;
+    // Skip assignment-wrapped operators to surface the underlying comparison/arithmetic token.
+    return switch (op) {
+        .PlusEqual, .MinusEqual, .AsteriskEqual, .SlashEqual, .PercentEqual => switch (@intFromEnum(op)) {
+            @intFromEnum(.MinusEqual) => .Minus, else => unreachable,
+        },
+        else => op,
+    };
+}
+
+fn childTag(tree: ast_mod.Ast, id: NodeId) std.meta.Tag(ast_mod.NodeData) {
+    return std.meta.activeTag(tree.node(id).data);
+}
+
+test "parser precedence: 1 + 2 * 3 groups under +" {
+    const source = \let x = 1 + 2 * 3;
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, source, false);
+    const parsed = try parser.parse(allocator, scanned.tokens, true);
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    // The initializer of `x` is a BinaryExpression with operator `+`.
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    try std.testing.expectEqual(@as(usize, 1), program.statements.len);
+    const var_decl_id = program.statements[0];
+    const declarator = parsed.ast.node(var_decl_id).data.VariableDeclarator;
+    try std.testing.expect(declarator.init != null);
+
+    const plus_id = declarator.init.?;
+    try expectNodeTag(parsed.ast, plus_id, .BinaryExpression);
+    // The `+` node's operator must be Plus.
+    {
+        const op_tok = parsed.ast.node(plus_id).data.BinaryExpression.operator;
+        try std.testing.expect(op_tok == .Plus);
+    }
+
+    // Left child: literal "1". Right child: multiplication (2 * 3).
+    const plus_left = parsed.ast.node(plus_id).data.BinaryExpression.left;
+    const plus_right = parsed.ast.node(plus_id).data.BinaryExpression.right;
+    try expectNodeTag(parsed.ast, plus_left, .Literal);
+    try std.testing.expect(std.mem.eql(u8, parsed.ast.node(plus_left).data.Literal.value, "1"));
+
+    try expectNodeTag(parsed.ast, plus_right, .BinaryExpression);
+    {
+        const op_tok = parsed.ast.node(plus_right).data.BinaryExpression.operator;
+        try std.testing.expect(op_tok == .Asterisk);
+        // Inner multiplication: left is literal "2", right is literal "3".
+        const mul_left = parsed.ast.node(plus_right).data.BinaryExpression.left;
+        const mul_right = parsed.ast.node(plus_right).data.BinaryExpression.right;
+        try expectNodeTag(parsed.ast, mul_left, .Literal);
+        try std.testing.expect(std.mem.eql(u8, parsed.ast.node(mul_left).data.Literal.value, "2"));
+        try expectNodeTag(parsed.ast, mul_right, .Literal);
+        try std.testing.expect(std.mem.eql(u8, parsed.ast.node(mul_right).data.Literal.value, "3"));
+    }
+}
+
+test "parser precedence: a || b && c groups (b && c) under ||" {
+    const source = \let y = a || b && c;
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, source, false);
+    const parsed = try parser.parse(allocator, scanned.tokens, true);
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    const vd_id = program.statements[0];
+    const declarator = parsed.ast.node(vd_id).data.VariableDeclarator;
+    try std.testing.expect(declarator.init != null);
+
+    const or_id = declarator.init.?;
+    try expectNodeTag(parsed.ast, or_id, .BinaryExpression);
+    {
+        const op_tok = parsed.ast.node(or_id).data.BinaryExpression.operator;
+        try std.testing.expect(op_tok == .BarBar, "expected || at top level");
+
+        // Left: identifier `a`. Right: (b && c) — binary AND whose right is an identifier.
+        const or_left = parsed.ast.node(or_id).data.BinaryExpression.left;
+        const or_right = parsed.ast.node(or_id).data.BinaryExpression.right;
+        try expectNodeTag(parsed.ast, or_left, .Identifier);
+        {
+            try std.testing.expect(std.mem.eql(u8, parsed.ast.node(or_left).data.Identifier.name, "a"));
+
+            try expectNodeTag(parsed.ast, or_right, .BinaryExpression);
+            const and_id = or_right;
+            const and_op_tok = parsed.ast.node(and_id).data.BinaryExpression.operator;
+            try std.testing.expect(and_op_tok == .AmpersandAmpersand, "expected && at second level");
+
+            const and_left = parsed.ast.node(and_id).data.BinaryExpression.left;
+            const and_right = parsed.ast.node(and_id).data.BinaryExpression.right;
+            try expectNodeTag(parsed.ast, and_left, .Identifier);
+            try std.testing.expect(std.mem.eql(u8, parsed.ast.node(and_left).data.Identifier.name, "b"));
+
+            try expectNodeTag(parsed.ast, and_right, .Identifier);
+            try std.testing.expect(std.mem.eql(u8, parsed.ast.node(and_right).data.Identifier.name, "c"));
+        }
+    }
+}
+
+test "parser precedence: i % colors.red.length || "" groups % inside ||" {
+    const source = \let z = i % colors.red.length || "";
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, source, false);
+    const parsed = try parser.parse(allocator, scanned.tokens, true);
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    const vd_id = program.statements[0];
+    const declarator = parsed.ast.node(vd_id).data.VariableDeclarator;
+    try std.testing.expect(declarator.init != null);
+
+    const or_id = declarator.init.?;
+    try expectNodeTag(parsed.ast, or_id, .BinaryExpression);
+    {
+        const op_tok = parsed.ast.node(or_id).data.BinaryExpression.operator;
+        try std.testing.expect(op_tok == .BarBar, "expected || at top level");
+
+        // Left: (i % colors.red.length) — binary `%` whose right is a MemberExpression.
+        const or_left = parsed.ast.node(or_id).data.BinaryExpression.left;
+        try expectNodeTag(parsed.ast, or_left, .BinaryExpression);
+
+        {
+            const mod_op_tok = parsed.ast.node(or_left).data.BinaryExpression.operator;
+            try std.testing.expect(mod_op_tok == .Percent, "expected % at second level");
+
+            const mod_left = parsed.ast.node(or_left).data.BinaryExpression.left;
+            try expectNodeTag(parsed.ast, mod_left, .Identifier);
+            try std.testing.expect(std.mem.eql(u8, parsed.ast.node(mod_left).data.Identifier.name, "i"));
+
+            const mod_right = parsed.ast.node(or_left).data.BinaryExpression.right;
+            try expectNodeTag(parsed.ast, mod_right, .MemberExpression);
+            {
+                // Object: MemberExpression `colors.red`. Property: "length".
+                const member_obj_id = parsed.ast.node(mod_right).data.MemberExpression.object;
+                try std.testing.expect(std.mem.eql(u8, parsed.ast.node(mod_right).data.MemberExpression.property, "length"));
+
+                try expectNodeTag(parsed.ast, member_obj_id, .MemberExpression);
+                // inner-most object is identifier `colors`, property "red".
+                const colors_id = parsed.astnode(member_obj_id).data.MemberExpression.object;
+                try std.testing.expect(std.mem.eql(u8, parsed.astnode(colors_id).data.Identifier.name, "colors"));
+
+                const red_prop = parsed.astnode(member_obj_id).data.MemberExpression.property;
+                try std.testing.expect(std.mem.eql(u8, red_prop, "red"));
+            }
+        }
+
+        // Right: "" — empty string literal.
+        const or_right = parsed.ast.node(or_id).data.BinaryExpression.right;
+        try expectNodeTag(parsed.ast, or_right, .Literal);
+    }
+}
+
 fn symbolByName(bound: binder.BindResult, name: []const u8) ?binder.Symbol {
     for (bound.symbols) |symbol| {
         if (std.mem.eql(u8, symbol.name, name)) return symbol;
