@@ -6,6 +6,9 @@ pub const type_info = @import("type_info.zig");
 pub const type_collector = @import("type_collector.zig");
 pub const type_inference = @import("type_inference.zig");
 
+// Type compatibility rules (Goal 24).
+pub const type_compat = @import("type_compat.zig");
+
 pub const SymbolTypeInfo = type_info.SymbolTypeInfo;
 pub const NodeTypeInfo = type_info.NodeTypeInfo;
 pub const TypeInfo = type_info.TypeInfo;
@@ -14,6 +17,7 @@ test {
     _ = type_info;
     _ = type_collector;
     _ = type_inference;
+    _ = type_compat;
 }
 
 /// Inspect declared and inferred types for a file, using the *already-parsed*
