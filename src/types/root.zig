@@ -20,6 +20,9 @@ pub const Type = model.Type;
 pub const FunctionSignatureId = model.FunctionSignatureId;
 pub const ParameterType = model.ParameterType;
 pub const FunctionSignature = model.FunctionSignature;
+/// Alias for the store of function signatures. Re-exported from `model.zig` so that
+/// downstream consumers (e.g., type_collector) can address it as `types.FunctionSignatureStore`.
+pub const FunctionSignatureStore = model.FunctionSignatureStore;
 
 pub const Builtins = model.Builtins;
 // Keep the precomputed instance available at the package level so callers that

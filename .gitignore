@@ -12,3 +12,6 @@ AGENTS.md
 *.orig
 *.zip
 .local-install
+
+data
+bin

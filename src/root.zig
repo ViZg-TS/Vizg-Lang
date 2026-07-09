@@ -38,4 +38,5 @@ test {
     // Keep semantics layer wired in so its tests register alongside the rest.
     _ = @import("semantics/root.zig");
     _ = @import("semantics/type_info.zig");
+    _ = @import("semantics/type_collector_test.zig");
 }

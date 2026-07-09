@@ -122,12 +122,23 @@ pub fn main(init: std.process.Init) !void {
     };
 
     switch (command) {
-        .check => {
-            try printCheck(stdout, result);
-            if (hasErrors(result.diagnostics)) {
-                try stdout.flush();
-                std.process.exit(1);
+        .check => blk: {
+            // Run the type checker and merge its diagnostics with collector ones.
+            const info = semantics.analyzeFrontendResult(arena, result) catch |err| blk2: {
+                try stderr.print("{s}: type error: {t}\n", .{result.source.path, err});
+                break :blk2 null;
+            };
+            const all_diags = if (info) |i| i.diagnostics else result.diagnostics;
+            // Inline printCheck using merged diagnostics so we can keep the
+            // existing printCheck signature that takes a FrontendResult.
+            const counts = countDiagnostics(all_diags);
+            try stdout.print("checked: {s}\n", .{result.source.path});
+            try stdout.print("source kind: {s}\n", .{@tagName(result.source.kind)});
+            try stdout.print("diagnostics: {} errors, {} warnings\n", .{ counts.errors, counts.warnings });
+            if (all_diags.len > 0) {
+                try printDiagnostics(stdout, result.source.path, all_diags);
             }
+            if (hasErrors(all_diags)) break :blk;
         },
         .tokens => try printTokens(stdout, result.tokens),
         .ast => try printAst(stdout, result.ast),
