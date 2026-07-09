@@ -57,6 +57,19 @@ pub const DeclaredSymbolType = struct {
     declared_type: ?types.TypeId,
 };
 
+/// One entry pairing a function symbol with its captured function signature. The
+/// pair exists because the per-symbol slice above carries individual parameter/return
+/// declared types while this parallel list is how callers can enumerate every full
+/// function signature produced during collection (for inspection, diagnostics, or
+/// later use by the type checker).
+pub const FunctionSignatureEntry = struct {
+    symbol_id: binder.SymbolId,
+    /// Id of the signature — corresponds to a `Type{ .kind = .function = sig_id }` that can be looked up in any downstream FunctionSignatureStore. The id is reserved within the user range so it never collides with builtin ids (100-199).
+    signature_id: types.FunctionSignatureId,
+    /// Inline snapshot of the resolved return type. May be `unknown` when no annotation was present (per goal policy: prefer unknown unless checker can distinguish no-return from void). Lets tests and diagnostics inspect without walking FunctionSignatureStore.
+    resolved_return_type: ?types.TypeId = null,
+};
+
 /// Aggregated pass output. Diagnostics slice is owned by the result and must
 /// be deallocated with the same allocator used to construct it; callers that
 /// also allocate the slice (e.g., via arena-backed analysis) should mirror
@@ -65,7 +78,14 @@ pub const DeclaredSymbolType = struct {
 /// and predictable for tests and future serialization work.
 pub const TypeInfoCollectResult = struct {
     symbol_declared_types: []const DeclaredSymbolType,
+    function_signatures: []const FunctionSignatureEntry,
     diagnostics: []const diagnostics_mod.Diagnostic,
+    allocator_: ?*const std.mem.Allocator = null,
+
+    /// Returns true when at least one (fully-annotated or partially-annotated) function signature was collected. Useful for callers that need to branch on whether any `FunctionSignature` was produced without having to iterate the slice.
+    pub fn hasAny(self: TypeInfoCollectResult) bool {
+        return self.function_signatures.len > 0;
+    }
 };
 
 /// Collect declared types from AST annotations and binder output.
@@ -84,10 +104,15 @@ pub fn collectDeclaredTypes(
         while (i < diag_list.items.len) : (i += 1) {} // diagnostics are non-owning — nothing to destroy on error
     }
 
+    // Arena-owned FunctionSignatureStore captures every parameter-and-return signature produced by the function declaration branch below. The store is populated as we walk scopes and exposed through `signature_entries` after collection. The allocator used here (typically an arena) backs both this store's internal storage and the result's returned slices.
+    var sig_store: types.FunctionSignatureStore = types.FunctionSignatureStore.init(allocator);
+
+    // Per-function pairing of symbol_id with the FunctionSignatureId built for it. Lives on allocator so tests can inspect individual entries without allocating per-call — keep this in sync with `sig_store.add()`.
+    var signature_entries: std.ArrayList(FunctionSignatureEntry) = .empty;
+    errdefer signature_entries.deinit(allocator);
+
     var out_list: std.ArrayList(DeclaredSymbolType) = .empty;
     errdefer out_list.deinit(allocator);
-
-
     // Iterate every binder scope — function bodies, block statements, and the
     // global module body each carry their own symbols with type annotations.
     // This replaces the prior single-scope pass so declared types from local
@@ -98,104 +123,119 @@ pub fn collectDeclaredTypes(
         const scope = bind.scopes[i_scope];
 
         for (scope.symbols) |sym_idx| {
-        if (sym_idx >= bind.symbols.len) continue;
-        const symbol = bind.symbols[sym_idx];
-        const node_id = symbol.declaration;
-        const node = tree.node(node_id);
-        switch (node.data) {
-            .VariableDeclaration => |decl| {
+            if (sym_idx >= bind.symbols.len) continue;
+            const symbol = bind.symbols[sym_idx];
+            const node_id = symbol.declaration;
+            const node = tree.node(node_id);
+            switch (node.data) {
+                .VariableDeclaration => |decl| {
+                    for (decl.declarations) |child_id| {
+                        if (child_id >= tree.nodes.len) continue;
+                        const child = tree.nodes[child_id];
 
-                for (decl.declarations) |child_id| {
-                    if (child_id >= tree.nodes.len) continue;
-                    const child = tree.nodes[child_id];
-
-                    switch (child.data) {
-                        .VariableDeclarator => |vd| {
-                            if (vd.type_annotation == null) continue;
-                            const ann = vd.type_annotation.?;
-                            const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
-                            _ = appendOrOom(&out_list, allocator, .{
-                                .symbol_id = symbol.id,
-                                .declared_type = t
-                             });
-                        },
-                        else => {},
-                    }
-                }
-            },
-            .VariableDeclarator => |vd| {
-                if (vd.type_annotation == null) continue;
-                const ann = vd.type_annotation.?;
-                const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
-                _ = appendOrOom(&out_list, allocator, .{
-                    .symbol_id = symbol.id,
-                    .declared_type = t,
-                });
-            },
-            .FunctionDeclaration => |decl| {
-                for (decl.params) |param_id| {
-                    if (param_id >= tree.nodes.len) continue;
-                    const param_node = tree.nodes[param_id];
-                    switch (param_node.data) {
-                        .Parameter => |param| {
-                            if (param.type_annotation == null) continue;
-                            const ann = param.type_annotation.?;
-                            const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
-
-                            for (bind.node_symbols) |ns| {
-                                if (ns.node == param_id) {
-                                    _ = appendOrOom(&out_list, allocator, .{
-                                    .symbol_id = ns.symbol,
+                        switch (child.data) {
+                            .VariableDeclarator => |vd| {
+                                if (vd.type_annotation == null) continue;
+                                const ann = vd.type_annotation.?;
+                                const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
+                                _ = appendOrOom(&out_list, allocator, .{
+                                    .symbol_id = symbol.id,
                                     .declared_type = t
                                  });
-                                    break;
-                                }
-                            }
-                        },
-                        else => {},
+                            },
+                            else => {},
+                        }
                     }
-                }
-
-                // Function return annotation — v1 placeholder per goal. Stored as the
-                // function's declared type with a diagnostic indicating that the value
-                // represents the signature return type rather than an ordinary unknown
-                // user reference (see resolveAnnotation). The fallback uses `unknown`
-                // when the name is not a known builtin, which matches how the binder
-                // and resolver already handle this case for missing declarations.
-                if (decl.return_type) |ann| {
+                },
+                .VariableDeclarator => |vd| {
+                    if (vd.type_annotation == null) continue;
+                    const ann = vd.type_annotation.?;
                     const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
+                    _ = appendOrOom(&out_list, allocator, .{
+                        .symbol_id = symbol.id,
+                        .declared_type = t,
+                    });
+                },
+                .FunctionDeclaration => |decl| {
+                    // Collect every parameter type into a local accumulator for the FunctionSignature;
+                    // individual per-symbol entries are still recorded below via `bind.node_symbols` so each param keeps its own declared_type. The signature is then synthesized from these collected types, with `unknown` as the fallback for missing or unresolvable return annotations (see policy in goal document: "prefer unknown unless the checker can distinguish no return").
+                    var local_params: std.ArrayList(types.ParameterType) = .empty;
+                    errdefer local_params.deinit(allocator);
+
+                    {
+                        var i_param: usize = 0;
+                        while (i_param < decl.params.len) : (i_param += 1) {
+                            const param_id = decl.params[i_param];
+                            if (param_id >= tree.nodes.len) continue;
+                            const param_node = tree.nodes[param_id];
+                            switch (param_node.data) {
+                                .Parameter => |param| {
+                                    // Untyped parameters carry no annotation and are added to the signature under `unknown` so callers can see them. Annotated-but-unknown names still route through resolveAnnotation, which emits VZG6004 on unknown types — preserving that diagnostic even when the declaration is a function param.
+                                    const type_id: types.TypeId = if (param.type_annotation) |ann|
+                                        try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path)
+                                    else
+                                        types.builtin_instance.unknown;
+
+                                    // Track the parameter for signature construction. The name comes directly from the AST (which is still live on the binder's arena), so we don't need a copy.
+                                    if (local_params.append(allocator, .{ .name = param.name, .type_id = type_id })) |_| {} else |err| {
+                                        return err;
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+
+                    // Resolve the declared return type per goal policy: use `unknown` when no annotation is present (i.e. "no return" cannot be distinguished from "return void") and fall through to resolveAnnotation for annotated names, which emits VZG6004 on unknown types. The final type_id is always a valid builtin or `unknown`.
+                    var return_type: types.TypeId = undefined;
+                    if (decl.return_type) |ann| {
+                        return_type = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
+                    } else {
+                        return_type = types.builtin_instance.unknown;
+                    }
+
+                    // Build a function signature from the collected parameter list and resolved return type. The FunctionSignature is allocated by an arena-owned store — each call to `add()` appends into a shared ArrayList on the collector's allocator so lifetime remains tied to the enclosing analysis pass (typically a binder-level arena). The resulting signature_id is paired with the function's symbol_id in `signature_entries` for downstream consumption.
+                    const sig = try sig_store.add(local_params.items, return_type);
 
                     for (bind.node_symbols) |ns| {
                         if (ns.node == node_id) {
-                            // The goal's suggested API uses `declared_type` for the
-                            // function itself — we store a sentinel TypeId that
-                            // signals "signature return type collected" in v1 so
-                            // later phases can distinguish this from an ordinary
-                            // parameter. Callers should inspect the annotation name
-                            // directly if they need to disambiguate; for now the
-                            // placeholder is `unknown` annotated with a note that
-                            // it represents the signature return type, not an unknown
-                            // user reference (see resolveAnnotation's VZG6004 path).
-                            _ = appendOrOom(&out_list, allocator, .{
-                                    .symbol_id = ns.symbol,
-                                    .declared_type = t
-                                 });
+                            try signature_entries.append(allocator, .{
+                                .symbol_id = ns.symbol,
+                                .signature_id = sig,
+                                .resolved_return_type = return_type,
+                            });
                             break;
                         }
                     }
-                }
-            },
-            else => {},
+                },
+                .Parameter => |param| {
+                    // Per-goal policy: unannotated parameters use `unknown` as a safe fallback; annotated-but-unknown names still flow through resolveAnnotation which emits VZG6004 for invalid type names. Each parameter gets its own DeclaredSymbolType entry so downstream passes can inspect the per-symbol declared-type map without re-walking signatures.
+                    const type_id: types.TypeId = if (param.type_annotation) |ann|
+                        try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path)
+                    else
+                        types.builtin_instance.unknown;
+
+                    // The binder declared this parameter with `symbol.declaration == param_id` and `symbol.kind == .parameter`. Each symbol appears exactly once in the enclosing scope's symbols slice during collection.
+                    _ = appendOrOom(&out_list, allocator, .{
+                        .symbol_id = symbol.id,
+                        .declared_type = type_id,
+                    });
+                },
+                else => {},
+            }
         }
     }
 
-    } // end i_scope (all scopes)
+    // End of i_scope loop.
 
     return .{
         .symbol_declared_types = try out_list.toOwnedSlice(allocator),
+        .function_signatures = signature_entries.items,
         .diagnostics = try diag_list.toOwnedSlice(allocator),
+        .allocator_ = &allocator,
     };
 }
+
 /// Quietly discards OutOfMemory on append — used in contexts with no error path upward.
 fn appendOrOom(list: *std.ArrayList(DeclaredSymbolType), gpa: std.mem.Allocator, item: DeclaredSymbolType) void {
     if (list.append(gpa, item)) |_| {} else |_| unreachable;

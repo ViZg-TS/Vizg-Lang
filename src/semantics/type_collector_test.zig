@@ -1,23 +1,22 @@
 const std = @import("std");
 const frontend = @import("../frontend/frontend.zig");
-const builtin_kind = @import("../types/builtin.zig");
+const types = @import("../types/root.zig");
 const type_collector = @import("type_collector.zig");
 const testing = std.testing;
 
 test "variable declared type is collected from source annotation" {
-    var arena = try testing.allocator.create(std.heap.ArenaAllocator);
-    arena.* = std.heap.ArenaAllocator.init(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     const src = "let x: number = 1;\n";
-    const result = frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+    const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
 
-    var collected = type_collector.collectDeclaredTypes(
+    const collected = try type_collector.collectDeclaredTypes(
         arena.allocator(),
         result.source,
         result.ast,
         result.bind,
-        builtin_kind.builtin_instance,
+        types.builtin_instance,
     );
 
     // We rely on collectDeclaredTypes to build its output with the same allocator — the
@@ -27,10 +26,9 @@ test "variable declared type is collected from source annotation" {
 
     const symbol_entry = &collected.symbol_declared_types[0];
     if (symbol_entry.declared_type) |t| {
-        const expected_id = builtin_kind.builtinKindTypeId(.number);
-        try testing.expectEqual(expected_id.?, t.?);
+        try testing.expectEqual(types.builtinKindTypeId(.number), t);
     } else {
-        try testing.fail("expected declared type to be set for variable with annotation");
+        std.debug.panic("expected declared type to be set for variable with annotation", .{});
     }
 
     // Verify diagnostics list is empty (we used only a known builtin).
@@ -38,44 +36,49 @@ test "variable declared type is collected from source annotation" {
 }
 
 test "parameter declared type is collected from function" {
-    var arena = try testing.allocator.create(std.heap.ArenaAllocator);
-    arena.* = std.heap.ArenaAllocator.init(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     const src = "function f(x: string) {}\n";
-    const result = frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+    const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
 
-    const collected = type_collector.collectDeclaredTypes(
+    const collected = try type_collector.collectDeclaredTypes(
         arena.allocator(),
         result.source,
         result.ast,
         result.bind,
-        builtin_kind.builtin_instance,
+        types.builtin_instance,
     );
 
     // We expect the parameter symbol to appear in collected.symbol_declared_types with declared_type == builtin string id.
-    const found_param = for (collected.symbol_declared_types) |entry| {
-        if (entry.declared_type) break entry;
-    } else null;
+    var found_param: ?type_collector.DeclaredSymbolType = null;
+    for (collected.symbol_declared_types) |entry| {
+        if (entry.declared_type) |t| {
+            _ = t;
+            found_param = entry;
+            break;
+        }
+    }
 
     try testing.expect(found_param != null);
-    try testing.expectEqual(builtin_kind.builtinKindTypeId(.string).?, @as(u32, std.meta.intCast(found_param.?.declared_type.?)));
+    if (found_param) |fp| {
+        try testing.expectEqual(types.builtinKindTypeId(.string), fp.declared_type.?);
+    } else unreachable;
 }
 
 test "unknown type name emits VZG6004 and falls back to unknown" {
-    var arena = try testing.allocator.create(std.heap.ArenaAllocator);
-    arena.* = std.heap.ArenaAllocator.init(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     const src = "let x: Foo = 1;\n";
-    const result = frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+    const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
 
-    const collected = type_collector.collectDeclaredTypes(
+    const collected = try type_collector.collectDeclaredTypes(
         arena.allocator(),
         result.source,
         result.ast,
         result.bind,
-        builtin_kind.builtin_instance,
+        types.builtin_instance,
     );
 
     try testing.expect(collected.symbol_declared_types.len > 0);
@@ -93,19 +96,18 @@ test "unknown type name emits VZG6004 and falls back to unknown" {
 }
 
 test "untyped variable is omitted from declared types" {
-    var arena = try testing.allocator.create(std.heap.ArenaAllocator);
-    arena.* = std.heap.ArenaAllocator.init(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     const src = "let x = 1;\n";
-    const result = frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+    const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
 
-    const collected = type_collector.collectDeclaredTypes(
+    const collected = try type_collector.collectDeclaredTypes(
         arena.allocator(),
         result.source,
         result.ast,
         result.bind,
-        builtin_kind.builtin_instance,
+        types.builtin_instance,
     );
 
     // Untyped symbol has no entry — the pass should return an empty list (or at least nothing with a non-null declared_type).
@@ -117,8 +119,7 @@ test "untyped variable is omitted from declared types" {
 }
 
 test "declared type in for-loop init is collected" {
-    var arena = try testing.allocator.create(std.heap.ArenaAllocator);
-    arena.* = std.heap.ArenaAllocator.init(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     // The `i` declared as `number` inside the for-loop init sits in a local
@@ -126,14 +127,14 @@ test "declared type in for-loop init is collected" {
     // confirms that collectDeclaredTypes now walks every binder scope and not
     // just the global one.
     const src = "function f() { for (let i: number = 0; false; ) {} }\n";
-    const result = frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+    const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
 
-    const collected = type_collector.collectDeclaredTypes(
+    const collected = try type_collector.collectDeclaredTypes(
         arena.allocator(),
         result.source,
         result.ast,
         result.bind,
-        builtin_kind.builtin_instance,
+        types.builtin_instance,
     );
 
     // We expect exactly one symbol with a declared_type set: `i` as number.
@@ -141,10 +142,125 @@ test "declared type in for-loop init is collected" {
     const entry = &collected.symbol_declared_types[0];
     if (entry.declared_type) |t| {
         try testing.expectEqual(
-            builtin_kind.builtinKindTypeId(.number),
+            types.builtinKindTypeId(.number),
             t,
         );
     } else unreachable;
 
     _ = collected.diagnostics;
+}
+
+test "fully-annotated function produces a signature entry" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const src = "function f(a: number, b: string): void {}\n";
+    const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        types.builtin_instance,
+    );
+
+    // hasAny() confirms at least one signature was produced; length check proves
+    // the entry count matches expectations for a single function declaration.
+    try testing.expect(collected.hasAny());
+    try testing.expectEqual(@as(usize, 1), collected.function_signatures.len);
+}
+
+test "multi-parameter function collects each parameter declared type" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const src = "function f(x: number, y: string) {}\n";
+    const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        types.builtin_instance,
+    );
+
+    // Both parameters should appear in symbol_declared_types with the right ids.
+    try testing.expect(collected.symbol_declared_types.len >= 2);
+
+    var found_number = false;
+    var found_string = false;
+    for (collected.symbol_declared_types) |entry| {
+        if (entry.declared_type) |t| {
+            const id: u32 = t;
+            if (id == types.builtinKindTypeId(.number)) {
+                found_number = true;
+            } else if (id == types.builtinKindTypeId(.string)) {
+                found_string = true;
+            }
+        }
+    }
+    try testing.expect(found_number);
+    try testing.expect(found_string);
+}
+
+test "function without return annotation falls back to unknown" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const src = "function f() {}\n";
+    const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        types.builtin_instance,
+    );
+
+    // Signature was produced (else the unannotated branch wouldn't have fired).
+    try testing.expect(collected.hasAny());
+    const entry = &collected.function_signatures[0];
+    if (entry.resolved_return_type) |rt| {
+        // Verify inline return type is the builtin unknown id.
+        try testing.expectEqual(types.builtinKindTypeId(.unknown), @as(u32, rt));
+    } else unreachable;
+
+    // Unknown fallback must not emit an "unknown_type_name" diagnostic — there was
+    // no annotation name to fail on.
+    for (collected.diagnostics) |d| {
+        try testing.expect(d.code != .unknown_type_name);
+    }
+}
+
+test "unknown parameter type name emits VZG6004 diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const src = "function f(x: Foo) {}\n";
+    const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
+
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        types.builtin_instance,
+    );
+
+    // A diagnostic for the unknown parameter type must be present.
+    var saw_unknown_diag = false;
+    for (collected.diagnostics) |d| {
+        if (d.code == .unknown_type_name) {
+            saw_unknown_diag = true;
+            break;
+        }
+    }
+    try testing.expect(saw_unknown_diag);
+
+    // A signature entry must still be produced — the parameter was declared even if
+    // its type is unknown.
+    try testing.expect(collected.hasAny());
 }

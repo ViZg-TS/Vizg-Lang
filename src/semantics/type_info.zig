@@ -193,15 +193,15 @@ pub const Builder = struct {
     }
 
     pub fn addSymbol(self: *Builder, entry: SymbolTypeInfo) !void {
-        try self.symbols.append(entry);
+        try self.symbols.append(self.allocator, entry);
     }
 
     pub fn addNode(self: *Builder, node: NodeTypeInfo) void {
-        _ = self.nodes.append(node); // size_t fits in NodeId by construction; error ignored intentionally for ergonomics.
+        _ = self.nodes.append(self.allocator, node); // size_t fits in NodeId by construction; error ignored intentionally for ergonomics.
     }
 
     pub fn addDiagnostic(self: *Builder, d: diagnostics_mod.Diagnostic) void {
-        _ = self.diagnostics.append(d);
+        _ = self.diagnostics.append(self.allocator, d);
     }
 
     /// Consumes the builder and returns a TypeInfo whose slices point into the
