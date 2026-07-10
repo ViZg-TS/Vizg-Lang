@@ -89,6 +89,9 @@ pub fn main(init: std.process.Init) !void {
             .collect_comments = false,
             .recover_errors = true,
             .max_source_bytes = max_source_bytes,
+            // Defaults from loader.BuildOptions for H4 depth limits — sufficient for real code.
+            .max_parse_depth = 1024,
+            .max_module_graph_depth = 10_000,
         }, externals) catch |err| {
             try stderr.print("{s}: module graph error: {s}\n", .{ path, @errorName(err) });
             try stderr.flush();
@@ -747,8 +750,11 @@ fn loadExternalsDir(io: Io, dir_path: []const u8, allocator: std.mem.Allocator, 
         const maybe_entry = iter.next(io) catch break;
         if (maybe_entry == null) continue;
         const entry = maybe_entry.?;
-        if (!std.mem.endsWith(u8, entry.name, ".ts")) continue;
-        const name = entry.name[0..(entry.name.len - 3)]; // strip .ts
+        // C2 fix: accept any file with an extension — no longer hardcoded to .ts only. Using
+        // std.fs.path.extension() keeps separator handling correct on Windows too.
+        const ext = std.fs.path.extension(entry.name);
+        if (ext.len == 0) continue;
+        const name = entry.name[0..(entry.name.len - ext.len)];
         reg.add(allocator, name, null);
     }
 }
