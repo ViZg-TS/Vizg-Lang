@@ -66,8 +66,8 @@ typedef struct Vizg_Diagnostic {
     const char          *message_ptr;
     size_t               message_len;
     Vizg_Span            span;
-    int                  path_valid;
     const char          *path_ptr;
+    size_t               path_len;
 } Vizg_Diagnostic;
 
 typedef enum {

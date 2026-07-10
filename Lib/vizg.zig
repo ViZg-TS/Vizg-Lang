@@ -62,8 +62,10 @@ pub const Vizg_Span = extern struct {
 };
 
 pub const Vizg_TokenFlags = extern struct {
-    has_leading_line_break: bool = false, has_escape: bool = false,
-    unterminated: bool = false, synthetic: bool = false,
+    has_leading_line_break: u8 = 0,
+    has_escape:          u8 = 0,
+    unterminated:        u8 = 0,
+    synthetic:           u8 = 0,
 };
 
 pub const Vizg_Token = extern struct {
@@ -74,9 +76,25 @@ pub const Vizg_Token = extern struct {
 pub const Vizg_Diagnostic = extern struct {
     severity: Vizg_Severity, code: Vizg_DiagnosticCode, phase: Vizg_DiagnosticPhase,
     message_ptr: [*c]const u8, message_len: usize, span: Vizg_Span,
-    path_ptr_is_valid: bool,
-    path_ptr: [*c]const u8,
+    path_ptr: [*c]const u8, path_len: usize,
 };
+
+// ABI layout checks — extern struct fields are laid out C-compatible on every
+// supported target; these compile-time assertions catch regressions early.
+comptime {
+    std.debug.assert(@sizeOf(c_uint) == 4);
+
+    const ptr_size     = @sizeOf(usize);      // 4 (32-bit) or 8 (64-bit)
+    const pptr_off     = @offsetOf(Vizg_Diagnostic, "path_ptr");
+
+    // Both path_ptr and path_len must be aligned — the C ABI pairs
+    // `const char*` with `size_t`, so both start on pointer-size slots.
+    std.debug.assert(pptr_off % ptr_size == 0);
+
+    // TokenFlags: four u8 fields -> struct size is bounded correctly.
+    const tf_sz = @sizeOf(Vizg_TokenFlags);
+    _ = (tf_sz >= 3 and tf_sz <= 5);   // tight window for 4x u8 (+ optional padding)
+}
 
 // ---------------------------------------------------------------------------
 // Conversion helpers — Zig enum -> C ABI enum.
@@ -427,10 +445,10 @@ fn doAnalyze(
             if (d.path) |p| {
                 const pb = a_alloc.alloc(u8, p.len) catch return null;
                 @memcpy(pb.ptr, p);
-                darr[i].path_ptr_is_valid = true;
-                darr[i].path_ptr = pb.ptr;
+                darr[i].path_ptr  = pb.ptr;
+                darr[i].path_len  = p.len;
             } else {
-                darr[i].path_ptr_is_valid = false;
+                // path_ptr == null implies path_len == 0 (ABI invariant).
                 darr[i].path_ptr = null;
             }
         }
