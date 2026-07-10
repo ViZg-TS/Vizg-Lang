@@ -68,9 +68,20 @@ pub fn main() !void {
         var i: usize = 0;
         while (i < n) : (i += 1) {
             const d = diags[i];
+
+            // Length-aware message — never use %s on a raw pointer.
             std.debug.print(
-                "  [{d}] sev={d} code={d:<5} phase={d}\n", .{
-                    i, @as(i8, @intCast(d.severity)), d.code, d.phase });
+                "  [{d}] sev={d} code={d:<5} phase={d} msg_len={d}\n", .{
+                    i, @as(i8, @intCast(d.severity)), d.code, d.phase,
+                    d.message_len });
+
+            // path_ptr == null implies path_len == 0 (ABI invariant).
+            if (d.path_len > 0) {
+                const path = d.path_ptr[0..d.path_len];
+                std.debug.print("              path={s}\n", .{path});
+            } else {
+                std.debug.print("              path=<none>\n", .{});
+            }
         }
     }
 
