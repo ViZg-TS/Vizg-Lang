@@ -22,7 +22,7 @@ pub const DiagnosticCode = enum {
     circular_import,
     unknown_type_name,
     type_mismatch,
-    internal_error,
+    parse_recursion_limit_reached,
 };
 
 pub const DiagnosticPhase = enum {
@@ -89,7 +89,7 @@ pub fn diagnosticCodeId(code: DiagnosticCode) []const u8 {
         .circular_import => "VZG5003",
         .unknown_type_name => "VZG6004",
         .type_mismatch => "VZG6005",
-        .internal_error => "VZG9001",
+        .parse_recursion_limit_reached => "VZG2003",
     };
 }
 
@@ -109,6 +109,6 @@ pub fn diagnosticCodeName(code: DiagnosticCode) []const u8 {
         .circular_import => "circular_import",
         .unknown_type_name => "unknown_type_name",
         .type_mismatch => "type_mismatch",
-        .internal_error => "internal_error",
+        .parse_recursion_limit_reached => "parse_recursion_limit_reached",
     };
 }
