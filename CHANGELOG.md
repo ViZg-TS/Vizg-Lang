@@ -26,6 +26,23 @@ Each example ships a `README.md` and a `Makefile`. No binaries are committed; th
 **Repo Hygiene**
 - `.gitignore` covers `.zig-cache`, `zig-out/`, `*.a`, plus logs, caches, and backup patterns (`bk_*`).
 - All binary outputs live outside `./example/`; examples contain source files + READMEs only.
+**C-ABI Improvements & Length-Aware Message Accessors**
+- `Vizg_Diagnostic` now exposes a length for both its message and path pointers; C consumers never rely on raw `path_ptr_is_valid` or unbounded `%s` — the ABI invariant (`path_ptr == null ⟺ path_len == 0`) is enforced by the caller.
+- `Vizg_TokenFlags` fields widened from Zig `bool` to FFI-safe `u8`; extern structs now have guaranteed sized layout on every target.
+- Compile-time `@sizeOf` / `@offsetOf` assertions added in `Lib/vizg.zig` so any future field rearrangement breaks the build before it reaches a real consumer.
+
+**Consumer Examples Updated for Length-Aware API**
+- `example/zig/consumer/main.zig` now prints diagnostics with their lengths and uses an explicit `<none>` branch when no path is associated — consistent with the new ABI invariant.
+
+**Build System Enhancements**
+- `zig build run ...` forwards trailing arguments to the CLI for integration testing.
+- `zig build test` runs the public package's full unit-test tree plus a self-contained ABI compilation check of `Lib/vizg.zig`.
+- `zig build android` cross-compiles `libvizg.a` for Android aarch64, armv7 and x86_64, installing under `zig-out/android/<abi>/libvizg.a`.
+
+**Documentation & Repository Hygiene**
+- README documents the new Android build step.
+- `.gitignore` extended to cover `.zig-lib` build output alongside existing patterns.
+
 ## [0.0.1] — 2026-07-10
 
 ### Added
