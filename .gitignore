@@ -20,3 +20,5 @@ bin
 *.zig.new
 *.zig.bak
 tmp
+
+analyze_hello
