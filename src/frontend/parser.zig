@@ -19,6 +19,12 @@ const Parser = struct {
     nodes: std.ArrayList(ast_mod.Node) = .empty,
     diagnostics: std.ArrayList(diagnostics.Diagnostic) = .empty,
     recover_errors: bool = true,
+    // H4 — current recursion depth during descent. Bumped per recursive parse call;
+    // when it reaches max_parse_depth we abort with a diagnostic rather than recursing further.
+    _depth: usize = 0,
+    // H4 — recursion depth counter for parser descent. Bumped per recursive parse call;
+    // when it reaches max_parse_depth we abort with a diagnostic rather than recursing further.
+    max_parse_depth: usize = 1000,
 
     fn parse(self: *Parser) anyerror!ParseResult {
         const root = try self.parseProgram();
@@ -427,6 +433,21 @@ const Parser = struct {
     }
 
     fn parseExpression(self: *Parser) anyerror!NodeId {
+        // H4 — prevent runaway recursion on deeply nested / pathological input.
+        if (self._depth >= self.max_parse_depth) {
+            _ = try self.diagnostics.append(self.allocator, .{
+                .severity = .@"error",
+                .code = .parse_recursion_limit_reached,
+                .phase = .parser,
+                .message = "maximum parse depth exceeded: input too deeply nested",
+                .span = .{ .start = 0, .end = 0, .line = 0, .column = 0 },
+                .label = "reduce nesting or increase max_parse_depth in BuildOptions",
+            });
+            return error.ParseRecursionLimitReached;
+        }
+        self._depth += 1;
+        defer { if (self._depth > 0) self._depth -= 1; }
+
         return self.parseAssignmentExpression();
     }
 
@@ -907,11 +928,20 @@ const Parser = struct {
     }
 };
 
-pub fn parse(allocator: std.mem.Allocator, token_list: []const Token, recover_errors: bool) anyerror!ParseResult {
+pub const ParseOptions = struct {
+    // Whether to recover from unexpected tokens rather than abort. Default: true (error recovery on).
+    recover_errors: bool = true,
+    // Maximum recursive descent depth before rejecting with diagnostic; protects against pathological
+    // nesting DoS (H4). Defaults to 1024 which is plenty for real code but stops runaway builds.
+    max_parse_depth: usize = 1024,
+};
+
+pub fn parse(allocator: std.mem.Allocator, token_list: []const Token, options: ParseOptions) anyerror!ParseResult {
     var parser = Parser{
         .allocator = allocator,
         .tokens = token_list,
-        .recover_errors = recover_errors,
+        .recover_errors = options.recover_errors,
+        .max_parse_depth = options.max_parse_depth,
     };
     return parser.parse();
 }
@@ -941,7 +971,7 @@ test "parser builds declarations and function body" {
         \\}
     ;
     const scan = try scanner.scanAll(allocator, source, true);
-    const parsed = try parse(allocator, scan.tokens, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
 
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
     const root = parsed.ast.node(parsed.ast.root);
