@@ -15,3 +15,8 @@ AGENTS.md
 
 data
 bin
+
+*.a
+*.zig.new
+*.zig.bak
+tmp

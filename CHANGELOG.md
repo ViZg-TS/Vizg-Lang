@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+**C-ABI Static Library (`libvizg.a`)**
+- Public ABI header at `Lib/vizg.h` declaring structs, enums, and function signatures for cross-language consumption.
+- Zig implementation of C-exported functions (`pub extern "c" fn vizg_analyze_file`, `vizg_free_result`) in `Lib/vizg.zig`.
+- Static archive produced under `zig-out/lib/libvizg.a` (~10 MB) consumable from any language with a working C FFI binding.
+
+**Cross-Language Consumer Examples**
+Three example directories under `example/<lang>/...`:
+- `c/hello/` — minimal C consumer linking via `gcc … -lvizg`.
+- `cpp/hello/` — minimal C++ consumer using the same header, demonstrating struct layout compatibility with C++.
+- `zig/consumer/` — Zig consumer importing `vizg.h` via `@cImport`, demonstrating that Zig can consume its own compiled archive without any intermediate bindings.
+
+Each example ships a `README.md` and a `Makefile`. No binaries are committed; they build on demand with `make`.
+
+**Fixes for ABI Correctness**
+- Removed spurious `flags: Vizg_TokenFlags = .{}` field from the Zig `Vizg_Token` struct — it was not in the C header and caused a 48-byte vs. 40-byte stride mismatch that produced garbage/SEGV on tokens beyond index 0.
+- Wired arena registration (`resultArenas.?.put(...)`) so `vizg_free_result()` can locate and deinit the owning ArenaAllocator; confirmed via deinit traces in all three consumers.
+
+**Repo Hygiene**
+- `.gitignore` covers `.zig-cache`, `zig-out/`, `*.a`, plus logs, caches, and backup patterns (`bk_*`).
+- All binary outputs live outside `./example/`; examples contain source files + READMEs only.
 ## [0.0.1] — 2026-07-10
 
 ### Added

@@ -1,18 +1,24 @@
 const std = @import("std");
 const Io = std.Io;
 
-const vizg = @import("vizg");
-const frontend = vizg.frontend;
-const ast_mod = vizg.ast;
-const binder = vizg.binder;
-const cfg = vizg.cfg;
-const diagnostics = vizg.diagnostics;
-const modules = vizg.modules;
-const resolver = vizg.resolver;
-const tokens = vizg.tokens;
-const semantics = vizg.semantics;
-const types_pkg = vizg.types;
-const Registry = modules.Registry;
+// Dev/testing imports — direct file paths so `zig build run` works without
+// needing an installed vizg package (the library is only needed for C-ABI consumers).
+const front = @import("frontend/frontend.zig");
+const ast_mod = @import("frontend/ast.zig");
+const binder = @import("frontend/binder.zig");
+const cfg = @import("frontend/cfg.zig");
+const diagnostics = @import("diagnostics/root.zig");
+const modules = @import("modules/root.zig");
+const resolver_mod = @import("frontend/resolver.zig");
+const tokens_mod = @import("frontend/tokens.zig");
+const semantics = @import("semantics/root.zig");
+const types_pkg = @import("types/root.zig");
+
+// Backward-compat aliases matching main.zig's existing names.
+const frontend      = front;
+const resolver      = resolver_mod;
+const tokens        = tokens_mod;
+const Registry      = modules.Registry;
 
 const max_source_bytes = 64 * 1024 * 1024;
 
