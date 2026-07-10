@@ -158,7 +158,7 @@ test "findExportedSymbol resolves direct `export const x = 1`" {
     const source = "export const x = 1;";
 
     const scan = try scanner.scanAll(alloc, source, true);
-    _ = try parser.parse(alloc, scan.tokens, true);
+    _ = try parser.parse(alloc, scan.tokens, .{});
     const result = try frontend_mod.analyze(
         alloc,
         .{ .path = "(test)", .text = source },
@@ -212,7 +212,7 @@ test "findExportedSymbol resolves direct `export function run() {}`" {
     const source = "export function run() {}";
 
     const scan = try scanner.scanAll(alloc, source, true);
-    _ = try parser.parse(alloc, scan.tokens, true);
+    _ = try parser.parse(alloc, scan.tokens, .{});
     const result = try frontend_mod.analyze(
         alloc,
         .{ .path = "(test)", .text = source },
@@ -260,7 +260,7 @@ test "findExportedSymbol resolves aliased `export { localName as exportedName }`
     const source = "const localName = \"dev\";\nexport { localName as exportedName };";
 
     const scan = try scanner.scanAll(alloc, source, true);
-    _ = try parser.parse(alloc, scan.tokens, true);
+    _ = try parser.parse(alloc, scan.tokens, .{});
     const result = try frontend_mod.analyze(
         alloc,
         .{ .path = "(test)", .text = source },
@@ -317,7 +317,7 @@ test "findExportedSymbol returns null for missing export" {
     const source = "export const x = 1;";
 
     const scan = try scanner.scanAll(alloc, source, true);
-    _ = try parser.parse(alloc, scan.tokens, true);
+    _ = try parser.parse(alloc, scan.tokens, .{});
     const result = try frontend_mod.analyze(
         alloc,
         .{ .path = "(test)", .text = source },
