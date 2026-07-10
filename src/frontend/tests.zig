@@ -21,7 +21,7 @@ fn scanOk(allocator: std.mem.Allocator, source: []const u8, collect_comments: bo
 
 fn parseOk(allocator: std.mem.Allocator, source: []const u8) !parser.ParseResult {
     const scanned = try scanOk(allocator, source, true);
-    const parsed = try parser.parse(allocator, scanned.tokens, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
     return parsed;
 }
@@ -69,7 +69,7 @@ test "parser precedence: 1 + 2 * 3 groups under +" {
     const allocator = arena.allocator();
 
     const scanned = try scanner.scanAll(allocator, source, false);
-    const parsed = try parser.parse(allocator, scanned.tokens, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
 
     // The initializer of `x` is a BinaryExpression with operator `+`.
@@ -115,7 +115,7 @@ test "parser precedence: a || b && c groups (b && c) under ||" {
     const allocator = arena.allocator();
 
     const scanned = try scanner.scanAll(allocator, source, false);
-    const parsed = try parser.parse(allocator, scanned.tokens, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
 
     const program = parsed.ast.node(parsed.ast.root).data.Program;
@@ -160,7 +160,7 @@ test "parser precedence: i % colors.red.length || "" groups % inside ||" {
     const allocator = arena.allocator();
 
     const scanned = try scanner.scanAll(allocator, source, false);
-    const parsed = try parser.parse(allocator, scanned.tokens, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
 
     const program = parsed.ast.node(parsed.ast.root).data.Program;
@@ -436,7 +436,7 @@ test "frontend suite: parser accepts element access non-null assertion and chain
         \\\\let len = art[i]!.length;
     ;
     const scanned = try scanOk(allocator, source, false);
-    const parsed = try parser.parse(allocator, scanned.tokens, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
 
     // Goal: zero parser diagnostics on valid syntax.
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len) orelse {
@@ -518,7 +518,7 @@ test "frontend suite: parser validates contextual import syntax" {
     };
     for (invalid_imports) |source| {
         const scanned = try scanOk(allocator, source, false);
-        const parsed = try parser.parse(allocator, scanned.tokens, true);
+        const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
         try std.testing.expect(parsed.diagnostics.len > 0);
         try std.testing.expectEqual(diagnostics.DiagnosticCode.expected_token, parsed.diagnostics[0].code);
     }
@@ -547,7 +547,7 @@ test "frontend suite: parser validates contextual export aliases" {
     };
     for (invalid_exports) |source| {
         const scanned = try scanOk(allocator, source, false);
-        const invalid = try parser.parse(allocator, scanned.tokens, true);
+        const invalid = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = false });
         try std.testing.expect(invalid.diagnostics.len > 0);
         try std.testing.expectEqual(diagnostics.DiagnosticCode.expected_token, invalid.diagnostics[0].code);
     }
@@ -631,7 +631,7 @@ test "frontend suite: parser reports syntax errors without aborting" {
     const allocator = arena.allocator();
 
     const scanned = try scanOk(allocator, "let = ;", true);
-    const parsed = try parser.parse(allocator, scanned.tokens, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
 
     try std.testing.expect(parsed.diagnostics.len > 0);
     try std.testing.expectEqual(diagnostics.DiagnosticCode.expected_token, parsed.diagnostics[0].code);
