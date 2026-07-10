@@ -9,6 +9,18 @@ pub const BuildOptions = struct {
     collect_comments: bool = false,
     recover_errors: bool = true,
     max_source_bytes: usize = max_source_bytes,
+    // Extensions to try for extension-less import specifiers. First entry is the primary;
+    // subsequent entries are fallback candidates tried in order (without index-file fallback).
+    // When null/empty, resolver defaults to ".ts" only — identical to historical behavior.
+    extensions: ?[]const [:0]const u8 = null,
+    // Maximum depth allowed for module graph DFS / import-chain traversal before emitting a 
+    // diagnostic and failing the build rather than recursing into stack overflow territory. C2 H4.
+    max_module_graph_depth: usize = 10_000,
+    // Maximum recursive descent depth during parser precedence-climbing (H4). Exceeded parses are
+    // rejected with a diagnostic rather than crashing; defaults to 1024 which covers realistic code.
+    max_parse_depth: usize = 1024,
+    // Maximum recursion depth for type inference / structural walk (H4). Same defensive rationale.
+    max_type_inference_depth: usize = 10_000,
 };
 
 pub const LoadedModule = struct {
