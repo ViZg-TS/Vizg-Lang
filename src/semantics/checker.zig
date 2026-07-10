@@ -262,6 +262,130 @@ fn checkInitializers(
 //      was found, skip per goal text ("assignment to untyped variable emits
 //      no diagnostic").
 //   5. Compare types; emit one VZG6005 on mismatch.
+/// Resolve the declared return type of a function call's callee (assumed to be
+/// an Identifier) by walking AST nodes for matching FunctionDeclarations. Returns
+/// the TypeId of the return type if one is explicitly annotated, otherwise null.
+
+fn lookupCallReturnTypeId(
+    tree: *const ast_mod.Ast,
+    references: []const @import("../frontend/resolver.zig").Reference,
+    call_node_id: ast_mod.NodeId,
+) ?types.TypeId {
+    // Locate the reference for this call site — any kind that carries the callee's name
+    // and scope is sufficient. Resolver emits a `.call` Reference for each function-call
+    // expression (see resolver.zig).
+    const calleeref: @import("../frontend/resolver.zig").Reference = for (references) |r| {
+        if (r.node == call_node_id and r.kind != .export_ref) break r;
+    } else return null;
+
+    // Find a FunctionDeclaration node at the same scope with a matching name. The binder
+    // declares all top-level symbols in its AST nodes, so a linear scan works correctly.
+    for (tree.nodes) |n| switch (n.data) {
+        .FunctionDeclaration => |fd| {
+            if (std.mem.eql(u8, fd.name, calleeref.name)) {
+                if (fd.return_type == null) return null;
+                // Look up the annotation's identifier in the builtins table.
+                return lookupBuiltinIdByName(fd.return_type.?.name);
+            }
+        },
+        else => {},
+    };
+
+    return null;
+}
+
+// ---------------------------------------------------------------------------
+// Assignments with a CallExpression RHS: compare callee return type vs LHS declared
+// type, mirroring the existing Literal-RHS path but looking up types via AST walk.
+// Returns false when nothing could be checked (e.g. untyped declaration), otherwise
+// true — so the caller can continue past this branch on skip.
+
+fn handleCallExprRhs(
+    tree: *const ast_mod.Ast,
+    references: []const @import("../frontend/resolver.zig").Reference,
+    declared_types: []const DeclaredType,
+    gpa: std.mem.Allocator,
+    out: *std.ArrayList(diagnostics.Diagnostic),
+    assign_expr: ast_mod.AssignmentExpression,
+    left_id: ast_mod.NodeId,
+) !bool {
+    const left_node = tree.node(left_id);
+
+    // LHS must be an Identifier — we compare by name with the function's return annotation.
+    if (left_node.data != .Identifier) return true;
+    const rhs_call = assign_expr.right;
+
+    const lhs_expected: ?types.TypeId = for (declared_types) |dt| {
+        if (std.mem.eql(u8, dt.name, left_node.data.Identifier.name)) break dt.type_id;
+    } else null;
+    if (lhs_expected == null) return true; // LHS has no declared type — skip.
+
+    const rhs_return = lookupCallReturnTypeId(tree, references, @intCast(rhs_call));
+    if (rhs_return == null) return true; // RHS call's return type unknown — skip.
+
+    // Both sides are known; compare via builtin-kind classification to match the Literal-RHS
+    // path so mismatch messages stay consistent across cases.
+    const lhs_kind = builtinKindFromTypeId(lhs_expected.?);
+    const rhs_kind = builtinKindFromTypeId(rhs_return.?);
+    if (lhs_kind == null or rhs_kind == null) return true;
+
+    if (lhs_kind.? != rhs_kind.?) {
+        try out.append(gpa, .{
+            .severity = .@"error",
+            .code = .type_mismatch,
+            .phase = .type_checker,
+            .message = staticTypeMismatchMessage(lhs_expected.?, rhs_kind.?),
+            .span = tree.node(@intCast(rhs_call)).span,
+            .label = left_node.data.Identifier.name,
+        });
+    }
+
+    return true; // Handled — no further work needed.
+}
+
+// ---------------------------------------------------------------------------
+// Literal RHS: infer builtin kind from the literal value, compare against
+// the LHS identifier's declared type; surface a type_mismatch diagnostic on mismatch.
+
+fn handleLiteralRhs(
+    tree: *const ast_mod.Ast,
+    _: []const @import("../frontend/resolver.zig").Reference,
+    declared_types: []const DeclaredType,
+    gpa: std.mem.Allocator,
+    out: *std.ArrayList(diagnostics.Diagnostic),
+    _: ast_mod.AssignmentExpression,
+    left_id: ast_mod.NodeId,
+    right_id: ast_mod.NodeId,
+) !void {
+    const left_node = tree.node(left_id);
+
+    // LHS must be an Identifier — we compare by name with the declared type.
+    if (left_node.data != .Identifier) return;
+    const lhs_name = left_node.data.Identifier.name;
+
+    const expected_id: ?types.TypeId = for (declared_types) |dt| {
+        if (std.mem.eql(u8, dt.name, lhs_name)) break dt.type_id;
+    } else null;
+    if (expected_id == null) return; // LHS has no declared type — skip.
+
+    const rhs_kind = inferBuiltinKindFromLiteral(tree.node(right_id).data.Literal.value) orelse return;
+
+    const lhs_kind = builtinKindFromTypeId(expected_id.?);
+    if (lhs_kind == null) return; // Declared type not classifiable as a builtin — skip.
+
+    if (rhs_kind != lhs_kind.?) {
+        try out.append(gpa, .{
+            .severity = .@"error",
+            .code = .type_mismatch,
+            .phase = .type_checker,
+            .message = staticTypeMismatchMessage(expected_id.?, rhs_kind),
+            .span = tree.node(right_id).span,
+            .label = lhs_name,
+        });
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 
 fn checkAssignments(
@@ -285,35 +409,19 @@ for (tree.nodes) |node| switch (node.data) {
 
             const right_id: ast_mod.NodeId = @intCast(assign_expr.right);
             const right_node = tree.node(right_id);
-            if (right_node.data != .Literal) continue; // RHS unknown — skip in v1.
 
-            const rhs_kind = inferBuiltinKindFromLiteral(right_node.data.Literal.value) orelse continue;
+            switch (right_node.data) {
+                .Literal => {
+                    // Existing literal-RHS path.
+                    return try handleLiteralRhs(tree, references, declared_types, gpa, out, assign_expr, left_id, right_id);
+                },
+                .CallExpression => {
+                    _ = try handleCallExprRhs(tree, references, declared_types, gpa, out, assign_expr, left_id);
+                    continue;
+                },
+                else => continue, // RHS unknown — skip in v1.
+            }
 
-            const ref: @import("../frontend/resolver.zig").Reference = for (references) |r| {
-                if (r.node == left_id and r.kind == .write) break r;
-            } else continue;
-
-
-            // Walk the declared-types table to find a declaration of `ref.name`.
-            // v1 does not track which specific declaration owned each symbol —
-            // just that one exists. Accepts a match from any scope in the table.
-            const expected_id: ?types.TypeId = for (declared_types) |dt| {
-                if (std.mem.eql(u8, dt.name, ref.name)) break dt.type_id;
-            } else null;
-            if (expected_id == null) continue;
-
-            // v1: classify LHS declared type as a builtin kind so we can compare directly.
-            const actual_kind = builtinKindFromTypeId(expected_id.?);
-            if (actual_kind != null and rhs_kind == actual_kind.?) continue; // No mismatch — skip.
-
-            try out.append(gpa, .{
-                .severity = .@"error",
-                .code = .type_mismatch,
-                .phase = .type_checker,
-                .message = staticTypeMismatchMessage(expected_id.?, rhs_kind),
-                .span = node.span,
-                .label = left_node.data.Identifier.name,
-            });
         },
         else => {},
     };
