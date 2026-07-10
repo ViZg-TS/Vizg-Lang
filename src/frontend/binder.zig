@@ -315,7 +315,7 @@ test "binder records imports exports scopes and declarations" {
     ;
 
     const scan = try scanner.scanAll(allocator, source, true);
-    const parsed = try parser.parse(allocator, scan.tokens, true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
     const bound = try bind(allocator, parsed.ast);
 
     try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
