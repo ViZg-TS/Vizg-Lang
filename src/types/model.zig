@@ -10,10 +10,19 @@ const builtin_kind = @import("builtin.zig");
 pub const TypeId = u32;
 pub const invalid_type: TypeId = std.math.maxInt(TypeId);
 
-/// Reserved id range for user-defined function signatures. Builtins occupy the
-/// [100, 199) range via `builtin_kind.builtinKindTypeId`, so user functions must
-/// be assigned ids ≥ `next_user_function_id` to avoid collisions.
-pub const next_user_type_id: TypeId = 1_000;
+/// Reserved numeric ranges across every TypeId space:
+///   - 0..99       reserved (unallocated as of now; kept for future builtins)
+///   - 100..199    builtin primitives via `builtin_kind.builtinKindTypeId`
+///                 (`base=100 + @intFromEnum(kind)` in builtin.zig:37).
+///   - 200..999    reserved for future builtins or extensions (no consumer yet)
+///   - >= 1000     user-defined function signatures via `FunctionSignatureStore`
+///                 (`next_user_type_id + index`, see model.zig:110).
+
+/// Builtins and user signatures must never overlap — the lookup at line 137 relies
+///   on `sig_id < next_user_type_id` to distinguish the two kinds cheaply.
+
+/// Start of reserved TypeId range for FunctionSignatureStore (user-defined function signatures).
+pub const next_user_type_id: TypeId = 1000;
 
 // ---------------------------------------------------------------------------
 // FunctionSignature — captured at declaration, referenced by id from a TypeKind.
