@@ -12,7 +12,13 @@ $(OUTPUT): main.zig $(H) $(LIB)
 	$(ZIG_BIN) build-exe main.zig -I $(dir $(abspath $(H))) \
 	    -lc $(LIB) -femit-bin=$(OUTPUT)
 
-clean:
-	rm -f $(OUTPUT)
+release: vizg_zig_consumer_release
 
-.PHONY: all clean
+vizg_zig_consumer_release: main.zig $(H) $(LIB)
+	$(ZIG_BIN) build-exe -O ReleaseFast -I $(dir $(abspath $(H))) \
+	    -lc $(LIB) -femit-bin=$(OUTPUT)_release main.zig
+
+clean:
+	rm -f $(OUTPUT) vizg_zig_consumer_release
+
+.PHONY: all clean release

@@ -9,7 +9,13 @@ analyze_hello: analyze_hello.c $(H) $(LIB)
 	gcc -O2 -Wall -Wextra -o $@ $< \
 	    -I$(dir $(H)) -L$(LIB_DIR) -lvizg
 
-clean:
-	rm -f analyze_hello
+release: analyze_hello_release
 
-.PHONY: all clean
+analyze_hello_release: analyze_hello.c $(H) $(LIB)
+	gcc -O3 -DNDEBUG -Wall -Wextra -o $@ $< \
+	    -I$(dir $(H)) -L$(LIB_DIR) -lvizg
+
+clean:
+	rm -f analyze_hello analyze_hello_release
+
+.PHONY: all clean release
