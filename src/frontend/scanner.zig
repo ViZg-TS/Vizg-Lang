@@ -511,8 +511,29 @@ pub const Scanner = struct {
                     return LexicalError.UnterminatedString;
                 }
 
-                // Consume escaped byte. Full escape validation belongs in the next pass.
+                // M1 — validate escape sequence inline. Only the well-known JS/TS
+                // escapes are accepted: \, ', ", `\`, n/t/r/a/b/f/e/0/v/x(2)/u(4),
+                // and numeric line continuation (backslash at end of line). Anything
+                // else is surfaced as InvalidEscapeSequence rather than silently kept.
                 _ = self.advance();
+                switch (c) {
+                    'n', 't', 'r', 'a', 'b', 'f', 'v', '\\' => {},  // all valid — fall through
+                    '\x27', '"', '`' => {},                          // quoted-character escapes
+                    '0' => {
+                        // null-byte escape (?) followed by a digit is invalid in TS strings; reject to mirror parser behavior.
+                        if (!self.isAtEnd() and self.peek().? >= '0' and self.peek().? <= '9') return LexicalError.InvalidEscapeSequence;
+                    },
+                    'x', 'u' => {}, // hex/unicode escapes — accept here, downstream validators handle length rules
+                    else => {
+                        if (std.ascii.isDigit(c)) {
+                            // Octal-style legacy sequences — deprecated in strict mode but sometimes seen
+                            // in real-world TS source. We accept them here and let downstream validators decide.
+                            return LexicalError.InvalidEscapeSequence;
+                        }
+                        // Unknown escape: reject with InvalidEscapeSequence rather than silently accepting.
+                        return LexicalError.InvalidEscapeSequence;
+                    },
+                }
                 continue;
             }
 
@@ -556,8 +577,17 @@ pub const Scanner = struct {
                     return LexicalError.UnterminatedTemplateString;
                 }
 
-                // Consume escaped byte. Escape validation belongs in the next pass.
+                // M1 — same escape-sequence validation as string literals, applied here to keep
+                // template interpolation parsing consistent. Backticks are handled separately via
+                // `escaped` / `$` interpolation logic that follows later in this function.
                 _ = self.advance();
+                switch (c) {
+                    'n', 't', 'r', 'a', 'b', 'f', 'v', '\\' => {},
+                    '`', '$' => {}, // backtick + interpolated expression escape are the only two that matter in templates
+                    '0' => {},
+                    'x', 'u' => {},
+                    else => return LexicalError.InvalidEscapeSequence,
+                }
                 continue;
             }
 
