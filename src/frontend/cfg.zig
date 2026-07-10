@@ -282,7 +282,7 @@ test "cfg creates a graph for exported function" {
     ;
 
     const scan = try scanner.scanAll(allocator, source, true);
-    const parsed = try parser.parse(allocator, scan.tokens, true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
     const cfgs = try build(allocator, parsed.ast);
 
     try std.testing.expectEqual(@as(usize, 1), cfgs.len);
