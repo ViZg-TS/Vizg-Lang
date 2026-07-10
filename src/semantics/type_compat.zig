@@ -12,15 +12,14 @@ const builtin = @import("../types/builtin.zig");
 
 /// Maps a TypeId to its BuiltinKind if one exists. Function signatures occupy
 /// ids ≥ next_user_type_id (1000) and never collide with builtin id space.
+/// Map a TypeId back to its BuiltinKind when it's one of the known primitives.
+/// Iterates `builtinKinds_static` so that future additions auto-propagate: if a
+/// new builtin kind gets added (or an old one removed) this function keeps its
+/// existing behavior without requiring another update here — closing M3 safety gap.
 fn builtinKindFor(type_id: types.TypeId) ?types.BuiltinKind {
-    if (type_id == builtin.builtinKindTypeId(.number))   return .number;
-    if (type_id == builtin.builtinKindTypeId(.string))    return .string;
-    if (type_id == builtin.builtinKindTypeId(.boolean))   return .boolean;
-    if (type_id == builtin.builtinKindTypeId(.null_))     return .null_;
-    if (type_id == builtin.builtinKindTypeId(.undefined)) return .undefined;
-    if (type_id == builtin.builtinKindTypeId(.void))      return .void;
-    if (type_id == builtin.builtinKindTypeId(.unknown))   return .unknown;
-    if (type_id == builtin.builtinKindTypeId(.any))       return .any;
+    for (builtin.builtinKinds_static) |kind| {
+        if (type_id == builtin.builtinKindTypeId(kind)) return kind;
+    }
     return null;
 }
 
