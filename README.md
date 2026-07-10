@@ -34,7 +34,17 @@ The default build installs the `vizg` executable under `zig-out/bin/vizg`.
 zig build test
 ```
 
-The test step runs both the library module tests and the CLI module tests.
+The test step runs the complete frontend, module graph, and semantic unit-test
+tree, and compiles the public C ABI entry point as a test artifact.
+
+## Android
+
+```sh
+zig build android
+```
+
+This cross-compiles the C ABI static library for Android `aarch64`, `armv7`,
+and `x86_64`, installing the archives under `zig-out/android/<abi>/libvizg.a`.
 
 ## Validation
 
