@@ -59,3 +59,15 @@ pub fn analyzeFileFromPath(a_alloc: std.mem.Allocator, dir_path: ?[]const u8) ?*
 pub fn freeResult(result: ?*Result) void {
     abi.Vizg_freeResult(result);
 }
+
+
+// -----------------------------------------------------------------------------
+// C ABI symbol exports — pull the compiled surface from Lib/vizg.zig into
+// libvizg.a so consumers of Lib/vizg.h can link `-lvizg` against it.  Zig
+// requires each @export() call to point at a pub fn with explicit calling
+// convention; for .call_conv(.C) this is the default on a non-generic entry.
+const cabi = @import("vizg");
+
+@export(&cabi.Vizg_analyzeFile, .{.name = "vizg_analyze_file",  .call_conv = .C});
+@export(&cabi.Vizg_freeResult,   .{.name = "vizg_free_result",   .call_conv = .C});
+@export(&cabi.Vizg_analyzeSource,.{.name = "vizg_analyze_source",.call_conv = .C});

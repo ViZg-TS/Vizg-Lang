@@ -16,6 +16,14 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // C ABI module — the compiled surface of libvizg.a with pub fn + @export().
+    const vizg_cabi = b.addModule("vizg", .{
+        .root_source_file = b.path("Lib/vizg.zig"),
+        .target = target, .optimize = optimize, .link_libc = true,
+    });
+    // Lib/vizg.zig @imports vizg-impl to reach frontend/scanner types.
+    vizg_cabi.addImport("vizg-impl", pkg_src);
+
     // Library entry point: compile src/lib.zig as a static archive.
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
@@ -27,6 +35,9 @@ pub fn build(b: *std.Build) void {
     // src/lib.zig can use @import("vizg-impl").frontend.xxx which Zig resolves
     // via pkg_src (rooted at src/root.zig).
     lib_mod.addImport("vizg-impl", pkg_src);
+    // Pull the C ABI surface into the library compile tree so its @export() calls
+    // land in libvizg.a. Consumers include Lib/vizg.h and link -lvizg.
+    lib_mod.addImport("vizg", vizg_cabi);
 
     const vizg_lib = b.addLibrary(.{
         .name = "vizg",

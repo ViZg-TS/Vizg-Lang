@@ -1,5 +1,4 @@
 // src/lib_abi.zig — Minimal C ABI for vizg (static library surface).
-const std = @import("std");
 
 pub const Vizg_Status = enum(c_int) {
     OK = 0,
@@ -59,12 +58,6 @@ pub const Vizg_TokenType = enum(c_int) {
     Keyword_super, Keyword_switch, Keyword_this, Keyword_throw, Keyword_true,
     Keyword_try, Keyword_typeof, Keyword_undefined, Keyword_var, Keyword_void,
     Keyword_while, Keyword_with,
-    Punctuator_OpenParenthesis, Punctuator_CloseParenthesis, Punctuator_OpenBracket,
-    Punctuator_CloseBracket, Punctuator_OpenBrace, Punctuator_CloseBrace,
-    Punctuator_Comma, Punctuator_Dot, Punctuator_Ellipsis, Punctuator_Arrow,
-    Punctuator_Colon, Punctuator_Semicolon, Punctuator_Question, Punctuator_Bang,
-    Punctuator_EqualsEquals, Punctuator_ExclamationEquals, Punctuator_Tilde,
-    Punctuator_PipePipe, Punctuator_AmpAmp, Punctuator_PlusPlus, Punctuator_MinusMinus,
     Punctuator_Plus, Punctuator_Minus, Punctuator_Star, Punctuator_Slash,
     Punctuator_Percent, Punctuator_Power, Punctuator_DotDot,
     Punctuator_LessThanLessThan, Punctuator_GreaterThanGreaterThan,
@@ -96,22 +89,3 @@ pub const Vizg_SourceInput = extern struct {
     path_ptr: [*c]const u8,
     path_len: usize,
 };
-
-extern "vizg" fn vizg_analyze_source_ex(
-    input: *const Vizg_SourceInput, out_result: **Vizg_Result,
-) Vizg_Status;
-
-extern "vizg" fn vizg_analyze_file(
-    path_ptr: [*c]const u8, path_len: usize,
-    text_ptr: [*c]const u8, text_len: usize,
-) ?*Vizg_Result;
-
-extern "vizg" fn vizg_free_result(result: *Vizg_Result) void;
-
-extern "vizg" fn vizg_analyze_source(
-    source_ptr: [*c]const u8, source_len: usize,
-    path_ptr: [*c]const u8, path_len: usize,
-) ?*Vizg_Result;
-
-pub const Vizg_analyzeFile = &vizg_analyze_file;
-pub const Vizg_freeResult = &vizg_free_result;
