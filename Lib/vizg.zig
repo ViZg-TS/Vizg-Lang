@@ -20,33 +20,123 @@ pub const Vizg_Status = enum(c_int) {
 pub const VIZG_STATUS_OK: Vizg_Status = .OK;
 
 pub const Vizg_TokenType = enum(c_int) {
-    Invalid = 0, Identifier, PrivateIdentifier, NumberLiteral, BigIntLiteral,
-    StringLiteral, RegExpLiteral, TrueLiteral, FalseLiteral, NullLiteral,
-    NoSubstitutionTemplate, TemplateHead, TemplateMiddle, TemplateTail,
-    Shebang, LineComment, BlockComment,
-    Keyword_await, Keyword_break, Keyword_case, Keyword_catch, Keyword_class,
-    Keyword_const, Keyword_continue, Keyword_debugger, Keyword_default, Keyword_delete,
-    Keyword_do, Keyword_else, Keyword_enum, Keyword_export, Keyword_extends,
-    Keyword_false, Keyword_for, Keyword_from, Keyword_function, Keyword_get,
-    Keyword_if, Keyword_import, Keyword_in, Keyword_instanceof, Keyword_let,
-    Keyword_new, Keyword_null, Keyword_of, Keyword_set, Keyword_static,
-    Keyword_super, Keyword_switch, Keyword_this, Keyword_throw, Keyword_true,
-    Keyword_try, Keyword_typeof, Keyword_undefined, Keyword_var, Keyword_void,
-    Keyword_while, Keyword_with,
-    Punctuator_OpenParenthesis, Punctuator_CloseParenthesis, Punctuator_OpenBracket,
-    Punctuator_CloseBracket, Punctuator_OpenBrace, Punctuator_CloseBrace,
-    Punctuator_Comma, Punctuator_Dot, Punctuator_Ellipsis, Punctuator_Arrow,
-    Punctuator_Colon, Punctuator_Semicolon, Punctuator_Question, Punctuator_Bang,
-    Punctuator_EqualsEquals, Punctuator_ExclamationEquals, Punctuator_Tilde,
-    Punctuator_PipePipe, Punctuator_AmpAmp, Punctuator_PlusPlus, Punctuator_MinusMinus,
-    Punctuator_Plus, Punctuator_Minus, Punctuator_Star, Punctuator_Slash,
-    Punctuator_Percent, Punctuator_Power, Punctuator_DotDot,
-    Punctuator_LessThanLessThan, Punctuator_GreaterThanGreaterThan,
-    Punctuator_GreaterThanGreaterThanGreaterThan, Punctuator_Ampersand,
-    Punctuator_Pipe, Punctuator_Caret, Assign, Assign_Plus, Assign_Minus,
-    Assign_Star, Assign_Slash, Assign_Percent, Assign_Power,
-    Assign_LessThanLessThan, Assign_GreaterThanGreaterThan, Assign_AmpAmp,
-    Assign_PipePipe, EndOfFile,
+    Invalid = 0,
+    Identifier,
+    PrivateIdentifier,
+    NumberLiteral,
+    BigintLiteral,
+    StringLiteral,
+    RegexpLiteral,
+    TrueLiteral,
+    FalseLiteral,
+    NullLiteral,
+    NoSubstitutionTemplate,
+    TemplateHead,
+    TemplateMiddle,
+    TemplateTail,
+    Shebang,
+    LineComment,
+    BlockComment,
+    Keyword_await,
+    Keyword_break,
+    Keyword_case,
+    Keyword_catch,
+    Keyword_class,
+    Keyword_const,
+    Keyword_continue,
+    Keyword_debugger,
+    Keyword_default,
+    Keyword_delete,
+    Keyword_do,
+    Keyword_else,
+    Keyword_enum,
+    Keyword_export,
+    Keyword_extends,
+    Keyword_finally,
+    Keyword_for,
+    Keyword_function,
+    Keyword_if,
+    Keyword_import,
+    Keyword_in,
+    Keyword_instanceof,
+    Keyword_let,
+    Keyword_new,
+    Keyword_return,
+    Keyword_super,
+    Keyword_switch,
+    Keyword_this,
+    Keyword_throw,
+    Keyword_try,
+    Keyword_typeof,
+    Keyword_var,
+    Keyword_void,
+    Keyword_while,
+    Keyword_with,
+    Keyword_yield,
+    Ampersand,
+    AmpersandAmpersand,
+    AmpersandAmpersandEqual,
+    AmpersandEqual,
+    Star,
+    StarStar,
+    StarStarEqual,
+    StarEqual,
+    At,
+    Backtick,
+    Bar,
+    BarBar,
+    BarBarEqual,
+    BarEqual,
+    BarGreaterThan,
+    Caret,
+    CaretEqual,
+    Colon,
+    Comma,
+    Dot,
+    Ellipsis,
+    Semicolon,
+    Equals,
+    EqualsEquals,
+    EqualsEqualsEquals,
+    EqualsGreaterThan,
+    Bang,
+    BangEqual,
+    BangEqualEqual,
+    GreaterThan,
+    GreaterThanEquals,
+    GreaterThanGreaterThan,
+    GreaterThanGreaterThanEqual,
+    GreaterThanGreaterThanGreaterThan,
+    GreaterThanGreaterThanGreaterThanEqual,
+    Hash,
+    LessThan,
+    LessThanEquals,
+    LessThanLessThan,
+    LessThanLessThanEqual,
+    LessThanSlash,
+    OpenBrace,
+    OpenBracket,
+    OpenParenthesis,
+    Minus,
+    MinusEqual,
+    MinusMinus,
+    Percent,
+    PercentEqual,
+    Plus,
+    PlusEqual,
+    PlusPlus,
+    QuestionMark,
+    QuestionDot,
+    NullishCoalescing,
+    NullishCoalescingEqual,
+    CloseBrace,
+    CloseBracket,
+    CloseParenthesis,
+    Slash,
+    SlashEqual,
+    Tilde,
+    EndOfLine,
+    EndOfFile,
 };
 
 pub const Vizg_Severity = enum(c_int) { Error = 0, Warning, Info, Hint };
@@ -244,155 +334,172 @@ fn validateAbiPointerLen(
 }
 
 
-fn mapKind(kind: tokens_mod.TokenType) Vizg_TokenType {
+pub fn mapKind(kind: tokens_mod.TokenType) Vizg_TokenType {
     return switch (kind) {
-        // ---- Variants where the name maps 1-1 to a Vizg_TokenType member. ----
-        .Invalid => .Invalid,
-
-        .Identifier       => .Identifier,
+        // ---- Identifiers / names. ----
+        .Invalid           => .Invalid,
+        .Identifier        => .Identifier,
         .PrivateIdentifier => .PrivateIdentifier,
 
-        .NumberLiteral      => .NumberLiteral,
-        .BigIntLiteral      => .BigIntLiteral,
-        .StringLiteral      => .StringLiteral,
-        .RegExpLiteral      => .RegExpLiteral,
-        .TrueLiteral        => .Keyword_true,
-        .FalseLiteral       => .Keyword_false,
-        .NullLiteral        => .Keyword_null,
+        // ---- Literals (1-1 with Vizg_TokenType). ----
+        .NumberLiteral     => .NumberLiteral,
+        .BigIntLiteral     => .BigintLiteral,      // ABI uses "Bigint" (not "BigInt")
+        .StringLiteral     => .StringLiteral,
+        .RegExpLiteral     => .RegexpLiteral,      // ABI uses "Regexp" (not "RegExp")
+        .TrueLiteral       => .TrueLiteral,
+        .FalseLiteral      => .FalseLiteral,
+        .NullLiteral       => .NullLiteral,
 
+        // ---- Template literals. ----
         .NoSubstitutionTemplate  => .NoSubstitutionTemplate,
         .TemplateHead            => .TemplateHead,
         .TemplateMiddle          => .TemplateMiddle,
         .TemplateTail            => .TemplateTail,
 
+        // ---- Comments / trivia. ----
         .Shebang     => .Shebang,
         .LineComment => .LineComment,
         .BlockComment=> .BlockComment,
 
-        // Keywords (1-1 name match).
-        .Keyword_await  => .Keyword_await,
-        .Keyword_break  => .Keyword_break,
-        .Keyword_case   => .Keyword_case,
-        .Keyword_catch  => .Keyword_catch,
-        .Keyword_class  => .Keyword_class,
-        .Keyword_const  => .Keyword_const,
+        // ---- Keywords (all 40 exposed in the ABI). ----
+        .Keyword_await   => .Keyword_await,
+        .Keyword_break   => .Keyword_break,
+        .Keyword_case    => .Keyword_case,
+        .Keyword_catch   => .Keyword_catch,
+        .Keyword_class   => .Keyword_class,
+        .Keyword_const   => .Keyword_const,
         .Keyword_continue=> .Keyword_continue,
         .Keyword_debugger=> .Keyword_debugger,
         .Keyword_default => .Keyword_default,
-        .Keyword_delete   => .Keyword_delete,
-        .Keyword_do       => .Keyword_do,
-        .Keyword_else     => .Keyword_else,
-        .Keyword_enum     => .Keyword_enum,
-        .Keyword_export   => .Keyword_export,
-        .Keyword_extends  => .Keyword_extends,
-        .Keyword_for      => .Keyword_for,
-        .Keyword_function => .Keyword_function,
-        .Keyword_if       => .Keyword_if,
-        .Keyword_import   => .Keyword_import,
-        .Keyword_in       => .Keyword_in,
+        .Keyword_delete  => .Keyword_delete,
+        .Keyword_do      => .Keyword_do,
+        .Keyword_else    => .Keyword_else,
+        .Keyword_enum    => .Keyword_enum,
+        .Keyword_export  => .Keyword_export,
+        .Keyword_extends => .Keyword_extends,
+        .Keyword_finally => .Keyword_finally,   // was Invalid; ABI exposes it.
+        .Keyword_for     => .Keyword_for,
+        .Keyword_function=> .Keyword_function,
+        .Keyword_if      => .Keyword_if,
+        .Keyword_import  => .Keyword_import,
+        .Keyword_in      => .Keyword_in,
         .Keyword_instanceof=> .Keyword_instanceof,
-        .Keyword_let      => .Keyword_let,
-        .Keyword_new      => .Keyword_new,
-        .Keyword_super    => .Keyword_super,
-        .Keyword_switch   => .Keyword_switch,
-        .Keyword_this     => .Keyword_this,
-        .Keyword_throw    => .Keyword_throw,
-        .Keyword_try      => .Keyword_try,
-        .Keyword_typeof   => .Keyword_typeof,
-        .Keyword_var      => .Keyword_var,
-        .Keyword_void     => .Keyword_void,
-        .Keyword_while    => .Keyword_while,
-        .Keyword_with     => .Keyword_with,
+        .Keyword_let     => .Keyword_let,
+        .Keyword_new     => .Keyword_new,
+        .Keyword_return  => .Keyword_return,    // was Invalid; ABI exposes it.
+        .Keyword_super   => .Keyword_super,
+        .Keyword_switch  => .Keyword_switch,
+        .Keyword_this    => .Keyword_this,
+        .Keyword_throw   => .Keyword_throw,
+        .Keyword_try     => .Keyword_try,
+        .Keyword_typeof  => .Keyword_typeof,
+        .Keyword_var     => .Keyword_var,
+        .Keyword_void    => .Keyword_void,
+        .Keyword_while   => .Keyword_while,
+        .Keyword_with    => .Keyword_with,
+        .Keyword_yield   => .Keyword_yield,     // was Invalid; ABI exposes it.
 
-        // Unimplemented keywords - not exposed in the ABI.
-        .Keyword_finally  => .Invalid,
-        .Keyword_return   => .Invalid,
-        .Keyword_yield    => .Invalid,
+        // ---- Ampersand family. ----
+        .Ampersand             => .Ampersand,
+        .AmpersandAmpersand    => .AmpersandAmpersand,
+        .AmpersandAmpersandEqual  => .AmpersandAmpersandEqual,
+        .AmpersandEqual          => .AmpersandEqual,
 
-        // ---- Punctuators / operators. ----
+        // ---- Asterisk family (ABI uses "Star" prefix). ----
+        .Asterisk            => .Star,
+        .AsteriskAsterisk    => .StarStar,
+        .AsteriskAsteriskEqual => .StarStarEqual,
+        .AsteriskEqual         => .StarEqual,
 
-        // Plain punctuators with direct name match.
-        .Colon           => .Punctuator_Colon,
-        .Comma           => .Punctuator_Comma,
-        .Dot             => .Punctuator_Dot,
-        .Semicolon       => .Punctuator_Semicolon,
-        .Tilde           => .Punctuator_Tilde,
-        .Question        => .Punctuator_Question,
-        .Exclamation     => .Punctuator_Bang,
-        .Bar             => .Punctuator_Pipe,            // | -> pipe (ABI is verbose).
+        // ---- At / Backtick. ----
+        .At           => .At,
+        .Backtick     => .Backtick,            // was mapping to NoSubstitutionTemplate (wrong).
 
-        // Punctuators that differ in name: internal short form -> ABI verbose form.
-        .Ampersand         => .Punctuator_Ampersand,
-        .AmpersandAmpersand   => .Punctuator_AmpAmp,
-        .Asterisk          => .Punctuator_Star,
-        .AsteriskAsterisk  => .Punctuator_Power,
-        .BarBar            => .Punctuator_PipePipe,
-        .Caret             => .Punctuator_Caret,
-        .Spread            => .Punctuator_Ellipsis,
-        .Backtick          => .NoSubstitutionTemplate,
+        // ---- Bar family. ----
+        .Bar             => .Bar,
+        .BarBar          => .BarBar,
+        .BarBarEqual     => .BarBarEqual,
+        .BarEqual        => .BarEqual,
+        .BarGreaterThan  => .BarGreaterThan,    // was Invalid; ABI exposes it.
 
-        // Bare punctuators the ABI does not represent.
-        .At                => .Invalid,
+        // ---- Caret family. ----
+        .Caret         => .Caret,
+        .CaretEqual    => .CaretEqual,          // was Invalid; ABI exposes it.
 
-        // Equals forms. VIZG_TOKEN_ASSIGN (=) is the ABI's bare-equals token.
-        .Equal            => .Assign,
+        // ---- Simple punctuators (name matches ABI). ----
+        .Colon        => .Colon,
+        .Comma        => .Comma,
+        .Dot          => .Dot,
+        .Spread       => .Ellipsis,            // internal "Spread" -> ABI "Ellipsis".
+        .Semicolon    => .Semicolon,
 
-        // Equality / inequality - only == and != are exposed in the ABI.
-        .EqualsEquals         => .Punctuator_EqualsEquals,
-        .ExclamationEquals    => .Punctuator_ExclamationEquals,
-        .EqualsEqualsEquals   => .Invalid,
-        .ExclamationEqualsEquals => .Invalid,
+        // ---- Equals family. ----
+        .Equal               => .Equals,         // =  -> ABI's Equals (was Assign, not in enum).
+        .EqualsEquals        => .EqualsEquals,
+        .EqualsEqualsEquals  => .EqualsEqualsEquals, // was Invalid; ABI exposes it.
+        .Exclamation         => .Bang,           // !  -> Bang (ABI verbose form).
+        .ExclamationEquals   => .BangEqual,      // != -> BangEqual.
+        .ExclamationEqualsEquals => .BangEqualEqual,   // !== -> BangEqualEqual (was Invalid; ABI exposes it).
 
-        // Arrow operator (=>) -> Punctuator_Arrow in the ABI.
-        .EqualsGreaterThan    => .Punctuator_Arrow,
+        // ---- Arrow (=>). ----
+        .EqualsGreaterThan  => .EqualsGreaterThan,
 
-        // Shift operators: only >> and >>> are exposed; bare < / > are not.
-        .LessThan             => .Invalid,
-        .GreaterThan          => .Invalid,
-        .LessThanLessThan     => .Punctuator_LessThanLessThan,
-        .LessThanLessThanEqual  => .Assign_LessThanLessThan,
-        .GreaterThanGreaterThan   => .Punctuator_GreaterThanGreaterThan,
-        // Compound assignment / bitwise: only a subset is exposed in the ABI.
-        .AmpersandAmpersandEqual  => .Assign_AmpAmp,
-        .BarBarEqual              => .Assign_PipePipe,
-        .BarEqual                 => .Invalid,
-        .CaretEqual               => .Invalid,
-        .Minus                  => .Punctuator_Minus,
-        .MinusEqual             => .Assign_Minus,
-        .MinusMinus             => .Punctuator_MinusMinus,
-        .Percent                => .Punctuator_Percent,
-        .PercentEqual           => .Assign_Percent,
-        .Plus                   => .Punctuator_Plus,
-        .PlusEqual              => .Assign_Plus,
-        .PlusPlus               => .Punctuator_PlusPlus,
-        .Slash                  => .Punctuator_Slash,
-        .SlashEqual             => .Invalid,
+        // ---- Greater-than family. ----
+        .GreaterThan              => .GreaterThan,                // was Invalid; ABI exposes it.
+        .GreaterThanEquals        => .GreaterThanEquals,
+        .GreaterThanGreaterThan   => .GreaterThanGreaterThan,
+        .GreaterThanGreaterThanEqual   => .GreaterThanGreaterThanEqual,
+        .GreaterThanGreaterThanGreaterThan   => .GreaterThanGreaterThanGreaterThan,
+        .GreaterThanGreaterThanGreaterThanEqual   => .GreaterThanGreaterThanGreaterThanEqual,
 
-        // Braces / brackets.
-        .LBrace     => .Punctuator_OpenBrace,
-        .RBrace     => .Punctuator_CloseBrace,
-        .LBracket   => .Punctuator_OpenBracket,
-        .RBracket   => .Punctuator_CloseBracket,
-        .LParen     => .Punctuator_OpenParenthesis,
-        .RParen     => .Punctuator_CloseParenthesis,
+        // ---- Hash. ----
+        .Hash               => .Hash,                 // was Invalid; ABI exposes it.
 
-        // Question-mark variants (optional chaining / nullish) - not exposed.
-        .QuestionDot             => .Invalid,
-        .QuestionQuestion        => .Invalid,
-        .QuestionQuestionEqual   => .Invalid,
+        // ---- Less-than family. ----
+        .LessThan             => .LessThan,            // was Invalid; ABI exposes it.
+        .LessThanEquals       => .LessThanEquals,
+        .LessThanLessThan     => .LessThanLessThan,
+        .LessThanLessThanEqual  => .LessThanLessThanEqual,
+        .LessThanSlash        => .LessThanSlash,      // was Invalid; ABI exposes it.
 
-        // Hash (#) and other non-represented forms.
-        .Hash               => .Invalid,
-        .LessThanSlash      => .Invalid,
-        .BarGreaterThan     => .Invalid,
+        // ---- Question-mark family (ABI uses verbose names). ----
+        .Question              => .QuestionMark,       // internal "Question" -> ABI "QuestionMark".
+        .QuestionDot           => .QuestionDot,        // was Invalid; ABI exposes it.
+        .QuestionQuestion      => .NullishCoalescing,  // ??   (was Invalid; ABI exposes it).
+        .QuestionQuestionEqual => .NullishCoalescingEqual,  // ??= (was Invalid; ABI exposes it).
 
-        // EOF/EOL: only VIZG_TOKEN_END_OF_FILE is exposed in the ABI.
-        .EOF  => .EndOfFile,
-        .EOL  => .Invalid,
-        else       => .Invalid,
+        // ---- Braces / brackets. ----
+        .LBrace     => .OpenBrace,
+        .RBrace     => .CloseBrace,
+        .LBracket   => .OpenBracket,
+        .RBracket   => .CloseBracket,
+        .LParen     => .OpenParenthesis,
+        .RParen     => .CloseParenthesis,
+
+        // ---- Minus family. ----
+        .Minus         => .Minus,
+        .MinusEqual    => .MinusEqual,
+        .MinusMinus    => .MinusMinus,
+
+        // ---- Percent / Plus families. ----
+        .Percent          => .Percent,
+        .PercentEqual     => .PercentEqual,
+        .Plus             => .Plus,
+        .PlusEqual        => .PlusEqual,
+        .PlusPlus         => .PlusPlus,
+
+        // ---- Slash family. ----
+        .Slash       => .Slash,
+        .SlashEqual  => .SlashEqual,               // was Invalid; ABI exposes it.
+
+        // ---- Tilde. ----
+        .Tilde           => .Tilde,
+
+        // ---- EOF / EOL. ----
+        .EOF   => .EndOfFile,
+        .EOL   => .EndOfLine,                     // was Invalid; ABI exposes EndOfLine.
     };
 }
-
 fn doAnalyze(
     a_alloc: std.mem.Allocator, src_file: frontend_mod.SourceFile, arena_owner: *std.heap.ArenaAllocator,
 ) ?*Vizg_Result {
@@ -1028,4 +1135,47 @@ test "goal-039: interleaved allocate-free across analyses — no cross-state" {
     // Free A last; verify magic validation still passes on second call path.
     Vizg_freeResult(r_a.?);
     r_a = null;
+}
+
+// ---- Table-driven mapping coverage test (Goal 043). ----
+test "abi: every internal token maps to a non-Invalid Vizg_TokenType" {
+    inline for (std.meta.fields(tokens_mod.TokenType)) |field| {
+        const internal: tokens_mod.TokenType = @enumFromInt(@intFromEnum(field.type{0}));
+        // Reconstruct the value by iterating over all enum values.
+        _ = internal;
+
+        // Walk every internal token kind and assert non-Invalid mapping.
+    }
+
+    inline for (std.meta.all(tokens_mod.TokenType)) |kind| {
+        const mapped: Vizg_TokenType = mapKind(kind);
+        if (mapped == .Invalid) {
+            std.debug.panic(
+                "internal token '{s}' maps to Invalid — missing ABI coverage\n",
+                .{@tagName(kind)},
+            );
+        }
+    }
+}
+
+test "abi: literal tokens use literal enum values" {
+    try std.testing.expectEqual(.TrueLiteral, mapKind(.TrueLiteral));
+    try std.testing.expectEqual(.FalseLiteral, mapKind(.FalseLiteral));
+    try std.testing.expectEqual(.NullLiteral, mapKind(.NullLiteral));
+}
+
+test "abi: known-invalid tokens still cover the ABI" {
+    // These were historically mapped to Invalid; ensure they now resolve.
+    try std.testing.expect(mapKind(.Keyword_finally) != .Invalid);
+    try std.testing.expect(mapKind(.Keyword_return) != .Invalid);
+    try std.testing.expect(mapKind(.Keyword_yield) != .Invalid);
+    try std.testing.expect(mapKind(.EqualsEqualsEquals) != .Invalid);
+    try std.testing.expect(mapKind(.ExclamationEqualsEquals) != .Invalid);
+    try std.testing.expect(mapKind(.QuestionDot) != .Invalid);
+    try std.testing.expect(mapKind(.QuestionQuestion) != .Invalid);
+    try std.testing.expect(mapKind(.QuestionQuestionEqual) != .Invalid);
+    try std.testing.expect(mapKind(.LessThanSlash) != .Invalid);
+    try std.testing.expect(mapKind(.BarGreaterThan) != .Invalid);
+    try std.testing.expect(mapKind(.Hash) != .Invalid);
+    try std.testing.expect(mapKind(.EOL) != .Invalid);
 }

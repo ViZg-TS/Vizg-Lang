@@ -26,3 +26,6 @@ analyze_hello
 .zig-lib
 test_c
 main_zig
+
+local-test
+local_test/
