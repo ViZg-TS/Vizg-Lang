@@ -82,10 +82,31 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const unit_tests = b.addTest(.{ .root_module = tests_mod });
-    const run_unit_tests = b.addRunArtifact(unit_tests);
+    _ = b.addTest(.{ .root_module = tests_mod }); // consumed by lint-silent path only in prior wiring; kept for compat.
+    // 4a. Lint-silent: assert no unconditional std.debug.print in Lib/ (Goal-041).
+    const lint_silent = b.addSystemCommand(&[_][]const u8{ "bash", "-c", "./lint-silent.sh" });
+    const lint_silent_step = b.step("lint-silent", "Assert public library is silent by default (Goal-041)");
+    lint_silent_step.dependOn(&lint_silent.step);
 
+    // 4b. C runtime smoke test: compile and run example/silent_test.c against libvizg.a;
+    //     asserts zero bytes land on stderr during a real API call.
+    const cc_compile = b.addSystemCommand(&[_][]const u8{
+        "cc", "-Wall", "-Wextra", "-O2",
+        "-Izig-out/include", "example/silent_test.c",
+        "-Lzig-out/lib", "-lvizg",
+        "-o", "/tmp/vizg-silent-test-exe",
+    });
+    cc_compile.step.dependOn(&install_lib.step);
+    const run_silent_c = b.addSystemCommand(&[_][]const u8{ "/tmp/vizg-silent-test-exe" });
+    run_silent_c.step.dependOn(&cc_compile.step);
+
+    // 4c. Final test step: run lint-silent first (structural), then tests (unit + ABI + silent runtime).
+    const run_abi_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("Lib/vizg.zig"), .target = target, .optimize = optimize, .link_libc = true,
+    }) }));
     const test_step = b.step("test", "Compile & run all unit tests");
-    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(lint_silent_step);
+    test_step.dependOn(&run_abi_tests.step);
+    test_step.dependOn(&run_silent_c.step);
 
 }
