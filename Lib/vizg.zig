@@ -11,7 +11,13 @@ const vizg_pkg = @import("vizg-impl");
 const frontend_mod = vizg_pkg.frontend;
 const diagnostics_mod = vizg_pkg.diagnostics;
 
-pub const Vizg_Status = enum(c_int) { OK = 0, ERR_GENERIC, ERR_IO, ERR_PARSE };
+pub const Vizg_Status = enum(c_int) {
+    OK = 0,
+    ERR_GENERIC,
+    ERR_IO,
+    ERR_PARSE,
+    ERR_ABI,
+};
 pub const VIZG_STATUS_OK: Vizg_Status = .OK;
 
 pub const Vizg_TokenType = enum(c_int) {
@@ -253,6 +259,29 @@ fn readFileBytes(a_alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
 // The internal `tokens.TokenType` and the ABI `Vizg_TokenType` enums share
 // names for most variants, but a handful of punctuators/operators differ -
 // those are mapped explicitly below.
+// ---------------------------------------------------------------------------
+// C ABI pointer/length validation.
+// Rejected cases: null pointer with positive length (would produce a dangling
+// slice or undefined behavior if ever passed to an @import/slice op).
+// Accepted: non-null + any valid length; null + 0 is allowed where semantically
+// empty values are permissible (caller contract).
+fn validateAbiPointerLen(
+    name: [:0]const u8,
+    ptr: ?[*c]const u8,
+    len: usize,
+) bool {
+    if (ptr == null and len > 0) {
+
+        std.debug.print(
+            "abi validation failed: {s}_ptr=null with non-zero length ({d}).\n",
+            .{name, len}
+        );
+        return false;
+    }
+    return true;
+}
+
+
 fn mapKind(kind: @import("vizg-impl").tokens.TokenType) Vizg_TokenType {
     return switch (kind) {
         // ---- Variants where the name maps 1-1 to a Vizg_TokenType member. ----
@@ -448,8 +477,9 @@ fn doAnalyze(
                 darr[i].path_ptr  = pb.ptr;
                 darr[i].path_len  = p.len;
             } else {
-                // path_ptr == null implies path_len == 0 (ABI invariant).
+                // ABI invariant: if path is absent, both fields must reflect that.
                 darr[i].path_ptr = null;
+                darr[i].path_len = 0;
             }
         }
         owned_diags = darr;
@@ -500,6 +530,11 @@ pub fn Vizg_analyzeFile(
     text_len: usize,
 ) callconv(.c) ?*Vizg_Result {
     const page = std.heap.page_allocator;
+
+    // Validate every pointer/length pair BEFORE slicing — prevents null+posLen
+    // from ever producing a dangling slice or undefined behavior downstream.
+    if (!validateAbiPointerLen("text", text_ptr, text_len)) return null;
+    if (!validateAbiPointerLen("path", path_ptr, path_len)) return null;
 
     // Heap-allocate the arena so its pointer survives past this function's
     // return — we register it in result_arena_map and look it up at free time.

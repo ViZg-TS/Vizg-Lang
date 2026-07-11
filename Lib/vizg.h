@@ -145,6 +145,7 @@ typedef enum {
     VIZG_STATUS_ERR_GENERIC,
     VIZG_STATUS_ERR_IO,
     VIZG_STATUS_ERR_PARSE,
+    VIZG_STATUS_ERR_ABI,
 } Vizg_Status;
 
 #ifdef __cplusplus
