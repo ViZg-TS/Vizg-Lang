@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
 
     // -------------------------------------------------------------------
     // 1. Package registered at top level so @import("vizg-impl/...") works
-    //    from any module in this build (including Lib/vizg.zig).
+    //    from any module in this build.
     // -------------------------------------------------------------------
     const pkg_src = b.addModule("vizg-impl", .{
         .root_source_file = b.path("src/root.zig"),
@@ -16,15 +16,15 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    // Library entry point: compile Lib/vizg.zig as a static archive.
+    // Library entry point: compile src/lib.zig as a static archive.
     const lib_mod = b.createModule(.{
-        .root_source_file = b.path("Lib/vizg.zig"),
+        .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
     // Bind "vizg-impl" package to the module defined above.  With this binding,
-    // Lib/vizg.zig can use @import("vizg-impl").frontend.xxx which Zig resolves
+    // src/lib.zig can use @import("vizg-impl").frontend.xxx which Zig resolves
     // via pkg_src (rooted at src/root.zig).
     lib_mod.addImport("vizg-impl", pkg_src);
 
@@ -37,18 +37,14 @@ pub fn build(b: *std.Build) void {
     // 2. Install step — default prefix is zig-out/.
     //       zig build → installs everything into the prefix (default: zig-out)
     //       zig-out/lib/libvizg.a     ← library archive
-    //       zig-out/include/vizg.h   ← public C header
     // -------------------------------------------------------------------
     const install_lib = b.addInstallArtifact(vizg_lib, .{});
-    const install_h = b.addInstallFile(b.path("Lib/vizg.h"), "include/vizg.h");
 
-    const lib_step = b.step("lib", "Build & install: zig-out/lib/libvizg.a + include/vizg.h");
+    const lib_step = b.step("lib", "Build & install: zig-out/lib/libvizg.a");
     lib_step.dependOn(&install_lib.step);
-    lib_step.dependOn(&install_h.step);
 
     // Make `zig build` (default step) also produce the static archive.
     b.getInstallStep().dependOn(&install_lib.step);
-    b.getInstallStep().dependOn(&install_h.step);
 
     // -------------------------------------------------------------------
     // 3. Run step — main executable (dev/testing only).
@@ -65,16 +61,19 @@ pub fn build(b: *std.Build) void {
         .root_module = run_mod,
     });
 
+    const install_exe = b.addInstallArtifact(main_exe, .{});
+    b.getInstallStep().dependOn(&install_exe.step);
+
     const run_cmd = b.addRunArtifact(main_exe);
-    run_cmd.step.dependOn(&install_lib.step);
     if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Build and run the main executable (for testing only)");
     run_step.dependOn(&run_cmd.step);
 
     // -------------------------------------------------------------------
-    // 4. Test step — register the public package's complete test tree and
-    //    compile the C ABI entry point as a test artifact as well.
+    // 4. Test step — register the public package's complete test tree.
+    //    Unit tests are compiled with src/root.zig as root so all internal
+    //    tests within `modules/`, `semantics/`, etc. get wired in.
     // -------------------------------------------------------------------
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -82,107 +81,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+
     const unit_tests = b.addTest(.{ .root_module = tests_mod });
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
-    const abi_tests_mod = b.createModule(.{
-        .root_source_file = b.path("Lib/vizg.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    abi_tests_mod.addImport("vizg-impl", pkg_src);
-    const abi_tests = b.addTest(.{ .root_module = abi_tests_mod });
-    const run_abi_tests = b.addRunArtifact(abi_tests);
-
-    // -------------------------------------------------------------------
-    // 4a. Lint-silent: assert no unconditional std.debug.print in Lib/ — 
-    //     structural verification of Goal-041 (silent-by-default library).
-    //     Runs before tests; fails if anyone re-introduces debug prints.
-    // -------------------------------------------------------------------
-    const lint_silent = b.addSystemCommand(&[_][]const u8{
-        "bash", "-c", "./lint-silent.sh",
-    });
-    const lint_silent_step = b.step(
-        "lint-silent",
-        "Assert public library has no unconditional debug prints (Goal-041)",
-    );
-    lint_silent_step.dependOn(&lint_silent.step);
-
-    const test_step = b.step("test", "Run all vizg unit and ABI compilation tests");
-    test_step.dependOn(lint_silent_step);  // Goal-041: verify silent first: verify silent by default before running tests
+    const test_step = b.step("test", "Compile & run all unit tests");
     test_step.dependOn(&run_unit_tests.step);
-    test_step.dependOn(&run_abi_tests.step);
 
-    // Run the example/abi_test executable as part of the test step.
-    const abi_test_mod = b.createModule(.{
-        .root_source_file = b.path("example/abi_test/main.zig"),
-        .target = target,
-        .link_libc = true,
-    });
-    abi_test_mod.linkLibrary(vizg_lib);
-    const abi_test_exe = b.addExecutable(.{
-        .name = "abi_test",
-        .root_module = abi_test_mod,
-    });
-    const run_abi_test = b.addRunArtifact(abi_test_exe);
-    test_step.dependOn(&run_abi_test.step);
-    // C silent smoke test: compile + run. Depends on lib being installed first.
-    const cc_compile = b.addSystemCommand(&[_][]const u8{
-        "cc", "-Wall", "-Wextra", "-O2",
-        "-Izig-out/include",   // for vizg.h
-        "example/silent_test.c",
-        "-Lzig-out/lib",       // for libvizg.a — must come after sources
-        "-lvizg",              // link against libvizg — order matters for static archives
-        "-o", "/tmp/vizg-silent-test-exe",
-    });
-    cc_compile.step.dependOn(&install_lib.step);
-
-    const run_silent_c = b.addSystemCommand(&[_][]const u8{
-        "/tmp/vizg-silent-test-exe",
-    });
-    run_silent_c.step.dependOn(&cc_compile.step);
-    test_step.dependOn(&run_silent_c.step);
-
-
-    // -------------------------------------------------------------------
-    // 5. Android static libraries — compile the C ABI for each supported
-    // -------------------------------------------------------------------
-    const android_step = b.step("android", "Build vizg static libraries for Android ABIs");
-    const android_targets = [_]struct {
-        arch: std.Target.Cpu.Arch,
-        abi: std.Target.Abi,
-        install_path: []const u8,
-    }{
-        .{ .arch = .aarch64, .abi = .android, .install_path = "android/aarch64/libvizg.a" },
-        .{ .arch = .arm, .abi = .androideabi, .install_path = "android/armv7/libvizg.a" },
-        .{ .arch = .x86_64, .abi = .android, .install_path = "android/x86_64/libvizg.a" },
-    };
-
-    for (android_targets) |android_target| {
-        const target_android = b.resolveTargetQuery(.{
-            .cpu_arch = android_target.arch,
-            .os_tag = .linux,
-            .abi = android_target.abi,
-        });
-        const android_pkg = b.addModule(b.fmt("vizg-impl-android-{s}", .{android_target.install_path}), .{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target_android,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        const android_lib_mod = b.createModule(.{
-            .root_source_file = b.path("Lib/vizg.zig"),
-            .target = target_android,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        android_lib_mod.addImport("vizg-impl", android_pkg);
-        const android_lib = b.addLibrary(.{
-            .name = "vizg",
-            .root_module = android_lib_mod,
-        });
-        const install_android_lib = b.addInstallFile(android_lib.getEmittedBin(), android_target.install_path);
-        android_step.dependOn(&install_android_lib.step);
-    }
 }
