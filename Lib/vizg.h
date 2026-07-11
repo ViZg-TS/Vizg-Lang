@@ -141,14 +141,27 @@ typedef struct Vizg_Token {
 } Vizg_Token;
 
 typedef enum {
-    VIZG_STATUS_OK = 0,
-    VIZG_STATUS_ERR_GENERIC,
-    VIZG_STATUS_ERR_IO,
-    VIZG_STATUS_ERR_PARSE,
-    VIZG_STATUS_ERR_ABI,
+    VIZG_STATUS_OK                    = 0,
+    VIZG_STATUS_INVALID_ARGUMENT      = 1,
+    VIZG_STATUS_IO_ERROR              = 2,
+    VIZG_STATUS_OUT_OF_MEMORY         = 3,
+    VIZG_STATUS_INTERNAL_ERROR        = 4,
+    VIZG_STATUS_FILE_TOO_LARGE        = 5,
 } Vizg_Status;
 
 #ifdef __cplusplus
+typedef struct Vizg_SourceInput {
+    const char     *text_ptr;
+    size_t          text_len;
+    const char     *path_ptr;
+    size_t          path_len;
+} Vizg_SourceInput;
+
+Vizg_Status vizg_analyze_source_ex(
+    const Vizg_SourceInput *input,
+    Vizg_Result **out_result);
+
+/* Deprecated: use vizg_analyze_source_ex(). Kept for back-compat. */
 extern "C" {
 #endif
 

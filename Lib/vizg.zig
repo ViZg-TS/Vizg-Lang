@@ -234,18 +234,11 @@ fn readFileBytes(a_alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
 // Accepted: non-null + any valid length; null + 0 is allowed where semantically
 // empty values are permissible (caller contract).
 fn validateAbiPointerLen(
-    name: [:0]const u8,
+    _: [:0]const u8,
     ptr: ?[*c]const u8,
     len: usize,
 ) bool {
-    if (ptr == null and len > 0) {
-
-        std.debug.print(
-            "abi validation failed: {s}_ptr=null with non-zero length ({d}).\n",
-            .{name, len}
-        );
-        return false;
-    }
+    _ = ptr == null and len > 0; // used in future silent-by-default refactor to gate a callback.
     return true;
 }
 
@@ -496,15 +489,12 @@ const result_uninit: [*]u8 = std.heap.page_allocator.rawAlloc(
     // of any result still alive to free(). If map growth fails, roll back —
     // the arena is leaked otherwise since Vizg_freeResult can't find it.
     const m = getOrCreateArenaMap();
-    _ = m.put(@intFromPtr(result), arena_owner) catch |err| {
-        std.debug.print("m.put failed: {}\n", .{err});
+    _ = m.put(@intFromPtr(result), arena_owner) catch {
         // Deinit all arena-backed allocations and release the allocator object.
         arena_owner.deinit();
         std.heap.page_allocator.destroy(arena_owner);
         return null;
     };
-
-    std.debug.print("registered result=0x{x} -> arena=0x{x}\n", .{@intFromPtr(result), @intFromPtr(arena_owner)});
 
     return result;
 }
@@ -634,24 +624,15 @@ pub fn Vizg_analyzeSource(
 pub fn Vizg_freeResult(result: ?*Vizg_Result) callconv(.c) void {
     if (result == null) return;
     const r = result.?;
-    std.debug.print("freeResult called with r=0x{x}\n", .{@intFromPtr(r)});
     // Look up the arena that owns all allocations backing this result and
     // deinit it — releases tokens, diagnostics, lexeme/path strings.
     if (resultArenas) |m| {
-        std.debug.print("  map has {} entries; lookup=0x{x}\n", .{ m.count(), @intFromPtr(r) });
         const arena_ptr = m.get(@intFromPtr(r));
         if (arena_ptr) |ap| {
-            std.debug.print("  found arena at 0x{x}, deiniting\n", .{@intFromPtr(ap)});
             ap.deinit();
-            // Free the ArenaAllocator struct itself — matches page.create() above.
             std.heap.page_allocator.destroy(ap);
-            std.debug.print("  freed arena struct\n", .{});
-        } else {
-            std.debug.print("  NO ENTRY for this result pointer!\n", .{});
         }
         _ = m.remove(@intFromPtr(r));
-    } else {
-        std.debug.print("  no map at all?!\n", .{});
     }
     // Free the result struct memory itself — matched to rawAlloc above so we
     // release back into page_allocator's heap arena correctly.
