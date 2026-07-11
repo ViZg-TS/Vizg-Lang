@@ -101,9 +101,11 @@ pub fn build(b: *std.Build) void {
     run_silent_c.step.dependOn(&cc_compile.step);
 
     // 4c. Final test step: run lint-silent first (structural), then tests (unit + ABI + silent runtime).
-    const run_abi_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+    const abi_tests_mod = b.createModule(.{
         .root_source_file = b.path("Lib/vizg.zig"), .target = target, .optimize = optimize, .link_libc = true,
-    }) }));
+    });
+    abi_tests_mod.addImport("vizg-impl", pkg_src);
+    const run_abi_tests = b.addRunArtifact(b.addTest(.{ .root_module = abi_tests_mod }));
     const test_step = b.step("test", "Compile & run all unit tests");
     test_step.dependOn(lint_silent_step);
     test_step.dependOn(&run_abi_tests.step);
