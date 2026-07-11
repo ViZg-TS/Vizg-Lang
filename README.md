@@ -1,6 +1,6 @@
 # vizg
 
-`vizg` currently implements a frontend analysis pipeline for a TypeScript/JavaScript-like language subset plus a minimal module graph layer. It scans source text, parses files into ASTs, binds declarations, resolves identifier references, builds preliminary function control-flow graphs, resolves local static imports, and exposes inspection output through a Zig CLI.
+`vizg` implements a frontend analysis pipeline for a TypeScript/JavaScript-like language subset, a minimal module graph layer, and a C-compatible static library. The same frontend is available through the development CLI, the public Zig module in `src/root.zig`, and the ABI implemented in `Lib/vizg.zig`.
 
 ## Current Status
 
@@ -17,6 +17,7 @@ Implemented today:
 - Module graph v1 for relative static imports, canonical-path caching, named import validation, external import edges, missing modules, missing exports, and simple cycles.
 - Cross-file import linking layer that resolves local imports to their target module's exported symbols, tracks import kind (named, default, namespace, external, unresolved), and emits `VZG5001`, `VZG5002`, and `VZG5003` diagnostics alongside link records.
 - CLI inspection commands for checks, tokens, AST, symbols, references, CFGs, and modules.
+- Static library `libvizg.a` with a public C header and file/in-memory analysis entry points.
 
 Supported syntax is best described by `test/frontend/vizg_capabilities_test.ts`: comments, named/default imports, `let`/`const`/`var`, exported variables and functions, typed parameters, primitive literals, binary expressions, assignments, calls, member expressions, `if`/`else`, `while`, `for`, `return`, named exports, and aliased exports.
 
@@ -26,7 +27,14 @@ Supported syntax is best described by `test/frontend/vizg_capabilities_test.ts`:
 zig build
 ```
 
-The default build installs the `vizg` executable under `zig-out/bin/vizg`.
+The default build installs:
+
+```txt
+zig-out/bin/vizg       development CLI
+zig-out/lib/libvizg.a  static library
+```
+
+The public header is installed by the test dependency chain at `zig-out/include/vizg.h`. Consumers may also include the source header directly from `Lib/vizg.h`.
 
 ## Test
 
@@ -34,8 +42,36 @@ The default build installs the `vizg` executable under `zig-out/bin/vizg`.
 zig build test
 ```
 
-The test step runs the complete frontend, module graph, and semantic unit-test
-tree, and compiles the public C ABI entry point as a test artifact.
+The test step runs the frontend, module graph, semantic, and ABI unit-test tree. It also rejects unconditional debug output in `Lib/`, compiles a C consumer against the installed header/archive, and runs that consumer as a smoke test.
+
+## Static Library And C ABI
+
+The supported exported functions are:
+
+```c
+Vizg_Result *vizg_analyze_file(
+    const char *path_ptr, size_t path_len,
+    const char *text_ptr, size_t text_len);
+
+Vizg_Result *vizg_analyze_source(
+    const char *source_ptr, size_t source_len,
+    const char *path_ptr, size_t path_len);
+
+void vizg_free_result(Vizg_Result *result);
+```
+
+`vizg_analyze_source` analyzes caller-provided bytes without filesystem access. Its optional path is only a diagnostic identifier. `vizg_analyze_file` reads `path_ptr` when no source text is supplied; caller-provided text can be used instead.
+
+Returned tokens, diagnostics, messages, paths, and lexemes remain owned by the result. Treat every pointer as a pointer/length pair and call `vizg_free_result` exactly once when finished. A missing diagnostic path is represented by `path_ptr == NULL` and `path_len == 0`.
+
+Minimal C build:
+
+```sh
+zig build
+cc -I Lib consumer.c -L zig-out/lib -lvizg -o consumer
+```
+
+See `example/c/hello/` and `example/zig/consumer/` for complete consumers. The ABI exposes the current single-file frontend result; it does not expose the module graph, linker, or a runtime.
 
 ## Android
 
@@ -94,7 +130,9 @@ See [docs/cli.md](docs/cli.md) for command details.
 ```txt
 build.zig                 Zig build configuration
 src/main.zig              CLI entry point and output formatting
-src/root.zig              Public module exports
+src/root.zig              Public Zig exports and static-library root module
+Lib/vizg.zig              C ABI implementation and exported symbols
+Lib/vizg.h                Public C ABI declarations
 src/frontend/tokens.zig   Token, span, and lexical vocabulary definitions
 src/frontend/scanner.zig  Scanner and comment collection
 src/frontend/parser.zig   Parser and parse diagnostics
@@ -132,3 +170,4 @@ docs/                     Contributor and architecture documentation
 - [Diagnostics](docs/diagnostics.md)
 - [CLI](docs/cli.md)
 - [Roadmap](docs/roadmap.md)
+- [Changelog](CHANGELOG.md)

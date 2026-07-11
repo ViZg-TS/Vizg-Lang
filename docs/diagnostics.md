@@ -22,6 +22,8 @@ file.ts:1:9 error VZG4001 cannot_find_name: cannot find name 'missing'
 
 When no path is available, the leading `file.ts:` prefix is omitted.
 
+Across the C ABI, diagnostic messages and paths are pointer/length pairs. Consumers must not assume NUL termination. An absent path is always represented by a null pointer and a zero length.
+
 ## Current Codes
 
 | Code | Name | Phase | Meaning |
@@ -30,6 +32,7 @@ When no path is available, the leading `file.ts:` prefix is omitted.
 | `VZG1002` | `unterminated_string` | scanner | String or template string did not terminate. |
 | `VZG1003` | `unterminated_block_comment` | scanner | Block comment did not terminate. |
 | `VZG1004` | `invalid_number` | scanner | Invalid number format, exponent, or numeric separator. |
+| `VZG1005` | `invalid_escape_sequence` | scanner | Invalid or incomplete string/template escape sequence. |
 | `VZG2001` | `unexpected_token` | parser | Token was not valid in the current parse position. |
 | `VZG2002` | `expected_token` | parser | Parser expected a specific token. |
 | `VZG3001` | `duplicate_declaration` | binder | Scope already contains a declaration with that name. |

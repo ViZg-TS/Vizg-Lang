@@ -1,6 +1,28 @@
 # Architecture
 
-`vizg` is organized around a single-file frontend pipeline plus a small module graph layer. The frontend turns one source file into tokens, an AST, binding data, resolved references, preliminary CFGs, and diagnostics. The module graph layer loads local static imports from an entry file and validates named imports against exports.
+`vizg` is organized around a single-file frontend pipeline plus a small module graph layer. The frontend turns one source file into tokens, an AST, binding data, resolved references, preliminary CFGs, and diagnostics. The module graph layer loads local static imports from an entry file and validates named imports against exports. A static-library boundary exposes a subset of the single-file result through a C ABI.
+
+## Public Roots And ABI Boundary
+
+`src/root.zig` has two roles: it is the public Zig package root and the root module used to build `libvizg.a`. It re-exports the implemented project layers and imports the ABI module so exported C symbols are retained in the archive.
+
+`Lib/vizg.zig` owns the C-compatible structs, internal-to-ABI conversion, result allocation, and these exported functions:
+
+- `vizg_analyze_file`
+- `vizg_analyze_source`
+- `vizg_free_result`
+
+`Lib/vizg.h` is the consumer contract. The ABI is pointer/length based: returned strings are not required to be NUL-terminated, and result-backed memory remains valid only until `vizg_free_result`. Each result owns an independent arena, so multiple results may be alive and freed in any order.
+
+The ABI currently exposes tokens and diagnostics from single-file analysis. It does not expose AST nodes, symbols, references, CFGs, module graph data, type inference, execution, or compilation.
+
+Build dependency direction:
+
+```txt
+consumer -> Lib/vizg.h -> libvizg.a
+libvizg.a root: src/root.zig <-> imported ABI module: Lib/vizg.zig
+Lib/vizg.zig -> public frontend exports from src/root.zig
+```
 
 ## Current Implemented Layer
 
