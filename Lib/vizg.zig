@@ -56,6 +56,7 @@ pub const Vizg_DiagnosticCode = enum(c_int) {
     InvalidNumber, UnexpectedToken, ExpectedToken, DuplicateDeclaration,
     DuplicateExport, CannotFindName, ModuleNotFound, MissingExport,
     CircularImport, UnknownTypeName, TypeMismatch, ParseRecursionLimitReached,
+    InvalidEscapeSequence = 15,
 };
 
 pub const Vizg_DiagnosticPhase = enum(c_int) {
@@ -131,6 +132,7 @@ fn toVizgDiagnosticCode(v: diagnostics_mod.DiagnosticCode) Vizg_DiagnosticCode {
         .unknown_type_name => .UnknownTypeName,
         .type_mismatch => .TypeMismatch,
         .parse_recursion_limit_reached => .ParseRecursionLimitReached,
+        .invalid_escape_sequence => .InvalidEscapeSequence,
     };
 }
 

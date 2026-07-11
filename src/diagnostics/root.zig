@@ -12,6 +12,7 @@ pub const DiagnosticCode = enum {
     unterminated_string,
     unterminated_block_comment,
     invalid_number,
+    invalid_escape_sequence,
     unexpected_token,
     expected_token,
     duplicate_declaration,
@@ -57,6 +58,7 @@ pub fn lexicalErrorCode(err: tokens.LexicalError) DiagnosticCode {
         error.InvalidExponent,
         error.InvalidNumericSeparator,
         => .invalid_number,
+        error.InvalidEscapeSequence => .invalid_escape_sequence,
         else => .unexpected_token,
     };
 }
@@ -69,6 +71,7 @@ pub fn lexicalErrorMessage(err: tokens.LexicalError) []const u8 {
         error.InvalidNumberFormat => "invalid number",
         error.InvalidExponent => "invalid exponent",
         error.InvalidNumericSeparator => "invalid numeric separator",
+        error.InvalidEscapeSequence => "invalid escape sequence",
         else => "lexical error",
     };
 }
@@ -79,6 +82,7 @@ pub fn diagnosticCodeId(code: DiagnosticCode) []const u8 {
         .unterminated_string => "VZG1002",
         .unterminated_block_comment => "VZG1003",
         .invalid_number => "VZG1004",
+        .invalid_escape_sequence => "VZG1005",
         .unexpected_token => "VZG2001",
         .expected_token => "VZG2002",
         .duplicate_declaration => "VZG3001",
@@ -99,6 +103,7 @@ pub fn diagnosticCodeName(code: DiagnosticCode) []const u8 {
         .unterminated_string => "unterminated_string",
         .unterminated_block_comment => "unterminated_block_comment",
         .invalid_number => "invalid_number",
+        .invalid_escape_sequence => "invalid_escape_sequence",
         .unexpected_token => "unexpected_token",
         .expected_token => "expected_token",
         .duplicate_declaration => "duplicate_declaration",

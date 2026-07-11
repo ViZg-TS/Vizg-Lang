@@ -507,30 +507,39 @@ pub const Scanner = struct {
                 _ = self.advance();
 
                 if (self.isAtEnd()) {
+                    // Backslash at EOF inside a string is an incomplete escape sequence.
                     flags.unterminated = true;
-                    return LexicalError.UnterminatedString;
+                    return LexicalError.InvalidEscapeSequence;
                 }
 
-                // M1 — validate escape sequence inline. Only the well-known JS/TS
-                // escapes are accepted: \, ', ", `\`, n/t/r/a/b/f/e/0/v/x(2)/u(4),
-                // and numeric line continuation (backslash at end of line). Anything
-                // else is surfaced as InvalidEscapeSequence rather than silently kept.
-                _ = self.advance();
-                switch (c) {
-                    'n', 't', 'r', 'a', 'b', 'f', 'v', '\\' => {},  // all valid — fall through
-                    '\x27', '"', '`' => {},                          // quoted-character escapes
-                    '0' => {
-                        // null-byte escape (?) followed by a digit is invalid in TS strings; reject to mirror parser behavior.
+                // Validate escape sequence inline. Only well-known JS/TS escapes accepted: backslash, quoted char, control chars, xNN (2 hex), uNNNN (4 hex v1). Anything else surfaces InvalidEscapeSequence rather than silently kept.
+                const esc = self.peek().?;
+                switch (esc) {
+                    'n', 't', 'r', 'a', 'b', 'f', 'v' => {},
+                    '\x27' => {},     // escaped single quote
+                    '"' => {},         // escaped double-quote
+                    '`' => {},         // escaped backtick
+                    '\\' => {},        // escaped backslash itself
+                    '\x30' => {        // escape code 0: invalid when followed by another digit.
                         if (!self.isAtEnd() and self.peek().? >= '0' and self.peek().? <= '9') return LexicalError.InvalidEscapeSequence;
                     },
-                    'x', 'u' => {}, // hex/unicode escapes — accept here, downstream validators handle length rules
-                    else => {
-                        if (std.ascii.isDigit(c)) {
-                            // Octal-style legacy sequences — deprecated in strict mode but sometimes seen
-                            // in real-world TS source. We accept them here and let downstream validators decide.
-                            return LexicalError.InvalidEscapeSequence;
+                    '\x78' => {       // \xNN — require exactly 2 hex digits following 'x'.
+                        const p1 = self.index + 1;
+                        const p2 = self.index + 2;
+                        if (p1 >= self.source.len) return LexicalError.InvalidEscapeSequence;
+                        if (p2 >= self.source.len) return LexicalError.InvalidEscapeSequence;
+                        if (!tokens.isHexDigit(self.source[p1])) return LexicalError.InvalidEscapeSequence;
+                        if (!tokens.isHexDigit(self.source[p2])) return LexicalError.InvalidEscapeSequence;
+                    },
+                    '\x75' => {       // \uNNNN — require exactly 4 hex digits following 'u' (v1 form).
+                        var i: usize = 1;
+                        while (i <= 4) : (i += 1) {
+                            const pos = self.index + i;
+                            if (pos >= self.source.len or !tokens.isHexDigit(self.source[pos])) return LexicalError.InvalidEscapeSequence;
                         }
-                        // Unknown escape: reject with InvalidEscapeSequence rather than silently accepting.
+                    },
+                    else => {
+                        if (std.ascii.isDigit(esc)) return LexicalError.InvalidEscapeSequence;
                         return LexicalError.InvalidEscapeSequence;
                     },
                 }
@@ -573,19 +582,36 @@ pub const Scanner = struct {
                 _ = self.advance();
 
                 if (self.isAtEnd()) {
+                    // Backslash at EOF inside a template is an incomplete escape.
                     flags.unterminated = true;
-                    return LexicalError.UnterminatedTemplateString;
+                    return LexicalError.InvalidEscapeSequence;
                 }
 
-                // M1 — same escape-sequence validation as string literals, applied here to keep
-                // template interpolation parsing consistent. Backticks are handled separately via
-                // `escaped` / `$` interpolation logic that follows later in this function.
-                _ = self.advance();
-                switch (c) {
-                    'n', 't', 'r', 'a', 'b', 'f', 'v', '\\' => {},
-                    '`', '$' => {}, // backtick + interpolated expression escape are the only two that matter in templates
-                    '0' => {},
-                    'x', 'u' => {},
+                // Same escape-sequence validation as string literals. In templates the backtick and dollar-sign
+                // are also accepted because they delimit literal content and interpolation expressions; any other
+                // unknown character after a backslash surfaces InvalidEscapeSequence rather than silently kept.
+                const esc = self.peek().?;
+                switch (esc) {
+                    'n', 't', 'r', 'a', 'b', 'f', 'v' => {},
+                    '\x27' => {},     // escaped single quote
+                    '"' => {},         // escaped double-quote
+                    '`' => {},         // escaped backtick — literal backtick inside template (escape sequence)
+                    '$' => {},         // escaped dollar sign — escapes the interpolation trigger $
+                    '\\' => {},        // escaped backslash itself
+                    '\x30' => {},      // escape code 0 (always valid in templates)
+                    '\x78' => {       // \xNN — require exactly 2 hex digits following 'x'.
+                        const p1 = self.index + 1;
+                        const p2 = self.index + 2;
+                        if (p1 >= self.source.len or !tokens.isHexDigit(self.source[p1])) return LexicalError.InvalidEscapeSequence;
+                        if (p2 >= self.source.len or !tokens.isHexDigit(self.source[p2])) return LexicalError.InvalidEscapeSequence;
+                    },
+                    '\x75' => {       // \uNNNN — require exactly 4 hex digits following 'u' (v1 form).
+                        var i: usize = 1;
+                        while (i <= 4) : (i += 1) {
+                            const pos = self.index + i;
+                            if (pos >= self.source.len or !tokens.isHexDigit(self.source[pos])) return LexicalError.InvalidEscapeSequence;
+                        }
+                    },
                     else => return LexicalError.InvalidEscapeSequence,
                 }
                 continue;
@@ -763,6 +789,119 @@ test "scanner handles number forms" {
             .BigIntLiteral,
         },
     );
+}
+
+
+test "scanner accepts valid escape sequences" {
+    // \n (backslash + n) — lexer should not error.
+    {
+        const src = "const s = \"a\\nb\";";
+        var scanner = Scanner.init(src, .{});
+        _ = try scanner.nextToken();  // Keyword_const
+        _ = try scanner.nextToken();  // Identifier
+        _ = try scanner.nextToken();  // Equal
+        const tok = try scanner.nextToken();  // StringLiteral — would fail with InvalidEscapeSequence if validation were broken.
+        try std.testing.expectEqual(TokenType.StringLiteral, tok.kind);
+        // Lexeme is raw source slice including surrounding quotes.
+        try std.testing.expect(tok.lexeme.len == 6);
+        try std.testing.expect(tok.lexeme[0] == '"');
+        try std.testing.expect(tok.lexeme[tok.lexeme.len - 1] == '"');
+    }
+    // \\ (escaped backslash) — valid escape.
+    {
+        const src = "const s = \"a\\\\b\";";
+        var scanner = Scanner.init(src, .{});
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        const tok = try scanner.nextToken();
+        try std.testing.expectEqual(TokenType.StringLiteral, tok.kind);
+        try std.testing.expect(tok.lexeme.len == 6); // lexeme includes surrounding quotes
+    }
+    // \x1b (valid two-hex-digit escape) — lexer should not error.
+    {
+        const src = "const s = \"a\\x1bb\";";
+        var scanner = Scanner.init(src, .{});
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        const tok = try scanner.nextToken();
+        try std.testing.expectEqual(TokenType.StringLiteral, tok.kind);
+        try std.testing.expect(tok.lexeme.len == 8);
+    }
+    // \u0041 (valid four-hex-digit escape) — lexer should not error.
+    {
+        const src = "const s = \"a\\u0041b\";";
+        var scanner = Scanner.init(src, .{});
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        const tok = try scanner.nextToken();
+        try std.testing.expectEqual(TokenType.StringLiteral, tok.kind);
+    }
+}
+
+test "scanner rejects invalid escape sequences" {
+    // \x with only 1 hex digit provided: should fail with InvalidEscapeSequence.
+    {
+        const src = "const s = \"\\x1\";";
+        var scanner = Scanner.init(src, .{});
+        _ = try scanner.nextToken();  // Keyword_const
+        _ = try scanner.nextToken();  // Identifier
+        _ = try scanner.nextToken();  // Equal
+        const tok = scanner.nextToken();
+        try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
+    }
+    // \x with non-hex letters: should fail.
+    {
+        const src = "const s = \"\\xZZ\";";
+        var scanner = Scanner.init(src, .{});
+        _ = try scanner.nextToken();  // Keyword_const
+        _ = try scanner.nextToken();  // Identifier
+        _ = try scanner.nextToken();  // Equal
+        const tok = scanner.nextToken();
+        try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
+    }
+    // \u with only 1 hex digit (instead of required 4): should fail.
+    {
+        const src = "const s = \"\\u0\";";
+        var scanner = Scanner.init(src, .{});
+        _ = try scanner.nextToken();  // Keyword_const
+        _ = try scanner.nextToken();  // Identifier
+        _ = try scanner.nextToken();  // Equal
+        const tok = scanner.nextToken();
+        try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
+    }
+}
+
+test "scanner rejects trailing backslash before EOF" {
+    // Backslash as last source character inside an open string.
+    const src = "const s = \"hello\\";
+    var scanner = Scanner.init(src, .{});
+    _ = try scanner.nextToken();  // Keyword_const
+    _ = try scanner.nextToken();  // Identifier
+    _ = try scanner.nextToken();  // Equal
+    const tok = scanner.nextToken();
+    try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
+}
+
+test "template accepts valid escapes" {
+    var scanner = Scanner.init("const t = `a\\nb`;", .{});
+    _ = try scanner.nextToken();  // Keyword_const
+    _ = try scanner.nextToken();  // Identifier
+    _ = try scanner.nextToken();  // Equal
+    const tok = try scanner.nextToken();  // NoSubstitutionTemplate — would fail with InvalidEscapeSequence if broken.
+    try std.testing.expectEqual(TokenType.NoSubstitutionTemplate, tok.kind);
+}
+
+test "template rejects invalid escape sequences" {
+    // \x inside template: should fail LexicalError.InvalidEscapeSequence.
+    var scanner = Scanner.init("const t = `\\x`;", .{});
+    _ = try scanner.nextToken();  // Keyword_const
+    _ = try scanner.nextToken();  // Identifier
+    _ = try scanner.nextToken();  // Equal
+    const tok = scanner.nextToken();
+    try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
 }
 
 test "scanner handles comments as skipped trivia by default" {
