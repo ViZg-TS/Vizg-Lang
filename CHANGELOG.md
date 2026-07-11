@@ -4,44 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+Maintain `Unreleased` for notable features, behavior changes, bug fixes, and removals. Individual commits do not require entries unless they materially affect the project.
+
 ## [Unreleased]
 
-**C-ABI Static Library (`libvizg.a`)**
-- Public ABI header at `Lib/vizg.h` declaring structs, enums, and function signatures for cross-language consumption.
-- Zig implementation of C-exported functions (`pub extern "c" fn vizg_analyze_file`, `vizg_free_result`) in `Lib/vizg.zig`.
-- Static archive produced under `zig-out/lib/libvizg.a` (~10 MB) consumable from any language with a working C FFI binding.
+### Added
 
-**Cross-Language Consumer Examples**
-Three example directories under `example/<lang>/...`:
-- `c/hello/` — minimal C consumer linking via `gcc … -lvizg`.
-- `cpp/hello/` — minimal C++ consumer using the same header, demonstrating struct layout compatibility with C++.
-- `zig/consumer/` — Zig consumer importing `vizg.h` via `@cImport`, demonstrating that Zig can consume its own compiled archive without any intermediate bindings.
+- C-compatible static library at `zig-out/lib/libvizg.a` with its public header installed as `zig-out/include/vizg.h`.
+- Exported C ABI entry points for file analysis, in-memory source analysis, and result cleanup: `vizg_analyze_file`, `vizg_analyze_source`, and `vizg_free_result`.
+- Memory-first analysis accepts source bytes and an optional diagnostic path without reading the filesystem.
+- C and Zig ABI examples for interop, diagnostic formatting, null-result handling, span validation, and token iteration under `example/`.
+- Runtime C smoke test and `lint-silent` structural check integrated into `zig build test`.
+- Scanner validation for string and template escape sequences, including `\\xNN`, `\\uNNNN`, and trailing backslashes, with diagnostic `VZG1005 invalid_escape_sequence`.
+- Forward type-inference groundwork with bounded fixpoint iteration in `src/semantics/inference.zig`; this remains experimental and is not yet wired into the public semantics pipeline.
+- Development roadmap in `VIZG_PLAN.md` covering planned post-frontend phases.
+- `zig build android` target for aarch64, armv7, and x86_64 Android static libraries.
 
-Each example ships a `README.md` and a `Makefile`. No binaries are committed; they build on demand with `make`.
+### Changed
 
-**Fixes for ABI Correctness**
-- Removed spurious `flags: Vizg_TokenFlags = .{}` field from the Zig `Vizg_Token` struct — it was not in the C header and caused a 48-byte vs. 40-byte stride mismatch that produced garbage/SEGV on tokens beyond index 0.
-- Wired arena registration (`resultArenas.?.put(...)`) so `vizg_free_result()` can locate and deinit the owning ArenaAllocator; confirmed via deinit traces in all three consumers.
+- `src/root.zig` is now both the public Zig package root and the root module of the static library; `Lib/vizg.zig` owns the C ABI surface.
+- C ABI diagnostics expose explicit message and path lengths, and token flags use fixed-width FFI-safe fields.
+- Result lifecycle coverage now includes repeated allocation/free cycles, reverse-order cleanup, empty files, missing files, long paths, and in-memory sources.
+- The library is silent by default; tests reject unconditional `std.debug.print` calls in `Lib/`.
+- `zig build run -- <args>` forwards arguments to the development CLI.
+- Zig cache and generated example artifacts have broader `.gitignore` coverage.
 
-**Repo Hygiene**
-- `.gitignore` covers `.zig-cache`, `zig-out/`, `*.a`, plus logs, caches, and backup patterns (`bk_*`).
-- All binary outputs live outside `./example/`; examples contain source files + READMEs only.
-**C-ABI Improvements & Length-Aware Message Accessors**
-- `Vizg_Diagnostic` now exposes a length for both its message and path pointers; C consumers never rely on raw `path_ptr_is_valid` or unbounded `%s` — the ABI invariant (`path_ptr == null ⟺ path_len == 0`) is enforced by the caller.
-- `Vizg_TokenFlags` fields widened from Zig `bool` to FFI-safe `u8`; extern structs now have guaranteed sized layout on every target.
-- Compile-time `@sizeOf` / `@offsetOf` assertions added in `Lib/vizg.zig` so any future field rearrangement breaks the build before it reaches a real consumer.
+### Fixed
 
-**Consumer Examples Updated for Length-Aware API**
-- `example/zig/consumer/main.zig` now prints diagnostics with their lengths and uses an explicit `<none>` branch when no path is associated — consistent with the new ABI invariant.
+- Corrected the C/Zig `Vizg_Token` layout mismatch that caused invalid token strides and crashes after the first token.
+- Preserved the ABI invariant that an absent diagnostic path has both a null pointer and zero length.
+- Ensured C ABI symbols are retained in `libvizg.a` and the public header is installed before consumer smoke tests compile.
+- Prevented out-of-bounds scanner reads for incomplete escape sequences at end of input.
+- Forced the C smoke-test executable to use a non-executable ELF stack (`GNU_STACK RW`) instead of inheriting `RWE` from missing `.note.GNU-stack` metadata.
 
-**Build System Enhancements**
-- `zig build run ...` forwards trailing arguments to the CLI for integration testing.
-- `zig build test` runs the public package's full unit-test tree plus a self-contained ABI compilation check of `Lib/vizg.zig`.
-- `zig build android` cross-compiles `libvizg.a` for Android aarch64, armv7 and x86_64, installing under `zig-out/android/<abi>/libvizg.a`.
+### Removed
 
-**Documentation & Repository Hygiene**
-- README documents the new Android build step.
-- `.gitignore` extended to cover `.zig-lib` build output alongside existing patterns.
+- Redundant static-library wrapper modules `src/lib.zig` and `src/lib_abi.zig`.
+- Unconditional debug output from public C ABI operations.
 
 ## [0.0.1] — 2026-07-10
 
