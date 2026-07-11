@@ -99,9 +99,22 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_abi_tests.step);
 
+    // Run the example/abi_test executable as part of the test step.
+    const abi_test_mod = b.createModule(.{
+        .root_source_file = b.path("example/abi_test/main.zig"),
+        .target = target,
+        .link_libc = true,
+    });
+    abi_test_mod.linkLibrary(vizg_lib);
+    const abi_test_exe = b.addExecutable(.{
+        .name = "abi_test",
+        .root_module = abi_test_mod,
+    });
+    const run_abi_test = b.addRunArtifact(abi_test_exe);
+    test_step.dependOn(&run_abi_test.step);
+
     // -------------------------------------------------------------------
     // 5. Android static libraries — compile the C ABI for each supported
-    //    Android ABI and install deterministic archives under zig-out/android.
     // -------------------------------------------------------------------
     const android_step = b.step("android", "Build vizg static libraries for Android ABIs");
     const android_targets = [_]struct {
