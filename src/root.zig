@@ -19,6 +19,14 @@ pub const semantics = @import("semantics/root.zig");
 // types via vizg.types.TypeId, vizg.types.Type, vizg.types.Builtins, etc.
 pub const types = @import("types/root.zig");
 
+/// C-compatible surface linked into libvizg.a. Lib/vizg.zig is the single ABI
+/// authority shared with Lib/vizg.h.
+pub const abi = @import("vizg-abi");
+
+comptime {
+    _ = abi;
+}
+
 test {
     _ = diagnostics;
     _ = binder;
@@ -28,6 +36,7 @@ test {
     _ = scanner;
     _ = frontend;
     _ = tokens;
+    _ = abi;
     // Keep existing modules graph test registration.
     _ = @import("modules/graph.zig");
     _ = @import("modules/loader.zig");

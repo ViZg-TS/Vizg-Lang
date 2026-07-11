@@ -5,40 +5,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
 
-    // -------------------------------------------------------------------
-    // 1. Package registered at top level so @import("vizg-impl/...") works
-    //    from any module in this build.
-    // -------------------------------------------------------------------
-    const pkg_src = b.addModule("vizg-impl", .{
+    // root.zig is both the public Zig package and the static-library root.
+    const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-
-    // C ABI module — the compiled surface of libvizg.a with pub fn + @export().
-    const vizg_cabi = b.addModule("vizg", .{
+    const vizg_cabi = b.addModule("vizg-abi", .{
         .root_source_file = b.path("Lib/vizg.zig"),
-        .target = target, .optimize = optimize, .link_libc = true,
-    });
-    // Lib/vizg.zig @imports vizg-impl to reach frontend/scanner types.
-    vizg_cabi.addImport("vizg-impl", pkg_src);
-
-    // Library entry point: compile src/lib.zig as a static archive.
-    const lib_mod = b.createModule(.{
-        .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    // Bind "vizg-impl" package to the module defined above.  With this binding,
-    // src/lib.zig can use @import("vizg-impl").frontend.xxx which Zig resolves
-    // via pkg_src (rooted at src/root.zig).
-    lib_mod.addImport("vizg-impl", pkg_src);
-    // Pull the C ABI surface into the library compile tree so its @export() calls
-    // land in libvizg.a. Consumers include Lib/vizg.h and link -lvizg.
-    lib_mod.addImport("vizg", vizg_cabi);
-
+    lib_mod.addImport("vizg-abi", vizg_cabi);
+    vizg_cabi.addImport("vizg-impl", lib_mod);
     const vizg_lib = b.addLibrary(.{
         .name = "vizg",
         .root_module = lib_mod,
@@ -86,14 +67,6 @@ pub fn build(b: *std.Build) void {
     //    Unit tests are compiled with src/root.zig as root so all internal
     //    tests within `modules/`, `semantics/`, etc. get wired in.
     // -------------------------------------------------------------------
-    const tests_mod = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-
-    _ = b.addTest(.{ .root_module = tests_mod }); // consumed by lint-silent path only in prior wiring; kept for compat.
     // 4a. Lint-silent: assert no unconditional std.debug.print in Lib/ (Goal-041).
     const lint_silent = b.addSystemCommand(&[_][]const u8{ "bash", "-c", "./lint-silent.sh" });
     const lint_silent_step = b.step("lint-silent", "Assert public library is silent by default (Goal-041)");
@@ -115,14 +88,10 @@ pub fn build(b: *std.Build) void {
     run_silent_c.step.dependOn(&cc_compile.step);
 
     // 4c. Final test step: run lint-silent first (structural), then tests (unit + ABI + silent runtime).
-    const abi_tests_mod = b.createModule(.{
-        .root_source_file = b.path("Lib/vizg.zig"), .target = target, .optimize = optimize, .link_libc = true,
-    });
-    abi_tests_mod.addImport("vizg-impl", pkg_src);
-    const run_abi_tests = b.addRunArtifact(b.addTest(.{ .root_module = abi_tests_mod }));
+    const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = lib_mod }));
     const test_step = b.step("test", "Compile & run all unit tests");
     test_step.dependOn(lint_silent_step);
-    test_step.dependOn(&run_abi_tests.step);
+    test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_silent_c.step);
 
 }

@@ -4,12 +4,11 @@
 // every function tagged with @export() are visible in the resulting archive.
 // Consumers (C, C++, Zig) include Lib/vizg.h and link against this archive.
 
-// src/lib_abi.zig — Minimal C ABI for vizg (static library surface).
 const std = @import("std");
-// Use root import so sub-namespaces are reachable via pub fields.
 const vizg_pkg = @import("vizg-impl");
 const frontend_mod = vizg_pkg.frontend;
 const diagnostics_mod = vizg_pkg.diagnostics;
+const tokens_mod = vizg_pkg.tokens;
 
 pub const Vizg_Status = enum(c_int) {
     OK = 0,
@@ -245,7 +244,7 @@ fn validateAbiPointerLen(
 }
 
 
-fn mapKind(kind: @import("vizg-impl").tokens.TokenType) Vizg_TokenType {
+fn mapKind(kind: tokens_mod.TokenType) Vizg_TokenType {
     return switch (kind) {
         // ---- Variants where the name maps 1-1 to a Vizg_TokenType member. ----
         .Invalid => .Invalid,
