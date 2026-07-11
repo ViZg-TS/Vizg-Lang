@@ -157,6 +157,10 @@ Vizg_Result *vizg_analyze_file(
     const char     *text_ptr, size_t text_len);
 
 void vizg_free_result(Vizg_Result *result);
+Vizg_Result *vizg_analyze_source(
+    const char     *source_ptr, size_t source_len,
+    const char     *path_ptr,   size_t path_len);
+
 
 #ifdef __cplusplus
 }
