@@ -90,10 +90,7 @@ pub fn build(b: *std.Build) void {
 
     // 4b. C runtime smoke test: compile and run example/silent_test.c against libvizg.a;
     //     asserts zero bytes land on stderr during a real API call.
-    const install_headers = b.addInstallLibraryFile(
-        b.path("Lib/vizg.h"),
-        "vizg.h",
-    );
+    const install_headers = b.addInstallHeaderFile(b.path("Lib/vizg.h"), "vizg.h");
     install_headers.step.dependOn(&install_lib.step);
 
     const cc_compile = b.addSystemCommand(&[_][]const u8{
