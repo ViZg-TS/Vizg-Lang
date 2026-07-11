@@ -80,7 +80,7 @@ pub fn build(b: *std.Build) void {
     const cc_compile = b.addSystemCommand(&[_][]const u8{
         "cc", "-Wall", "-Wextra", "-O2",
         "-Izig-out/include", "example/silent_test.c",
-        "-Lzig-out/lib", "-lvizg",
+        "-Lzig-out/lib", "-lvizg", "-Wl,-z,noexecstack",
         "-o", "/tmp/vizg-silent-test-exe",
     });
     cc_compile.step.dependOn(&install_headers.step);
