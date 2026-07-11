@@ -95,7 +95,22 @@ pub fn build(b: *std.Build) void {
     const abi_tests = b.addTest(.{ .root_module = abi_tests_mod });
     const run_abi_tests = b.addRunArtifact(abi_tests);
 
+    // -------------------------------------------------------------------
+    // 4a. Lint-silent: assert no unconditional std.debug.print in Lib/ — 
+    //     structural verification of Goal-041 (silent-by-default library).
+    //     Runs before tests; fails if anyone re-introduces debug prints.
+    // -------------------------------------------------------------------
+    const lint_silent = b.addSystemCommand(&[_][]const u8{
+        "bash", "-c", "./lint-silent.sh",
+    });
+    const lint_silent_step = b.step(
+        "lint-silent",
+        "Assert public library has no unconditional debug prints (Goal-041)",
+    );
+    lint_silent_step.dependOn(&lint_silent.step);
+
     const test_step = b.step("test", "Run all vizg unit and ABI compilation tests");
+    test_step.dependOn(lint_silent_step);  // Goal-041: verify silent first: verify silent by default before running tests
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_abi_tests.step);
 
@@ -112,6 +127,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_abi_test = b.addRunArtifact(abi_test_exe);
     test_step.dependOn(&run_abi_test.step);
+    // C silent smoke test: compile + run. Depends on lib being installed first.
+    const cc_compile = b.addSystemCommand(&[_][]const u8{
+        "cc", "-Wall", "-Wextra", "-O2",
+        "-Izig-out/include",   // for vizg.h
+        "example/silent_test.c",
+        "-Lzig-out/lib",       // for libvizg.a — must come after sources
+        "-lvizg",              // link against libvizg — order matters for static archives
+        "-o", "/tmp/vizg-silent-test-exe",
+    });
+    cc_compile.step.dependOn(&install_lib.step);
+
+    const run_silent_c = b.addSystemCommand(&[_][]const u8{
+        "/tmp/vizg-silent-test-exe",
+    });
+    run_silent_c.step.dependOn(&cc_compile.step);
+    test_step.dependOn(&run_silent_c.step);
+
 
     // -------------------------------------------------------------------
     // 5. Android static libraries — compile the C ABI for each supported
