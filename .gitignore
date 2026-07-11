@@ -1,5 +1,5 @@
 .codegraph
-.zig-cache
+.zig-cache*
 zig-out
 
 ## Generated logs ##
@@ -24,3 +24,5 @@ tmp
 analyze_hello
 
 .zig-lib
+test_c
+main_zig
