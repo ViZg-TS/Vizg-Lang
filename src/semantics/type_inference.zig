@@ -219,10 +219,7 @@ test "string literal node has type string" {
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
 
-    if (inferred.len != 1) {
-        std.debug.print("expected exactly one classified node for string literal\n", .{});
-        return error.TestUnexpectedResult;
-    }
+    try std.testing.expectEqual(@as(usize, 1), inferred.len);
 }
 
 test "true/false literal node has type boolean" {
@@ -241,10 +238,7 @@ test "true/false literal node has type boolean" {
         const inferred = try inferLiteralNodeTypes(alloc, result.ast);
         defer alloc.free(inferred);
 
-        if (inferred.len != 1) {
-            std.debug.print("expected exactly one classified node for {s}\n", .{src});
-            return error.TestUnexpectedResult;
-        }
+        try std.testing.expectEqual(@as(usize, 1), inferred.len);
     }
 }
 
@@ -259,10 +253,7 @@ test "null literal node has type null" {
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
 
-    if (inferred.len != 1) {
-        std.debug.print("expected exactly one classified node for null literal\n", .{});
-        return error.TestUnexpectedResult;
-    }
+    try std.testing.expectEqual(@as(usize, 1), inferred.len);
 }
 
 test "non-literal expression has no node type" {
