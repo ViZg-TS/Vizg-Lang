@@ -45,6 +45,9 @@ pub const Scanner = struct {
 
     /// Set whenever trivia before the next emitted non-EOL token contained a line break.
     leading_line_break: bool = false,
+    allow_regexp: bool = true,
+    template_depth: usize = 0,
+    template_brace_depths: [64]usize = [_]usize{0} ** 64,
 
     pub fn init(source: []const u8, config: ScannerConfig) Scanner {
         return .{
@@ -56,6 +59,7 @@ pub const Scanner = struct {
     pub fn nextToken(self: *Scanner) LexicalError!Token {
         while (true) {
             if (self.isAtEnd()) {
+                if (self.template_depth != 0) return LexicalError.UnterminatedTemplateString;
                 return self.makeCurrentToken(.EOF);
             }
 
@@ -72,6 +76,7 @@ pub const Scanner = struct {
         }
 
         if (self.isAtEnd()) {
+            if (self.template_depth != 0) return LexicalError.UnterminatedTemplateString;
             return self.makeCurrentToken(.EOF);
         }
 
@@ -95,11 +100,23 @@ pub const Scanner = struct {
         }
 
         if (c == '`') {
-            return try self.scanTemplateLiteral(start);
+            return try self.scanTemplateStart(start);
+        }
+
+        if (c == '}' and self.template_depth != 0) {
+            const depth = &self.template_brace_depths[self.template_depth - 1];
+            if (depth.* == 0) return try self.scanTemplateContinuation(start);
+            depth.* -= 1;
+        } else if (c == '{' and self.template_depth != 0) {
+            self.template_brace_depths[self.template_depth - 1] += 1;
         }
 
         if (tokens.isQuote(c)) {
             return try self.scanString(start);
+        }
+
+        if (c == '/' and self.allow_regexp and self.peekN(1) != '=') {
+            return try self.scanRegExp(start);
         }
 
         return self.scanPunctuatorOrInvalid(start);
@@ -186,6 +203,7 @@ pub const Scanner = struct {
         out_flags.has_leading_line_break = start.has_leading_line_break;
 
         self.leading_line_break = false;
+        if (kind != .EOL and kind != .EOF) self.allow_regexp = allowsRegExpAfter(kind);
 
         return Token.initWithFlags(
             kind,
@@ -207,6 +225,54 @@ pub const Scanner = struct {
             self.makeSpan(start),
             .{},
         );
+    }
+
+    //#endregion
+
+    //#region RegExp Literals
+
+    fn scanRegExp(self: *Scanner, start: TokenStart) LexicalError!Token {
+        _ = self.advance(); // opening slash
+        var in_class = false;
+
+        while (!self.isAtEnd()) {
+            const c = self.peek().?;
+            if (tokens.isLineTerminator(c)) return LexicalError.UnterminatedRegExp;
+
+            if (c == '\\') {
+                _ = self.advance();
+                if (self.isAtEnd() or tokens.isLineTerminator(self.peek().?)) return LexicalError.UnterminatedRegExp;
+                _ = self.advance();
+                continue;
+            }
+
+            if (c == '[') {
+                in_class = true;
+                _ = self.advance();
+                continue;
+            }
+            if (c == ']' and in_class) {
+                in_class = false;
+                _ = self.advance();
+                continue;
+            }
+            if (c == '/' and !in_class) {
+                _ = self.advance();
+                var flags = tokens.RegExpFlags{};
+                while (self.peek()) |flag_char| {
+                    if (!tokens.isAsciiIdentifierPart(flag_char)) break;
+                    _ = self.advance();
+                    const flag = tokens.regexpFlagFromChar(flag_char) orelse return LexicalError.InvalidRegExp;
+                    if (flags.get(flag)) return LexicalError.InvalidRegExp;
+                    flags.set(flag);
+                }
+                return self.makeToken(start, .RegExpLiteral, .{});
+            }
+
+            _ = self.advance();
+        }
+
+        return LexicalError.UnterminatedRegExp;
     }
 
     //#endregion
@@ -516,14 +582,14 @@ pub const Scanner = struct {
                 const esc = self.peek().?;
                 switch (esc) {
                     'n', 't', 'r', 'a', 'b', 'f', 'v' => {},
-                    '\x27' => {},     // escaped single quote
-                    '"' => {},         // escaped double-quote
-                    '`' => {},         // escaped backtick
-                    '\\' => {},        // escaped backslash itself
-                    '\x30' => {        // escape code 0: invalid when followed by another digit.
+                    '\x27' => {}, // escaped single quote
+                    '"' => {}, // escaped double-quote
+                    '`' => {}, // escaped backtick
+                    '\\' => {}, // escaped backslash itself
+                    '\x30' => { // escape code 0: invalid when followed by another digit.
                         if (!self.isAtEnd() and self.peek().? >= '0' and self.peek().? <= '9') return LexicalError.InvalidEscapeSequence;
                     },
-                    '\x78' => {       // \xNN — require exactly 2 hex digits following 'x'.
+                    '\x78' => { // \xNN — require exactly 2 hex digits following 'x'.
                         const p1 = self.index + 1;
                         const p2 = self.index + 2;
                         if (p1 >= self.source.len) return LexicalError.InvalidEscapeSequence;
@@ -531,7 +597,7 @@ pub const Scanner = struct {
                         if (!tokens.isHexDigit(self.source[p1])) return LexicalError.InvalidEscapeSequence;
                         if (!tokens.isHexDigit(self.source[p2])) return LexicalError.InvalidEscapeSequence;
                     },
-                    '\x75' => {       // \uNNNN — require exactly 4 hex digits following 'u' (v1 form).
+                    '\x75' => { // \uNNNN — require exactly 4 hex digits following 'u' (v1 form).
                         var i: usize = 1;
                         while (i <= 4) : (i += 1) {
                             const pos = self.index + i;
@@ -555,18 +621,38 @@ pub const Scanner = struct {
 
     //#endregion
 
-    //#region Template Literals (opaque)
+    //#region Template Literals
 
-    fn scanTemplateLiteral(self: *Scanner, start: TokenStart) LexicalError!Token {
-        const quote = self.advance().?;
+    fn scanTemplateStart(self: *Scanner, start: TokenStart) LexicalError!Token {
+        _ = self.advance(); // opening backtick
+        return self.scanTemplateChunk(start, true);
+    }
+
+    fn scanTemplateContinuation(self: *Scanner, start: TokenStart) LexicalError!Token {
+        _ = self.advance(); // interpolation-closing brace
+        return self.scanTemplateChunk(start, false);
+    }
+
+    fn scanTemplateChunk(self: *Scanner, start: TokenStart, initial: bool) LexicalError!Token {
         var flags = TokenFlags{};
 
         while (!self.isAtEnd()) {
             const c = self.peek().?;
 
-            if (c == quote) {
+            if (c == '`') {
                 _ = self.advance();
-                return self.makeToken(start, .NoSubstitutionTemplate, flags);
+                if (!initial) self.template_depth -= 1;
+                return self.makeToken(start, if (initial) .NoSubstitutionTemplate else .TemplateTail, flags);
+            }
+
+            if (c == '$' and self.peekN(1) == '{') {
+                self.advanceN(2);
+                if (initial) {
+                    if (self.template_depth == self.template_brace_depths.len) return LexicalError.UnknownCharacter;
+                    self.template_brace_depths[self.template_depth] = 0;
+                    self.template_depth += 1;
+                }
+                return self.makeToken(start, if (initial) .TemplateHead else .TemplateMiddle, flags);
             }
 
             if (tokens.isLineTerminator(c)) {
@@ -593,19 +679,19 @@ pub const Scanner = struct {
                 const esc = self.peek().?;
                 switch (esc) {
                     'n', 't', 'r', 'a', 'b', 'f', 'v' => {},
-                    '\x27' => {},     // escaped single quote
-                    '"' => {},         // escaped double-quote
-                    '`' => {},         // escaped backtick — literal backtick inside template (escape sequence)
-                    '$' => {},         // escaped dollar sign — escapes the interpolation trigger $
-                    '\\' => {},        // escaped backslash itself
-                    '\x30' => {},      // escape code 0 (always valid in templates)
-                    '\x78' => {       // \xNN — require exactly 2 hex digits following 'x'.
+                    '\x27' => {}, // escaped single quote
+                    '"' => {}, // escaped double-quote
+                    '`' => {}, // escaped backtick — literal backtick inside template (escape sequence)
+                    '$' => {}, // escaped dollar sign — escapes the interpolation trigger $
+                    '\\' => {}, // escaped backslash itself
+                    '\x30' => {}, // escape code 0 (always valid in templates)
+                    '\x78' => { // \xNN — require exactly 2 hex digits following 'x'.
                         const p1 = self.index + 1;
                         const p2 = self.index + 2;
                         if (p1 >= self.source.len or !tokens.isHexDigit(self.source[p1])) return LexicalError.InvalidEscapeSequence;
                         if (p2 >= self.source.len or !tokens.isHexDigit(self.source[p2])) return LexicalError.InvalidEscapeSequence;
                     },
-                    '\x75' => {       // \uNNNN — require exactly 4 hex digits following 'u' (v1 form).
+                    '\x75' => { // \uNNNN — require exactly 4 hex digits following 'u' (v1 form).
                         var i: usize = 1;
                         while (i <= 4) : (i += 1) {
                             const pos = self.index + i;
@@ -641,6 +727,31 @@ pub const Scanner = struct {
 
     //#endregion
 };
+
+fn allowsRegExpAfter(kind: TokenType) bool {
+    return switch (kind) {
+        .Identifier,
+        .PrivateIdentifier,
+        .NumberLiteral,
+        .BigIntLiteral,
+        .StringLiteral,
+        .RegExpLiteral,
+        .TrueLiteral,
+        .FalseLiteral,
+        .NullLiteral,
+        .NoSubstitutionTemplate,
+        .TemplateTail,
+        .Keyword_this,
+        .Keyword_super,
+        .RParen,
+        .RBracket,
+        .RBrace,
+        .PlusPlus,
+        .MinusMinus,
+        => false,
+        else => true,
+    };
+}
 
 pub fn scanAll(allocator: std.mem.Allocator, source: []const u8, collect_comments: bool) !ScanResult {
     var scanner = Scanner.init(source, .{
@@ -791,16 +902,15 @@ test "scanner handles number forms" {
     );
 }
 
-
 test "scanner accepts valid escape sequences" {
     // \n (backslash + n) — lexer should not error.
     {
         const src = "const s = \"a\\nb\";";
         var scanner = Scanner.init(src, .{});
-        _ = try scanner.nextToken();  // Keyword_const
-        _ = try scanner.nextToken();  // Identifier
-        _ = try scanner.nextToken();  // Equal
-        const tok = try scanner.nextToken();  // StringLiteral — would fail with InvalidEscapeSequence if validation were broken.
+        _ = try scanner.nextToken(); // Keyword_const
+        _ = try scanner.nextToken(); // Identifier
+        _ = try scanner.nextToken(); // Equal
+        const tok = try scanner.nextToken(); // StringLiteral — would fail with InvalidEscapeSequence if validation were broken.
         try std.testing.expectEqual(TokenType.StringLiteral, tok.kind);
         // Lexeme is raw source slice including surrounding quotes.
         try std.testing.expect(tok.lexeme.len == 6);
@@ -846,9 +956,9 @@ test "scanner rejects invalid escape sequences" {
     {
         const src = "const s = \"\\x1\";";
         var scanner = Scanner.init(src, .{});
-        _ = try scanner.nextToken();  // Keyword_const
-        _ = try scanner.nextToken();  // Identifier
-        _ = try scanner.nextToken();  // Equal
+        _ = try scanner.nextToken(); // Keyword_const
+        _ = try scanner.nextToken(); // Identifier
+        _ = try scanner.nextToken(); // Equal
         const tok = scanner.nextToken();
         try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
     }
@@ -856,9 +966,9 @@ test "scanner rejects invalid escape sequences" {
     {
         const src = "const s = \"\\xZZ\";";
         var scanner = Scanner.init(src, .{});
-        _ = try scanner.nextToken();  // Keyword_const
-        _ = try scanner.nextToken();  // Identifier
-        _ = try scanner.nextToken();  // Equal
+        _ = try scanner.nextToken(); // Keyword_const
+        _ = try scanner.nextToken(); // Identifier
+        _ = try scanner.nextToken(); // Equal
         const tok = scanner.nextToken();
         try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
     }
@@ -866,9 +976,9 @@ test "scanner rejects invalid escape sequences" {
     {
         const src = "const s = \"\\u0\";";
         var scanner = Scanner.init(src, .{});
-        _ = try scanner.nextToken();  // Keyword_const
-        _ = try scanner.nextToken();  // Identifier
-        _ = try scanner.nextToken();  // Equal
+        _ = try scanner.nextToken(); // Keyword_const
+        _ = try scanner.nextToken(); // Identifier
+        _ = try scanner.nextToken(); // Equal
         const tok = scanner.nextToken();
         try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
     }
@@ -878,28 +988,28 @@ test "scanner rejects trailing backslash before EOF" {
     // Backslash as last source character inside an open string.
     const src = "const s = \"hello\\";
     var scanner = Scanner.init(src, .{});
-    _ = try scanner.nextToken();  // Keyword_const
-    _ = try scanner.nextToken();  // Identifier
-    _ = try scanner.nextToken();  // Equal
+    _ = try scanner.nextToken(); // Keyword_const
+    _ = try scanner.nextToken(); // Identifier
+    _ = try scanner.nextToken(); // Equal
     const tok = scanner.nextToken();
     try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
 }
 
 test "template accepts valid escapes" {
     var scanner = Scanner.init("const t = `a\\nb`;", .{});
-    _ = try scanner.nextToken();  // Keyword_const
-    _ = try scanner.nextToken();  // Identifier
-    _ = try scanner.nextToken();  // Equal
-    const tok = try scanner.nextToken();  // NoSubstitutionTemplate — would fail with InvalidEscapeSequence if broken.
+    _ = try scanner.nextToken(); // Keyword_const
+    _ = try scanner.nextToken(); // Identifier
+    _ = try scanner.nextToken(); // Equal
+    const tok = try scanner.nextToken(); // NoSubstitutionTemplate — would fail with InvalidEscapeSequence if broken.
     try std.testing.expectEqual(TokenType.NoSubstitutionTemplate, tok.kind);
 }
 
 test "template rejects invalid escape sequences" {
     // \x inside template: should fail LexicalError.InvalidEscapeSequence.
     var scanner = Scanner.init("const t = `\\x`;", .{});
-    _ = try scanner.nextToken();  // Keyword_const
-    _ = try scanner.nextToken();  // Identifier
-    _ = try scanner.nextToken();  // Equal
+    _ = try scanner.nextToken(); // Keyword_const
+    _ = try scanner.nextToken(); // Identifier
+    _ = try scanner.nextToken(); // Equal
     const tok = scanner.nextToken();
     try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
 }
