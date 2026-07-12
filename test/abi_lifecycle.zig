@@ -26,6 +26,7 @@ const VizgSourceInput = extern struct {
 };
 
 extern fn vizg_analyze_source_ex(input: ?*const VizgSourceInput, out_result: ?*?*VizgResult) callconv(.c) VizgStatus;
+extern fn vizg_analyze_file(path_ptr: [*c]const u8, path_len: usize, text_ptr: [*c]const u8, text_len: usize) callconv(.c) ?*VizgResult;
 extern fn vizg_free_result(result: ?*VizgResult) callconv(.c) void;
 extern fn vizg_abi_version() callconv(.c) u32;
 
@@ -60,6 +61,24 @@ test "C ABI analyzes valid, invalid, and empty source" {
     defer vizg_free_result(empty);
     try std.testing.expect(empty.token_count > 0);
     try std.testing.expectEqual(@as(c_uint, 0), empty.diagnostic_count);
+}
+
+test "C ABI analyzes a real zero-byte file" {
+    const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "empty.ts", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(io, "empty.ts", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+
+    const result = vizg_analyze_file(path.ptr, path.len, null, 0) orelse return error.MissingResult;
+    defer vizg_free_result(result);
+
+    try std.testing.expectEqual(@as(c_uint, 1), result.token_count);
+    try std.testing.expectEqual(@as(c_uint, 0), result.diagnostic_count);
+    const tokens: [*]const c.Vizg_Token = @ptrCast(@alignCast(result.tokens_ptr orelse return error.MissingTokens));
+    try std.testing.expectEqual(@as(c_uint, c.VIZG_TOKEN_END_OF_FILE), tokens[0].kind);
 }
 
 test "C ABI supports null free, simultaneous results, and reverse cleanup" {

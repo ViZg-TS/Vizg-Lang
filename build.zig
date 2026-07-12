@@ -1,5 +1,6 @@
 // build.zig — Pipeline for vizg static library, main exe, and run step (Zig 0.16).
 const std = @import("std");
+const android = @import("android.build.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -38,7 +39,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "x86_64-windows", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows } },
         .{ .name = "aarch64-macos", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
         .{ .name = "x86_64-macos", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos } },
-        .{ .name = "aarch64-linux-android", .query = .{
+        .{ .name = "aarch64-linux-android.24", .query = .{
             .cpu_arch = .aarch64,
             .os_tag = .linux,
             .abi = .android,
@@ -56,6 +57,95 @@ pub fn build(b: *std.Build) void {
         });
         cross_check_step.dependOn(&probe.step);
     }
+
+    // Compile the same static-library graph installed for consumers, plus a C
+    // translation unit that includes the public header, for every matrix target.
+    // This is compile-only: no foreign archive is installed or executed.
+    const abi_cross_check_step = b.step("abi-cross-check", "Compile C ABI archives for representative targets");
+    for (cross_targets) |cross_target| {
+        const cross_target_resolved = b.resolveTargetQuery(cross_target.query);
+        const cross_impl = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = cross_target_resolved,
+            .optimize = .Debug,
+            .link_libc = true,
+        });
+        const cross_abi = b.createModule(.{
+            .root_source_file = b.path("Lib/vizg.zig"),
+            .target = cross_target_resolved,
+            .optimize = .Debug,
+            .link_libc = true,
+        });
+        cross_impl.addImport("vizg-abi", cross_abi);
+        cross_abi.addImport("vizg-impl", cross_impl);
+        cross_abi.addIncludePath(b.path("Lib"));
+        cross_abi.addCSourceFile(.{
+            .file = b.path("test/c_abi/layout_probe.c"),
+            .flags = &.{"-std=c11"},
+        });
+        const cross_archive = b.addLibrary(.{
+            .name = b.fmt("vizg-abi-cross-{s}", .{cross_target.name}),
+            .root_module = cross_impl,
+        });
+        abi_cross_check_step.dependOn(&cross_archive.step);
+    }
+
+    // Produce a consumer-ready Android AArch64/API 24 package. Zig supplies
+    // the target headers for compilation; final application linkage remains
+    // the responsibility of the Android/NDK build consuming this archive.
+    const android_target = b.resolveTargetQuery(android.targetQuery(.aarch64, 24));
+    const android_impl = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = android_target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    const android_abi = b.createModule(.{
+        .root_source_file = b.path("Lib/vizg.zig"),
+        .target = android_target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    android_impl.addImport("vizg-abi", android_abi);
+    android_abi.addImport("vizg-impl", android_impl);
+    const android_lib = b.addLibrary(.{
+        .name = "vizg",
+        .root_module = android_impl,
+    });
+
+    const android_consumer_source = b.addWriteFiles().add("android_minimal.c",
+        \\#include "vizg.h"
+        \\int main(void) { return VIZG_ABI_VERSION > 0 ? 0 : 1; }
+    );
+    const android_consumer_mod = b.createModule(.{
+        .target = android_target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    android_consumer_mod.addIncludePath(b.path("Lib"));
+    android_consumer_mod.addCSourceFile(.{
+        .file = android_consumer_source,
+        .flags = &.{"-std=c11"},
+    });
+    const android_consumer = b.addObject(.{
+        .name = "vizg-android-aarch64-consumer",
+        .root_module = android_consumer_mod,
+    });
+
+    const install_android_lib = b.addInstallArtifact(android_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "android-aarch64/lib" } },
+    });
+    const install_android_header = b.addInstallFile(
+        b.path("Lib/vizg.h"),
+        "android-aarch64/include/vizg.h",
+    );
+    const android_lib_step = b.step(
+        "android-aarch64-lib",
+        "Build Android AArch64/API 24 libvizg.a, header, and C compile probe",
+    );
+    android_lib_step.dependOn(&install_android_lib.step);
+    android_lib_step.dependOn(&install_android_header.step);
+    android_lib_step.dependOn(&android_consumer.step);
 
     // -------------------------------------------------------------------
     // 2. Install step — default prefix is zig-out/.
@@ -125,6 +215,23 @@ pub fn build(b: *std.Build) void {
     const abi_lifecycle_tests = b.addRunArtifact(b.addTest(.{
         .root_module = abi_lifecycle_mod,
     }));
+    const abi_layout_mod = b.createModule(.{
+        .root_source_file = b.path("test/c_abi/layout_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    abi_layout_mod.addImport("vizg-abi", vizg_cabi);
+    abi_layout_mod.addIncludePath(b.path("Lib"));
+    abi_layout_mod.addCSourceFile(.{
+        .file = b.path("test/c_abi/layout_probe.c"),
+        .flags = &.{"-std=c11"},
+    });
+    const abi_layout_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = abi_layout_mod,
+    }));
+    const abi_layout_step = b.step("abi-layout-test", "Compare Zig and C public ABI layouts");
+    abi_layout_step.dependOn(&abi_layout_tests.step);
     const android_helper_tests = b.addRunArtifact(b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("android.build.zig"),
@@ -136,6 +243,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(lint_silent_step);
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&abi_lifecycle_tests.step);
+    test_step.dependOn(abi_layout_step);
     test_step.dependOn(&android_helper_tests.step);
 
     // 5. Portable validation: install public artifacts, run all tests, and

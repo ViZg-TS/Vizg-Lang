@@ -46,6 +46,7 @@ typedef enum {
     VIZG_DIAG_UNKNOWN_TYPE_NAME        = 12,
     VIZG_DIAG_TYPE_MISMATCH            = 13,
     VIZG_DIAG_PARSE_RECURSION_LIMIT    = 14,
+    VIZG_DIAG_INVALID_ESCAPE_SEQUENCE  = 15,
 } Vizg_DiagnosticCode;
 
 typedef enum {
@@ -193,7 +194,7 @@ typedef enum {
 } Vizg_TokenType;
 
 /* Contextual keyword classification companion to Vizg_TokenType.Identifier. */
-enum {
+typedef enum Vizg_ContextualKeyword {
     VIZG_CONTEXTUAL_KEYWORD_NONE           = 0,
     VIZG_CONTEXTUAL_KEYWORD_AS             = 1,
     VIZG_CONTEXTUAL_KEYWORD_FROM           = 2,
@@ -240,7 +241,7 @@ enum {
     VIZG_CONTEXTUAL_KEYWORD_UNKNOWN        = 41,
     VIZG_CONTEXTUAL_KEYWORD_USING          = 42,
     VIZG_CONTEXTUAL_KEYWORD_GET            = 43,
-};
+} Vizg_ContextualKeyword;
 
 
 

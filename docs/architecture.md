@@ -16,6 +16,8 @@
 
 `Lib/vizg.h` is the consumer contract. The ABI is pointer/length based: returned strings are not required to be NUL-terminated, and result-backed memory remains valid only until `vizg_free_result`. Each result owns an independent arena, so multiple results may be alive and freed in any order. New consumers use `vizg_analyze_source_ex`, whose status distinguishes invalid arguments, I/O, file-size, OOM, and internal failures; the older source function remains a null-on-failure compatibility wrapper.
 
+`zig build android-aarch64-lib` compiles this same ABI graph for `aarch64-linux-android.24` and installs a static archive plus header under `zig-out/android-aarch64/`. The in-memory analysis entry points have no filesystem, host-path, threading, or direct syscall dependency. `vizg_analyze_file` is the platform adapter and uses the target's filesystem through Zig's standard library. The build requires no hardcoded SDK or NDK path; final Android application linkage supplies an API-24-compatible NDK sysroot and CRT. This is compile validation only, not an Android runtime claim.
+
 ### C ABI v1 contract
 
 `Lib/vizg.h` defines `VIZG_ABI_VERSION` as `1`.
@@ -53,12 +55,12 @@ Status meanings:
 In-memory source has no fixed ABI size limit beyond the target address space
 and available memory. File input may report `VIZG_STATUS_FILE_TOO_LARGE`.
 
-The supported C ABI build is the default host-target static library produced by
-`zig build`. That host is also the only target with runtime ABI validation,
-through `zig build test`. The generic `zig build cross-check` matrix compiles
-only frontend, types, and semantics code for its listed Linux, Windows, macOS,
-and Android targets. It does not build, link, or run the C ABI, so those entries
-are compile probes for generic code, not validated C ABI platform claims.
+The default host-target static library is produced by `zig build`, and the host
+is the only target with runtime ABI validation through `zig build test`.
+`zig build abi-cross-check` compiles the same consumer library graph as a static
+archive for each listed Linux, Windows, macOS, and Android target. It also
+compiles a C translation unit against `Lib/vizg.h` for each target. These are
+compile and header-neutrality probes, not foreign-target runtime claims.
 
 The ABI currently exposes tokens and diagnostics from single-file analysis. It does not expose AST nodes, symbols, references, CFGs, module graph data, type inference, execution, or compilation.
 
@@ -189,9 +191,9 @@ The single-file pipeline does not require file system access except for CLI inpu
 
 ## Platform Boundary
 
-`cross_check.zig` references the public declarations in the frontend, types, and semantics layers. `zig build cross-check` compiles that probe as an object for representative Linux, Windows, macOS, and Android targets. The step performs no foreign linking or execution.
+`cross_check.zig` references the public declarations in the frontend, types, and semantics layers. `zig build cross-check` compiles that generic probe as an object for representative Linux, Windows, macOS, and Android targets. `zig build abi-cross-check` separately compiles target static archives using the consumer dependency graph (`src/root.zig` and `Lib/vizg.zig`) and compiles the public C header probe. Neither step runs foreign code.
 
-These generic layers must not branch on the target OS. Platform-dependent work stays in adapters: `src/main.zig` for CLI interaction, `src/modules/loader.zig` for filesystem-backed loading, `Lib/vizg.zig` for the C ABI, and build/packaging helpers. The compile matrix does not claim those adapters have runtime validation on foreign targets.
+Generic layers must not branch on the target OS. Platform-dependent work stays in adapters such as `src/main.zig` for CLI interaction, `src/modules/loader.zig` for filesystem-backed loading, `Lib/vizg.zig` for the C ABI, and build/packaging helpers. The ABI matrix proves that its adapter compiles for the listed targets; it does not claim runtime validation there.
 
 Shared diagnostics live outside the frontend:
 

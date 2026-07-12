@@ -43,15 +43,30 @@ zig build test
 
 The test step runs the frontend, module graph, semantic, ABI, Android-helper, and portable structural checks. C and Zig consumer contract tests remain available under `example/`.
 
+Run the C/Zig public ABI layout comparison independently with:
+
+```sh
+zig build abi-layout-test
+```
+
 ## Cross-target compile checks
 
 ```sh
 zig build cross-check
+zig build abi-cross-check
 ```
 
-This compile-only step builds the generic frontend, types, and semantics layers as objects for `x86_64-linux`, `aarch64-linux`, `x86_64-windows`, `aarch64-macos`, `x86_64-macos`, and `aarch64-linux-android` (API 24). It neither links nor runs foreign executables. Passing proves compile portability only, not runtime behavior. No listed target is currently unsupported by this core-layer check.
+`cross-check` builds the generic frontend, types, and semantics layers as objects. `abi-cross-check` builds the same static-library graph used by consumers, rooted at `src/root.zig` with the C ABI implementation in `Lib/vizg.zig`, and compiles a C translation unit against `Lib/vizg.h` for every target. The ABI archives are compile probes and are not installed as packages.
 
-The CLI, filesystem-backed module loader, C ABI, and packaging remain outside this matrix as platform adapters. Android core compilation uses Zig's target query and does not require an NDK; Android linking and runtime validation remain separate work.
+Both steps cover `x86_64-linux`, `aarch64-linux`, `x86_64-windows`, `x86_64-macos`, `aarch64-macos`, and `aarch64-linux-android.24`. They compile only and never run foreign code. Passing proves compile portability and header neutrality, not runtime behavior. The CLI and packaging remain outside the matrix. Android compilation uses Zig's target query and does not require an NDK; Android runtime validation remains separate work.
+
+Build the packaged Android AArch64/API 24 static library with:
+
+```sh
+zig build android-aarch64-lib
+```
+
+This installs `zig-out/android-aarch64/lib/libvizg.a` and `zig-out/android-aarch64/include/vizg.h`. The step also compiles a minimal C consumer for `aarch64-linux-android.24`. It does not link or run an Android executable: final linkage needs the consuming Android build's API-24-compatible NDK sysroot and CRT.
 
 ## Static Library And C ABI
 
