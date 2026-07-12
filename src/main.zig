@@ -273,6 +273,26 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printEscaped(writer, literal.value);
             try writer.print("\" {}..{}\n", .{ node.span.start, node.span.end });
         },
+        .RegExpLiteral => |regexp| {
+            try writer.print("RegExpLiteral #{} pattern=\"", .{node_id});
+            try printEscaped(writer, regexp.pattern);
+            try writer.writeAll("\" flags=\"");
+            if (regexp.flags.has_indices) try writer.writeByte('d');
+            if (regexp.flags.global) try writer.writeByte('g');
+            if (regexp.flags.ignore_case) try writer.writeByte('i');
+            if (regexp.flags.multiline) try writer.writeByte('m');
+            if (regexp.flags.dot_all) try writer.writeByte('s');
+            if (regexp.flags.unicode) try writer.writeByte('u');
+            if (regexp.flags.unicode_sets) try writer.writeByte('v');
+            if (regexp.flags.sticky) try writer.writeByte('y');
+            try writer.print("\" {}..{}\n", .{ node.span.start, node.span.end });
+        },
+        .TemplateExpression => |template| {
+            try writer.print("TemplateExpression #{} parts={} {}..{}\n", .{ node_id, template.parts.len, node.span.start, node.span.end });
+            for (template.parts) |part| {
+                if (part.expression) |expression| try printAstNode(writer, tree, expression, depth + 1);
+            }
+        },
         .VariableDeclaration => |decl| {
             try writer.print("VariableDeclaration #{} kind={s} {}..{}\n", .{ node_id, @tagName(decl.kind), node.span.start, node.span.end });
             for (decl.declarations) |declarator| try printAstNode(writer, tree, declarator, depth + 1);
@@ -308,6 +328,10 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
         .NonNullExpression => |nonnull| {
             try writer.print("NonNullExpression #{} expression=#{} {}..{}\n", .{ node_id, nonnull.expression, node.span.start, node.span.end });
             try printAstNode(writer, tree, nonnull.expression, depth + 1);
+        },
+        .UnaryExpression => |unary| {
+            try writer.print("UnaryExpression #{} operator={s} argument=#{} {}..{}\n", .{ node_id, @tagName(unary.operator), unary.argument, node.span.start, node.span.end });
+            try printAstNode(writer, tree, unary.argument, depth + 1);
         },
         .AsExpression => |as_expr| {
             try writer.print("AsExpression #{} expr=#{} type={s} {}..{}\n", .{
@@ -1002,6 +1026,8 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .ExpressionStatement => return "ExpressionStatement",
         .Identifier => return "Identifier",
         .Literal => return "Literal",
+        .RegExpLiteral => return "RegExpLiteral",
+        .TemplateExpression => return "TemplateExpression",
         .VariableDeclaration => return "VariableDeclaration",
         .VariableDeclarator => return "VariableDeclarator",
         .FunctionDeclaration => return "FunctionDeclaration",
@@ -1010,6 +1036,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .CallExpression => return "CallExpression",
         .ElementAccessExpression => return "ElementAccessExpression",
         .NonNullExpression => return "NonNullExpression",
+        .UnaryExpression => return "UnaryExpression",
         .AsExpression => return "AsExpression",
         .MemberExpression => return "MemberExpression",
         .BinaryExpression => return "BinaryExpression",
