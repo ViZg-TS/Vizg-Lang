@@ -138,6 +138,12 @@ pub const AssignmentExpression = struct {
     right: NodeId,
 };
 
+pub const ConditionalExpression = struct {
+    condition: NodeId,
+    consequent: NodeId,
+    alternate: NodeId,
+};
+
 pub const UpdateExpression = struct {
     operator: tokens.TokenType,
     argument: NodeId,
@@ -196,6 +202,7 @@ pub const NodeData = union(enum) {
     NonNullExpression: NonNullExpression,
     UnaryExpression: UnaryExpression,
     BinaryExpression: BinaryExpression,
+    ConditionalExpression: ConditionalExpression,
     UpdateExpression: UpdateExpression,
     AssignmentExpression: AssignmentExpression,
     IfStatement: IfStatement,
