@@ -13,10 +13,13 @@
   - assignments
   - calls
   - member expressions
+  - optional member, computed-access, and call chains
+  - call, array, and object spread plus rest parameters
   - if/else
   - while
   - for
-  - return
+  - break/continue
+  - return/throw
   - named exports
   - aliased exports
 */
@@ -45,7 +48,7 @@ function makeGreeting(name: string) {
   return message;
 }
 
-// Exported function with if/else, assignment, while, and binary expressions.
+// Exported function with if/else, assignment, while, do/while, and binary expressions.
 export function classify(value: number) {
   let label = "zero";
 
@@ -60,21 +63,80 @@ export function classify(value: number) {
     value = nextValue;
   }
 
+  do {
+    value = value - 1;
+  } while (value > 5);
+
   return label;
 }
 
-// Exported function with for loop.
-// The current parser accepts the for header but keeps the CFG/AST simple.
+// Exported function with classic for loop.
 export function sum(limit: number) {
   let total = 0;
 
   for (let i = 0; i < limit; i = i + 1) {
+    if (i > 100) break;
+    if (i < 0) continue;
     let nextTotal = total + limit;
     total = nextTotal;
   }
 
   return total;
 }
+
+export function visitKeys(object) {
+  for (const key in object) {
+    key;
+  }
+}
+
+export function visitValues(iterable, stream) {
+  for (const value of iterable) {
+    value;
+  }
+  for await (const value of stream) {
+    value;
+  }
+}
+
+export function selectLabel(value) {
+  switch (value) {
+    case 1:
+    case 2:
+      return "small";
+    default:
+      break;
+  }
+  return "other";
+}
+
+function collect(...items) {
+  let copied = [...items];
+  let metadata = { ...localMissing };
+  return copied;
+}
+
+function fail(problem) {
+  throw problem;
+}
+
+function recover(value) {
+  try {
+    fail(value);
+  } catch (error) {
+    error;
+  } finally {
+    value;
+  }
+
+  try {
+    value;
+  } catch {
+    value;
+  }
+}
+
+const collectArrow = (...items) => collect(...items);
 
 // Exported function with calls, member access, assignment and return expression.
 export function run(name: string) {
@@ -84,6 +146,8 @@ export function run(name: string) {
   mutableTotal = sum(3);
 
   defaultLogger.log(greeting);
+  defaultLogger?.log(greeting);
+  defaultLogger?.["log"]?.(greeting);
   warn(state);
 
   return greeting + state;
