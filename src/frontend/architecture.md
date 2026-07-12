@@ -32,7 +32,7 @@ El scanner decide contextualmente si `/` inicia un `RegExpLiteral` o representa 
 
 Las expresiones unarias prefijas (`!`, `~`, `-`, `+`, `typeof`, `void`, `delete`, `await`) se agrupan antes que los operadores multiplicativos. La aserción no nula `value!` sigue siendo una expresión postfija distinta.
 
-La precedencia binaria sigue la escalera de JavaScript: exponenciación (asociativa a la derecha), multiplicación, suma, shifts, relaciones, igualdad, AND/XOR/OR bit a bit, AND/OR lógico y asignación.
+La precedencia de expresiones sigue la escalera de JavaScript: exponenciación (asociativa a la derecha), multiplicación, suma, shifts, relaciones, igualdad, AND/XOR/OR bit a bit, AND/OR lógico, coalescencia nula, condicional ternaria y asignación. Las expresiones condicionales son asociativas a la derecha y recorren condición, consecuencia y alternativa. Mezclar `??` con `&&` o `||` requiere paréntesis explícitos.
 
 Cada token guarda:
 
