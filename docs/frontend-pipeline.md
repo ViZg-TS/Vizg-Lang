@@ -67,9 +67,10 @@ The parser consumes scanner tokens and builds `ast.Ast`. The AST supports the cu
 - variable declarations and declarators
 - function declarations and parameters
 - return and expression statements
-- call, member, binary, assignment, and prefix unary expressions
+- call, member, binary, conditional, assignment, and prefix unary expressions
 - postfix non-null assertions, distinct from prefix `!`
-- right-associative exponentiation plus multiplicative, additive, shift, relational, equality, bitwise, logical, and assignment precedence levels
+- right-associative exponentiation plus multiplicative, additive, shift, relational, equality, bitwise, logical, nullish-coalescing, conditional, and assignment precedence levels
+- deterministic parser diagnostics for unparenthesized mixing of `??` with `&&` or `||`
 - template expressions with traversable interpolation expressions
 - `if`, `while`, and `for` statements
 
