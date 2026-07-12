@@ -14,6 +14,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - Contextual RegExp literal scanning now distinguishes division, preserves patterns and flags in the AST, and reports invalid flags or unterminated literals.
 - Prefix unary expressions now support `!`, `~`, `-`, `+`, `typeof`, `void`, `delete`, and `await`, while preserving postfix non-null assertions.
 - Expression parsing now applies JavaScript-style precedence for right-associative exponentiation, shifts, bitwise operators, and their compound assignment forms.
+- Nullish coalescing and nullish assignment now parse with deterministic rejection of unparenthesized `??` mixing with `&&` or `||`.
+- Ternary conditional expressions now parse right-associatively between nullish coalescing and assignment, with stable missing-colon recovery and traversable branches.
 
 ## [0.0.2] — 2026-07-12
 
