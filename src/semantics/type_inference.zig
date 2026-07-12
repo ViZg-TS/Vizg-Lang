@@ -49,8 +49,6 @@ fn looksNumeric(text: []const u8) bool {
     return seen_digit;
 }
 
-
-
 /// Classify an identifier by name for the small set of keywords that the
 /// parser may leave as identifiers rather than literals. `undefined` is
 /// excluded per goal text: skip unless the parser emits explicit support.
@@ -62,7 +60,6 @@ fn classifyIdentifier(name: []const u8) ?builtin_kind.BuiltinKind {
 }
 
 /// Node-level type record stored alongside SymbolTypeInfo in TypeInfo.nodes.
-
 /// Infer literal node types and return them as an owned slice on `allocator`.
 /// Reserved parameter for future inference passes that may consult built-in
 /// function signatures.
@@ -93,6 +90,14 @@ pub fn inferLiteralNodeTypes(
                         .type_id = builtin_kind.builtinKindTypeId(kind),
                     });
                 }
+            },
+            .RegExpLiteral => {},
+            .TemplateExpression => |template| {
+                try out_list.append(allocator, .{
+                    .node_id = id,
+                    .type_id = builtin_kind.builtinKindTypeId(.string),
+                });
+                for (template.parts) |part| if (part.expression) |expression| try stack.append(allocator, expression);
             },
             .Identifier => |ident| {
                 if (classifyIdentifier(ident.name)) |kind| {
@@ -127,7 +132,14 @@ pub fn inferLiteralNodeTypes(
                 _ = try stack.append(allocator, as_expr.expression);
             },
             .NonNullExpression => |nonnull| _ = try stack.append(allocator, nonnull.expression),
-            .MemberExpression => |member| { _ = member.property; try stack.append(allocator, member.object); },
+            .UnaryExpression => |unary| {
+                _ = unary.operator;
+                _ = try stack.append(allocator, unary.argument);
+            },
+            .MemberExpression => |member| {
+                _ = member.property;
+                try stack.append(allocator, member.object);
+            },
             .BinaryExpression => |bin| {
                 _ = bin.operator;
                 _ = try stack.append(allocator, bin.left);
@@ -180,7 +192,6 @@ pub fn inferLiteralNodeTypes(
         }
     }
 
-
     return try out_list.toOwnedSlice(allocator);
 }
 
@@ -196,7 +207,9 @@ test "number literal node has type number" {
     const alloc = arena.allocator();
 
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = "let x = 1;\n" }, .{},
+        alloc,
+        .{ .text = "let x = 1;\n" },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -214,7 +227,9 @@ test "string literal node has type string" {
     const alloc = arena.allocator();
 
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = "let x = \"hello\";\n" }, .{},
+        alloc,
+        .{ .text = "let x = \"hello\";\n" },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -233,7 +248,9 @@ test "true/false literal node has type boolean" {
     };
     for (srcs) |src| {
         const result = try @import("../frontend/frontend.zig").analyze(
-            alloc, .{ .text = src }, .{},
+            alloc,
+            .{ .text = src },
+            .{},
         );
         const inferred = try inferLiteralNodeTypes(alloc, result.ast);
         defer alloc.free(inferred);
@@ -248,7 +265,9 @@ test "null literal node has type null" {
     const alloc = arena.allocator();
 
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = "let x = null;\n" }, .{},
+        alloc,
+        .{ .text = "let x = null;\n" },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -264,7 +283,9 @@ test "non-literal expression has no node type" {
     // Pure identifier expression — only Identifier nodes, none of which match
     // true/false/null, so nothing gets classified.
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = "x;\n" }, .{},
+        alloc,
+        .{ .text = "x;\n" },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -278,7 +299,9 @@ test "empty program produces no entries" {
     const alloc = arena.allocator();
 
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = "" }, .{},
+        alloc,
+        .{ .text = "" },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -296,7 +319,9 @@ test "literal inside for-loop body is inferred" {
     // reachable via FunctionDeclaration -> body descent.
     const src = "function f() { for (let i: number = 0; false; ) {} }\n";
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = src }, .{},
+        alloc,
+        .{ .text = src },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -320,7 +345,9 @@ test "literal inside function body is inferred" {
 
     const src = "function f() { const x: string = \"hello\"; }\n";
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = src }, .{},
+        alloc,
+        .{ .text = src },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -341,7 +368,9 @@ test "literal inside array element is inferred" {
 
     const src = "const arr = [1, 2, 3];\n";
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = src }, .{},
+        alloc,
+        .{ .text = src },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -365,7 +394,9 @@ test "literal inside object property value is inferred" {
 
     const src = "const obj = { a: 1, b: \"two\", c: true };\n";
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = src }, .{},
+        alloc,
+        .{ .text = src },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -395,7 +426,9 @@ test "literal inside nested block is inferred" {
     // the deepest level and must still be reached.
     const src = "if (true) { const x = 42; }\n";
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = src }, .{},
+        alloc,
+        .{ .text = src },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
@@ -425,7 +458,9 @@ test "return expression is traversed" {
     // terminate at the enclosing BlockStatement without visiting the return.
     const src = "function f() { return 7; }\n";
     const result = try @import("../frontend/frontend.zig").analyze(
-        alloc, .{ .text = src }, .{},
+        alloc,
+        .{ .text = src },
+        .{},
     );
     const inferred = try inferLiteralNodeTypes(alloc, result.ast);
     defer alloc.free(inferred);
