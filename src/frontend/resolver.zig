@@ -128,6 +128,11 @@ const Resolver = struct {
                 try self.resolveNode(binary.left, scope);
                 try self.resolveNode(binary.right, scope);
             },
+            .ConditionalExpression => |conditional| {
+                try self.resolveNode(conditional.condition, scope);
+                try self.resolveNode(conditional.consequent, scope);
+                try self.resolveNode(conditional.alternate, scope);
+            },
             .UpdateExpression => |update_expr| {
                 // Postfix/PREFIX update is a read-modify-write; emit write ref on argument.
                 if (node_id == ast_mod.invalid_node) {} else switch (self.ast.node(update_expr.argument).data) {
@@ -279,4 +284,37 @@ test "resolver visits prefix unary operands" {
     try std.testing.expect(saw_value);
     try std.testing.expect(saw_object);
     try std.testing.expect(saw_fn_call);
+}
+
+test "resolver visits every conditional expression branch" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\let condition = true;
+        \\let consequent = 1;
+        \\let alternate = 2;
+        \\let result = condition ? consequent : alternate;
+    ;
+    const scanned = try scanner.scanAll(allocator, source, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+
+    var condition_seen = false;
+    var consequent_seen = false;
+    var alternate_seen = false;
+    for (resolved.references) |reference| {
+        if (reference.kind != .read) continue;
+        if (std.mem.eql(u8, reference.name, "condition")) condition_seen = true;
+        if (std.mem.eql(u8, reference.name, "consequent")) consequent_seen = true;
+        if (std.mem.eql(u8, reference.name, "alternate")) alternate_seen = true;
+    }
+    try std.testing.expect(condition_seen);
+    try std.testing.expect(consequent_seen);
+    try std.testing.expect(alternate_seen);
 }
