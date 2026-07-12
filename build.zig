@@ -120,6 +120,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    abi_lifecycle_mod.addIncludePath(b.path("Lib"));
     abi_lifecycle_mod.linkLibrary(vizg_lib);
     const abi_lifecycle_tests = b.addRunArtifact(b.addTest(.{
         .root_module = abi_lifecycle_mod,

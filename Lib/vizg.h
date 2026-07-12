@@ -7,6 +7,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define VIZG_ABI_VERSION 1u
+
 typedef struct Vizg_Result {
     uint32_t        token_count;
     uint32_t        diagnostic_count;
@@ -267,9 +269,27 @@ typedef struct Vizg_SourceInput {
     size_t          path_len;
 } Vizg_SourceInput;
 
+/*
+ * C ABI v1 contract:
+ * - Pointer/length pairs are exact byte spans, not NUL-terminated strings.
+ *   Zero length permits NULL; non-zero length requires non-NULL. Inputs are
+ *   borrowed only for the duration of the call.
+ * - A successful result owns all nested spans until vizg_free_result() is
+ *   called exactly once. Callers must not modify or separately free them.
+ * - Separate calls and results may be used concurrently. Do not read a result
+ *   while or after another thread frees that same result.
+ * - VIZG_STATUS_OK may include syntax diagnostics. Other statuses return no
+ *   result. In-memory source has no fixed cap beyond address space and memory;
+ *   file input may return VIZG_STATUS_FILE_TOO_LARGE.
+ * See docs/architecture.md for platform validation scope and the full contract.
+ */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Returns the runtime library's C ABI version. */
+uint32_t vizg_abi_version(void);
 
 Vizg_Status vizg_analyze_source_ex(
     const Vizg_SourceInput *input,

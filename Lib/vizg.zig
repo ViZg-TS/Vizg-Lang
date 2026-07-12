@@ -17,6 +17,8 @@ const frontend_mod = vizg_pkg.frontend;
 const diagnostics_mod = vizg_pkg.diagnostics;
 const tokens_mod = vizg_pkg.tokens;
 
+pub const VIZG_ABI_VERSION: u32 = 1;
+
 pub const Vizg_Status = enum(c_int) {
     OK = 0,
     INVALID_ARGUMENT,
@@ -698,6 +700,10 @@ fn doAnalyze(
 // internally via the page allocator inside an arena owned by Vizg_Result.
 // ---------------------------------------------------------------------------
 
+pub fn Vizg_abiVersion() callconv(.c) u32 {
+    return VIZG_ABI_VERSION;
+}
+
 fn analyzeFile(
     path: []const u8,
     text: []const u8,
@@ -805,6 +811,7 @@ pub fn Vizg_freeResult(result: ?*Vizg_Result) callconv(.c) void {
 // pointer-to-function cast needed.
 // ---------------------------------------------------------------------------
 comptime {
+    @export(&Vizg_abiVersion, .{ .name = "vizg_abi_version" });
     @export(&Vizg_analyzeFile, .{ .name = "vizg_analyze_file" });
     @export(&Vizg_freeResult, .{ .name = "vizg_free_result" });
     @export(&Vizg_analyzeSource, .{ .name = "vizg_analyze_source" });

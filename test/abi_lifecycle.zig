@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const c = @cImport(@cInclude("vizg.h"));
 
 const VizgStatus = enum(c_int) {
     ok = 0,
@@ -26,6 +27,11 @@ const VizgSourceInput = extern struct {
 
 extern fn vizg_analyze_source_ex(input: ?*const VizgSourceInput, out_result: ?*?*VizgResult) callconv(.c) VizgStatus;
 extern fn vizg_free_result(result: ?*VizgResult) callconv(.c) void;
+extern fn vizg_abi_version() callconv(.c) u32;
+
+test "header ABI version matches runtime library" {
+    try std.testing.expectEqual(@as(u32, c.VIZG_ABI_VERSION), vizg_abi_version());
+}
 
 fn analyze(source: []const u8) !*VizgResult {
     const input: VizgSourceInput = .{
