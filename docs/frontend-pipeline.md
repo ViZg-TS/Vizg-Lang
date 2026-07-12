@@ -35,6 +35,7 @@ source text
 ## Scanner
 
 The scanner converts source text into tokens with source spans. It can skip comments or collect them, depending on options.
+Slash tokens are contextual: expression-start positions can produce RegExp literals, while expression-ending positions preserve division operators.
 
 Token output includes:
 
@@ -60,12 +61,16 @@ The parser consumes scanner tokens and builds `ast.Ast`. The AST supports the cu
 
 - program and block statements
 - identifiers and literals
+- RegExp literals with pattern, flags, and full-literal spans
 - import declarations
 - export declarations and specifiers
 - variable declarations and declarators
 - function declarations and parameters
 - return and expression statements
-- call, member, binary, and assignment expressions
+- call, member, binary, assignment, and prefix unary expressions
+- postfix non-null assertions, distinct from prefix `!`
+- right-associative exponentiation plus multiplicative, additive, shift, relational, equality, bitwise, logical, and assignment precedence levels
+- template expressions with traversable interpolation expressions
 - `if`, `while`, and `for` statements
 
 Parser diagnostics use `VZG2xxx` codes.
