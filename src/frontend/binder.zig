@@ -191,6 +191,11 @@ const Binder = struct {
                 try self.bindNode(binary.left, scope);
                 try self.bindNode(binary.right, scope);
             },
+            .ConditionalExpression => |conditional| {
+                try self.bindNode(conditional.condition, scope);
+                try self.bindNode(conditional.consequent, scope);
+                try self.bindNode(conditional.alternate, scope);
+            },
             .AssignmentExpression => |assignment| {
                 try self.bindNode(assignment.left, scope);
                 try self.bindNode(assignment.right, scope);
