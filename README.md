@@ -49,6 +49,10 @@ The test step runs the frontend, module graph, semantic, and ABI unit-test tree.
 The supported exported functions are:
 
 ```c
+Vizg_Status vizg_analyze_source_ex(
+    const Vizg_SourceInput *input,
+    Vizg_Result **out_result);
+
 Vizg_Result *vizg_analyze_file(
     const char *path_ptr, size_t path_len,
     const char *text_ptr, size_t text_len);
@@ -60,7 +64,7 @@ Vizg_Result *vizg_analyze_source(
 void vizg_free_result(Vizg_Result *result);
 ```
 
-`vizg_analyze_source` analyzes caller-provided bytes without filesystem access. Its optional path is only a diagnostic identifier. `vizg_analyze_file` reads `path_ptr` when no source text is supplied; caller-provided text can be used instead.
+Use `vizg_analyze_source_ex` for new integrations. It reports `VIZG_STATUS_OUT_OF_MEMORY` and other failures explicitly and leaves `*out_result == NULL` on failure. `vizg_analyze_source` is the deprecated null-on-failure compatibility wrapper. Both analyze caller-provided bytes without filesystem access; the optional path is only a diagnostic identifier. `vizg_analyze_file` reads `path_ptr` when no source text is supplied.
 
 Returned tokens, diagnostics, messages, paths, and lexemes remain owned by the result. Treat every pointer as a pointer/length pair and call `vizg_free_result` exactly once when finished. A missing diagnostic path is represented by `path_ptr == NULL` and `path_len == 0`.
 

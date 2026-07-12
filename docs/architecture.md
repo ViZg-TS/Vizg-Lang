@@ -10,9 +10,10 @@
 
 - `vizg_analyze_file`
 - `vizg_analyze_source`
+- `vizg_analyze_source_ex`
 - `vizg_free_result`
 
-`Lib/vizg.h` is the consumer contract. The ABI is pointer/length based: returned strings are not required to be NUL-terminated, and result-backed memory remains valid only until `vizg_free_result`. Each result owns an independent arena, so multiple results may be alive and freed in any order.
+`Lib/vizg.h` is the consumer contract. The ABI is pointer/length based: returned strings are not required to be NUL-terminated, and result-backed memory remains valid only until `vizg_free_result`. Each result owns an independent arena, so multiple results may be alive and freed in any order. New consumers use `vizg_analyze_source_ex`, whose status distinguishes invalid arguments, I/O, file-size, OOM, and internal failures; the older source function remains a null-on-failure compatibility wrapper.
 
 The ABI currently exposes tokens and diagnostics from single-file analysis. It does not expose AST nodes, symbols, references, CFGs, module graph data, type inference, execution, or compilation.
 

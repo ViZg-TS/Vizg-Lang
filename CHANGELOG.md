@@ -10,6 +10,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Added
 
+- Status-returning `vizg_analyze_source_ex` C API with explicit out-of-memory reporting.
 - C-compatible static library at `zig-out/lib/libvizg.a` with its public header installed as `zig-out/include/vizg.h`.
 - Exported C ABI entry points for file analysis, in-memory source analysis, and result cleanup: `vizg_analyze_file`, `vizg_analyze_source`, and `vizg_free_result`.
 - Memory-first analysis accepts source bytes and an optional diagnostic path without reading the filesystem.
@@ -31,6 +32,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Fixed
 
+- Propagated recoverable allocation failures through frontend diagnostics, external-module registration, CLI commands, and the C ABI instead of panicking or silently continuing.
 - Corrected the C/Zig `Vizg_Token` layout mismatch that caused invalid token strides and crashes after the first token.
 - Preserved the ABI invariant that an absent diagnostic path has both a null pointer and zero length.
 - Ensured C ABI symbols are retained in `libvizg.a` and the public header is installed before consumer smoke tests compile.
