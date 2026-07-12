@@ -19,12 +19,20 @@ const tokens_mod = vizg_pkg.tokens;
 
 pub const Vizg_Status = enum(c_int) {
     OK = 0,
-    ERR_GENERIC,
-    ERR_IO,
-    ERR_PARSE,
-    ERR_ABI,
+    INVALID_ARGUMENT,
+    IO_ERROR,
+    OUT_OF_MEMORY,
+    INTERNAL_ERROR,
+    FILE_TOO_LARGE,
 };
 pub const VIZG_STATUS_OK: Vizg_Status = .OK;
+
+pub const Vizg_SourceInput = extern struct {
+    text_ptr: [*c]const u8,
+    text_len: usize,
+    path_ptr: [*c]const u8,
+    path_len: usize,
+};
 
 pub const Vizg_TokenType = enum(c_int) {
     Invalid = 0,
@@ -148,43 +156,72 @@ pub const Vizg_TokenType = enum(c_int) {
 
 pub const Vizg_Severity = enum(c_int) { Error = 0, Warning, Info, Hint };
 pub const Vizg_DiagnosticCode = enum(c_int) {
-    InvalidCharacter = 0, UnterminatedString, UnterminatedBlockComment,
-    InvalidNumber, UnexpectedToken, ExpectedToken, DuplicateDeclaration,
-    DuplicateExport, CannotFindName, ModuleNotFound, MissingExport,
-    CircularImport, UnknownTypeName, TypeMismatch, ParseRecursionLimitReached,
+    InvalidCharacter = 0,
+    UnterminatedString,
+    UnterminatedBlockComment,
+    InvalidNumber,
+    UnexpectedToken,
+    ExpectedToken,
+    DuplicateDeclaration,
+    DuplicateExport,
+    CannotFindName,
+    ModuleNotFound,
+    MissingExport,
+    CircularImport,
+    UnknownTypeName,
+    TypeMismatch,
+    ParseRecursionLimitReached,
     InvalidEscapeSequence = 15,
 };
 
 pub const Vizg_DiagnosticPhase = enum(c_int) {
-    Scanner = 0, Parser, Binder, Resolver, Cfg, ModuleGraph, TypeChecker,
-    Lowering, Runtime, Internal,
+    Scanner = 0,
+    Parser,
+    Binder,
+    Resolver,
+    Cfg,
+    ModuleGraph,
+    TypeChecker,
+    Lowering,
+    Runtime,
+    Internal,
 };
 
 pub const Vizg_Span = extern struct {
-    start_offset: c_uint, end_offset: c_uint, line_start: c_uint, col_start: c_uint,
+    start_offset: c_uint,
+    end_offset: c_uint,
+    line_start: c_uint,
+    col_start: c_uint,
 };
 
 pub const Vizg_TokenFlags = extern struct {
     has_leading_line_break: u8 = 0,
-    has_escape:          u8 = 0,
-    unterminated:        u8 = 0,
-    synthetic:           u8 = 0,
+    has_escape: u8 = 0,
+    unterminated: u8 = 0,
+    synthetic: u8 = 0,
 };
 
 /// ABI-safe token representation — layout matches Lib/vizg.h `Vizg_Token`.
 /// `kind` is the lexical classification; contextual_kind adds fine-grained
 /// metadata for Identifier tokens that are actually contextual keywords.
 pub const Vizg_Token = extern struct {
-    kind: Vizg_TokenType, span: Vizg_Span,
-    lexeme_ptr: [*c]const u8, lexeme_len: usize,
+    kind: Vizg_TokenType,
+    span: Vizg_Span,
+    lexeme_ptr: [*c]const u8,
+    lexeme_len: usize,
     /// VIZG_CONTEXTUAL_KEYWORD_* — only meaningful when kind == Identifier.
     contextual_kind: i32 = 0,
 };
 
 pub const Vizg_Diagnostic = extern struct {
-    severity: Vizg_Severity, code: Vizg_DiagnosticCode, phase: Vizg_DiagnosticPhase,
-    message_ptr: [*c]const u8, message_len: usize, span: Vizg_Span,
-    path_ptr: [*c]const u8, path_len: usize,
+    severity: Vizg_Severity,
+    code: Vizg_DiagnosticCode,
+    phase: Vizg_DiagnosticPhase,
+    message_ptr: [*c]const u8,
+    message_len: usize,
+    span: Vizg_Span,
+    path_ptr: [*c]const u8,
+    path_len: usize,
 };
 
 // ABI layout checks — extern struct fields are laid out C-compatible on every
@@ -192,8 +229,8 @@ pub const Vizg_Diagnostic = extern struct {
 comptime {
     std.debug.assert(@sizeOf(c_uint) == 4);
 
-    const ptr_size     = @sizeOf(usize);      // 4 (32-bit) or 8 (64-bit)
-    const pptr_off     = @offsetOf(Vizg_Diagnostic, "path_ptr");
+    const ptr_size = @sizeOf(usize); // 4 (32-bit) or 8 (64-bit)
+    const pptr_off = @offsetOf(Vizg_Diagnostic, "path_ptr");
 
     // Both path_ptr and path_len must be aligned — the C ABI pairs
     // `const char*` with `size_t`, so both start on pointer-size slots.
@@ -201,7 +238,13 @@ comptime {
 
     // TokenFlags: four u8 fields -> struct size is bounded correctly.
     const tf_sz = @sizeOf(Vizg_TokenFlags);
-    _ = (tf_sz >= 3 and tf_sz <= 5);   // tight window for 4x u8 (+ optional padding)
+    _ = (tf_sz >= 3 and tf_sz <= 5); // tight window for 4x u8 (+ optional padding)
+}
+
+test "source analysis propagates allocator failure as OUT_OF_MEMORY" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, analyzeSource(failing.allocator(), "const x = 1;", "memory.ts"));
+    try std.testing.expectEqual(Vizg_Status.OUT_OF_MEMORY, statusFromError(error.OutOfMemory));
 }
 
 // ---------------------------------------------------------------------------
@@ -262,49 +305,49 @@ fn toVizgContextualKeyword(v: tokens_mod.ContextualKeyword) i32 {
     // Values match VIZG_CONTEXTUAL_KEYWORD_* in Lib/vizg.h exactly so that
     // consumers can use these integers as direct enum discriminants.
     return switch (v) {
-        .Contextual_abstract     => 5,
-        .Contextual_accessor     => 10,
-        .Contextual_any          => 11,
-        .Contextual_as           => 1,
-        .Contextual_assert       => 12,
-        .Contextual_asserts      => 13,
-        .Contextual_async        => 14,
-        .Contextual_bigint       => 15,
-        .Contextual_boolean      => 16,
-        .Contextual_constructor  => 17,
-        .Contextual_declare      => 6,
-        .Contextual_from         => 2,
-        .Contextual_get          => 43,   // extends VIZG_CONTEXTUAL_KEYWORD_* past USING (42).
-        .Contextual_global       => 18,
-        .Contextual_implements   => 19,
-        .Contextual_infer        => 8,
-        .Contextual_interface    => 20,
-        .Contextual_intrinsic    => 21,
-        .Contextual_is           => 22,
-        .Contextual_keyof        => 9,
-        .Contextual_module       => 23,
-        .Contextual_namespace    => 24,
-        .Contextual_never        => 25,
-        .Contextual_number       => 26,
-        .Contextual_object       => 27,
-        .Contextual_of           => 3,
-        .Contextual_out          => 28,
-        .Contextual_override     => 29,
-        .Contextual_package      => 30,
-        .Contextual_private      => 31,
-        .Contextual_protected    => 32,
-        .Contextual_public       => 33,
-        .Contextual_readonly     => 4,
-        .Contextual_satisfies    => 7,
-        .Contextual_set          => 34,
-        .Contextual_static       => 35,
-        .Contextual_string       => 36,
-        .Contextual_symbol       => 37,
-        .Contextual_type         => 38,
-        .Contextual_undefined    => 39,
-        .Contextual_unique       => 40,
-        .Contextual_unknown      => 41,
-        .Contextual_using        => 42,
+        .Contextual_abstract => 5,
+        .Contextual_accessor => 10,
+        .Contextual_any => 11,
+        .Contextual_as => 1,
+        .Contextual_assert => 12,
+        .Contextual_asserts => 13,
+        .Contextual_async => 14,
+        .Contextual_bigint => 15,
+        .Contextual_boolean => 16,
+        .Contextual_constructor => 17,
+        .Contextual_declare => 6,
+        .Contextual_from => 2,
+        .Contextual_get => 43, // extends VIZG_CONTEXTUAL_KEYWORD_* past USING (42).
+        .Contextual_global => 18,
+        .Contextual_implements => 19,
+        .Contextual_infer => 8,
+        .Contextual_interface => 20,
+        .Contextual_intrinsic => 21,
+        .Contextual_is => 22,
+        .Contextual_keyof => 9,
+        .Contextual_module => 23,
+        .Contextual_namespace => 24,
+        .Contextual_never => 25,
+        .Contextual_number => 26,
+        .Contextual_object => 27,
+        .Contextual_of => 3,
+        .Contextual_out => 28,
+        .Contextual_override => 29,
+        .Contextual_package => 30,
+        .Contextual_private => 31,
+        .Contextual_protected => 32,
+        .Contextual_public => 33,
+        .Contextual_readonly => 4,
+        .Contextual_satisfies => 7,
+        .Contextual_set => 34,
+        .Contextual_static => 35,
+        .Contextual_string => 36,
+        .Contextual_symbol => 37,
+        .Contextual_type => 38,
+        .Contextual_undefined => 39,
+        .Contextual_unique => 40,
+        .Contextual_unknown => 41,
+        .Contextual_using => 42,
     };
 }
 
@@ -321,20 +364,20 @@ fn contextKindFor(kind: tokens_mod.TokenType, lexeme: []const u8) i32 {
     return 0;
 }
 
-const OwnedResult = struct { arena: *std.heap.ArenaAllocator };
-
 pub const Vizg_Result = extern struct {
-    token_count: c_uint, diagnostic_count: c_uint,
-    tokens_ptr: [*c]Vizg_Token, diagnostics_ptr: [*c]Vizg_Diagnostic,
+    token_count: c_uint,
+    diagnostic_count: c_uint,
+    tokens_ptr: [*c]Vizg_Token,
+    diagnostics_ptr: [*c]Vizg_Diagnostic,
 };
 
 /// Per-result arena lookup: address of the Vizg_Result struct -> owning ArenaAllocator.
 const ResultArenaMap = std.AutoHashMap(usize, *std.heap.ArenaAllocator);
 var resultArenas: ?*ResultArenaMap = null;
 
-fn getOrCreateArenaMap() *ResultArenaMap {
+fn getOrCreateArenaMap() !*ResultArenaMap {
     if (resultArenas == null) {
-        const m = std.heap.page_allocator.create(ResultArenaMap) catch unreachable;
+        const m = try std.heap.page_allocator.create(ResultArenaMap);
         m.* = ResultArenaMap.init(std.heap.page_allocator);
         resultArenas = @ptrCast(m);
     }
@@ -385,14 +428,14 @@ pub const c_close = PosixClose.close;
 // Portable file read via Zig standard library — no Linux-specific ABI,
 // no fixed-size path buffers. Cross-platform across all supported targets.
 /// Returns allocator-allocated buffer on success, null on I/O or permission error.
-fn readFileBytes(a_alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
+fn readFileBytes(a_alloc: std.mem.Allocator, path: []const u8) ![]u8 {
     const io = std.Io.Threaded.io(std.Io.Threaded.global_single_threaded);
     return std.Io.Dir.cwd().readFileAlloc(
         io,
         path,
         a_alloc,
         .limited(64 * 1024 * 1024),
-    ) catch null;
+    );
 }
 
 // Map internal scanner token kinds onto the C-ABI Vizg_TokenType enum.
@@ -410,204 +453,195 @@ fn validateAbiPointerLen(
     ptr: ?[*c]const u8,
     len: usize,
 ) bool {
-    _ = ptr == null and len > 0; // used in future silent-by-default refactor to gate a callback.
-    return true;
+    return !(ptr == null and len > 0);
 }
-
 
 pub fn mapKind(kind: tokens_mod.TokenType) Vizg_TokenType {
     return switch (kind) {
         // ---- Identifiers / names. ----
-        .Invalid           => .Invalid,
-        .Identifier        => .Identifier,
+        .Invalid => .Invalid,
+        .Identifier => .Identifier,
         .PrivateIdentifier => .PrivateIdentifier,
 
         // ---- Literals (1-1 with Vizg_TokenType). ----
-        .NumberLiteral     => .NumberLiteral,
-        .BigIntLiteral     => .BigintLiteral,      // ABI uses "Bigint" (not "BigInt")
-        .StringLiteral     => .StringLiteral,
-        .RegExpLiteral     => .RegexpLiteral,      // ABI uses "Regexp" (not "RegExp")
-        .TrueLiteral       => .TrueLiteral,
-        .FalseLiteral      => .FalseLiteral,
-        .NullLiteral       => .NullLiteral,
+        .NumberLiteral => .NumberLiteral,
+        .BigIntLiteral => .BigintLiteral, // ABI uses "Bigint" (not "BigInt")
+        .StringLiteral => .StringLiteral,
+        .RegExpLiteral => .RegexpLiteral, // ABI uses "Regexp" (not "RegExp")
+        .TrueLiteral => .TrueLiteral,
+        .FalseLiteral => .FalseLiteral,
+        .NullLiteral => .NullLiteral,
 
         // ---- Template literals. ----
-        .NoSubstitutionTemplate  => .NoSubstitutionTemplate,
-        .TemplateHead            => .TemplateHead,
-        .TemplateMiddle          => .TemplateMiddle,
-        .TemplateTail            => .TemplateTail,
+        .NoSubstitutionTemplate => .NoSubstitutionTemplate,
+        .TemplateHead => .TemplateHead,
+        .TemplateMiddle => .TemplateMiddle,
+        .TemplateTail => .TemplateTail,
 
         // ---- Comments / trivia. ----
-        .Shebang     => .Shebang,
+        .Shebang => .Shebang,
         .LineComment => .LineComment,
-        .BlockComment=> .BlockComment,
+        .BlockComment => .BlockComment,
 
         // ---- Keywords (all 40 exposed in the ABI). ----
-        .Keyword_await   => .Keyword_await,
-        .Keyword_break   => .Keyword_break,
-        .Keyword_case    => .Keyword_case,
-        .Keyword_catch   => .Keyword_catch,
-        .Keyword_class   => .Keyword_class,
-        .Keyword_const   => .Keyword_const,
-        .Keyword_continue=> .Keyword_continue,
-        .Keyword_debugger=> .Keyword_debugger,
+        .Keyword_await => .Keyword_await,
+        .Keyword_break => .Keyword_break,
+        .Keyword_case => .Keyword_case,
+        .Keyword_catch => .Keyword_catch,
+        .Keyword_class => .Keyword_class,
+        .Keyword_const => .Keyword_const,
+        .Keyword_continue => .Keyword_continue,
+        .Keyword_debugger => .Keyword_debugger,
         .Keyword_default => .Keyword_default,
-        .Keyword_delete  => .Keyword_delete,
-        .Keyword_do      => .Keyword_do,
-        .Keyword_else    => .Keyword_else,
-        .Keyword_enum    => .Keyword_enum,
-        .Keyword_export  => .Keyword_export,
+        .Keyword_delete => .Keyword_delete,
+        .Keyword_do => .Keyword_do,
+        .Keyword_else => .Keyword_else,
+        .Keyword_enum => .Keyword_enum,
+        .Keyword_export => .Keyword_export,
         .Keyword_extends => .Keyword_extends,
-        .Keyword_finally => .Keyword_finally,   // was Invalid; ABI exposes it.
-        .Keyword_for     => .Keyword_for,
-        .Keyword_function=> .Keyword_function,
-        .Keyword_if      => .Keyword_if,
-        .Keyword_import  => .Keyword_import,
-        .Keyword_in      => .Keyword_in,
-        .Keyword_instanceof=> .Keyword_instanceof,
-        .Keyword_let     => .Keyword_let,
-        .Keyword_new     => .Keyword_new,
-        .Keyword_return  => .Keyword_return,    // was Invalid; ABI exposes it.
-        .Keyword_super   => .Keyword_super,
-        .Keyword_switch  => .Keyword_switch,
-        .Keyword_this    => .Keyword_this,
-        .Keyword_throw   => .Keyword_throw,
-        .Keyword_try     => .Keyword_try,
-        .Keyword_typeof  => .Keyword_typeof,
-        .Keyword_var     => .Keyword_var,
-        .Keyword_void    => .Keyword_void,
-        .Keyword_while   => .Keyword_while,
-        .Keyword_with    => .Keyword_with,
-        .Keyword_yield   => .Keyword_yield,     // was Invalid; ABI exposes it.
+        .Keyword_finally => .Keyword_finally, // was Invalid; ABI exposes it.
+        .Keyword_for => .Keyword_for,
+        .Keyword_function => .Keyword_function,
+        .Keyword_if => .Keyword_if,
+        .Keyword_import => .Keyword_import,
+        .Keyword_in => .Keyword_in,
+        .Keyword_instanceof => .Keyword_instanceof,
+        .Keyword_let => .Keyword_let,
+        .Keyword_new => .Keyword_new,
+        .Keyword_return => .Keyword_return, // was Invalid; ABI exposes it.
+        .Keyword_super => .Keyword_super,
+        .Keyword_switch => .Keyword_switch,
+        .Keyword_this => .Keyword_this,
+        .Keyword_throw => .Keyword_throw,
+        .Keyword_try => .Keyword_try,
+        .Keyword_typeof => .Keyword_typeof,
+        .Keyword_var => .Keyword_var,
+        .Keyword_void => .Keyword_void,
+        .Keyword_while => .Keyword_while,
+        .Keyword_with => .Keyword_with,
+        .Keyword_yield => .Keyword_yield, // was Invalid; ABI exposes it.
 
         // ---- Ampersand family. ----
-        .Ampersand             => .Ampersand,
-        .AmpersandAmpersand    => .AmpersandAmpersand,
-        .AmpersandAmpersandEqual  => .AmpersandAmpersandEqual,
-        .AmpersandEqual          => .AmpersandEqual,
+        .Ampersand => .Ampersand,
+        .AmpersandAmpersand => .AmpersandAmpersand,
+        .AmpersandAmpersandEqual => .AmpersandAmpersandEqual,
+        .AmpersandEqual => .AmpersandEqual,
 
         // ---- Asterisk family (ABI uses "Star" prefix). ----
-        .Asterisk            => .Star,
-        .AsteriskAsterisk    => .StarStar,
+        .Asterisk => .Star,
+        .AsteriskAsterisk => .StarStar,
         .AsteriskAsteriskEqual => .StarStarEqual,
-        .AsteriskEqual         => .StarEqual,
+        .AsteriskEqual => .StarEqual,
 
         // ---- At / Backtick. ----
-        .At           => .At,
-        .Backtick     => .Backtick,            // was mapping to NoSubstitutionTemplate (wrong).
+        .At => .At,
+        .Backtick => .Backtick, // was mapping to NoSubstitutionTemplate (wrong).
 
         // ---- Bar family. ----
-        .Bar             => .Bar,
-        .BarBar          => .BarBar,
-        .BarBarEqual     => .BarBarEqual,
-        .BarEqual        => .BarEqual,
-        .BarGreaterThan  => .BarGreaterThan,    // was Invalid; ABI exposes it.
+        .Bar => .Bar,
+        .BarBar => .BarBar,
+        .BarBarEqual => .BarBarEqual,
+        .BarEqual => .BarEqual,
+        .BarGreaterThan => .BarGreaterThan, // was Invalid; ABI exposes it.
 
         // ---- Caret family. ----
-        .Caret         => .Caret,
-        .CaretEqual    => .CaretEqual,          // was Invalid; ABI exposes it.
+        .Caret => .Caret,
+        .CaretEqual => .CaretEqual, // was Invalid; ABI exposes it.
 
         // ---- Simple punctuators (name matches ABI). ----
-        .Colon        => .Colon,
-        .Comma        => .Comma,
-        .Dot          => .Dot,
-        .Spread       => .Ellipsis,            // internal "Spread" -> ABI "Ellipsis".
-        .Semicolon    => .Semicolon,
+        .Colon => .Colon,
+        .Comma => .Comma,
+        .Dot => .Dot,
+        .Spread => .Ellipsis, // internal "Spread" -> ABI "Ellipsis".
+        .Semicolon => .Semicolon,
 
         // ---- Equals family. ----
-        .Equal               => .Equals,         // =  -> ABI's Equals (was Assign, not in enum).
-        .EqualsEquals        => .EqualsEquals,
-        .EqualsEqualsEquals  => .EqualsEqualsEquals, // was Invalid; ABI exposes it.
-        .Exclamation         => .Bang,           // !  -> Bang (ABI verbose form).
-        .ExclamationEquals   => .BangEqual,      // != -> BangEqual.
-        .ExclamationEqualsEquals => .BangEqualEqual,   // !== -> BangEqualEqual (was Invalid; ABI exposes it).
+        .Equal => .Equals, // =  -> ABI's Equals (was Assign, not in enum).
+        .EqualsEquals => .EqualsEquals,
+        .EqualsEqualsEquals => .EqualsEqualsEquals, // was Invalid; ABI exposes it.
+        .Exclamation => .Bang, // !  -> Bang (ABI verbose form).
+        .ExclamationEquals => .BangEqual, // != -> BangEqual.
+        .ExclamationEqualsEquals => .BangEqualEqual, // !== -> BangEqualEqual (was Invalid; ABI exposes it).
 
         // ---- Arrow (=>). ----
-        .EqualsGreaterThan  => .EqualsGreaterThan,
+        .EqualsGreaterThan => .EqualsGreaterThan,
 
         // ---- Greater-than family. ----
-        .GreaterThan              => .GreaterThan,                // was Invalid; ABI exposes it.
-        .GreaterThanEquals        => .GreaterThanEquals,
-        .GreaterThanGreaterThan   => .GreaterThanGreaterThan,
-        .GreaterThanGreaterThanEqual   => .GreaterThanGreaterThanEqual,
-        .GreaterThanGreaterThanGreaterThan   => .GreaterThanGreaterThanGreaterThan,
-        .GreaterThanGreaterThanGreaterThanEqual   => .GreaterThanGreaterThanGreaterThanEqual,
+        .GreaterThan => .GreaterThan, // was Invalid; ABI exposes it.
+        .GreaterThanEquals => .GreaterThanEquals,
+        .GreaterThanGreaterThan => .GreaterThanGreaterThan,
+        .GreaterThanGreaterThanEqual => .GreaterThanGreaterThanEqual,
+        .GreaterThanGreaterThanGreaterThan => .GreaterThanGreaterThanGreaterThan,
+        .GreaterThanGreaterThanGreaterThanEqual => .GreaterThanGreaterThanGreaterThanEqual,
 
         // ---- Hash. ----
-        .Hash               => .Hash,                 // was Invalid; ABI exposes it.
+        .Hash => .Hash, // was Invalid; ABI exposes it.
 
         // ---- Less-than family. ----
-        .LessThan             => .LessThan,            // was Invalid; ABI exposes it.
-        .LessThanEquals       => .LessThanEquals,
-        .LessThanLessThan     => .LessThanLessThan,
-        .LessThanLessThanEqual  => .LessThanLessThanEqual,
-        .LessThanSlash        => .LessThanSlash,      // was Invalid; ABI exposes it.
+        .LessThan => .LessThan, // was Invalid; ABI exposes it.
+        .LessThanEquals => .LessThanEquals,
+        .LessThanLessThan => .LessThanLessThan,
+        .LessThanLessThanEqual => .LessThanLessThanEqual,
+        .LessThanSlash => .LessThanSlash, // was Invalid; ABI exposes it.
 
         // ---- Question-mark family (ABI uses verbose names). ----
-        .Question              => .QuestionMark,       // internal "Question" -> ABI "QuestionMark".
-        .QuestionDot           => .QuestionDot,        // was Invalid; ABI exposes it.
-        .QuestionQuestion      => .NullishCoalescing,  // ??   (was Invalid; ABI exposes it).
-        .QuestionQuestionEqual => .NullishCoalescingEqual,  // ??= (was Invalid; ABI exposes it).
+        .Question => .QuestionMark, // internal "Question" -> ABI "QuestionMark".
+        .QuestionDot => .QuestionDot, // was Invalid; ABI exposes it.
+        .QuestionQuestion => .NullishCoalescing, // ??   (was Invalid; ABI exposes it).
+        .QuestionQuestionEqual => .NullishCoalescingEqual, // ??= (was Invalid; ABI exposes it).
 
         // ---- Braces / brackets. ----
-        .LBrace     => .OpenBrace,
-        .RBrace     => .CloseBrace,
-        .LBracket   => .OpenBracket,
-        .RBracket   => .CloseBracket,
-        .LParen     => .OpenParenthesis,
-        .RParen     => .CloseParenthesis,
+        .LBrace => .OpenBrace,
+        .RBrace => .CloseBrace,
+        .LBracket => .OpenBracket,
+        .RBracket => .CloseBracket,
+        .LParen => .OpenParenthesis,
+        .RParen => .CloseParenthesis,
 
         // ---- Minus family. ----
-        .Minus         => .Minus,
-        .MinusEqual    => .MinusEqual,
-        .MinusMinus    => .MinusMinus,
+        .Minus => .Minus,
+        .MinusEqual => .MinusEqual,
+        .MinusMinus => .MinusMinus,
 
         // ---- Percent / Plus families. ----
-        .Percent          => .Percent,
-        .PercentEqual     => .PercentEqual,
-        .Plus             => .Plus,
-        .PlusEqual        => .PlusEqual,
-        .PlusPlus         => .PlusPlus,
+        .Percent => .Percent,
+        .PercentEqual => .PercentEqual,
+        .Plus => .Plus,
+        .PlusEqual => .PlusEqual,
+        .PlusPlus => .PlusPlus,
 
         // ---- Slash family. ----
-        .Slash       => .Slash,
-        .SlashEqual  => .SlashEqual,               // was Invalid; ABI exposes it.
+        .Slash => .Slash,
+        .SlashEqual => .SlashEqual, // was Invalid; ABI exposes it.
 
         // ---- Tilde. ----
-        .Tilde           => .Tilde,
+        .Tilde => .Tilde,
 
         // ---- EOF / EOL. ----
-        .EOF   => .EndOfFile,
-        .EOL   => .EndOfLine,                     // was Invalid; ABI exposes EndOfLine.
+        .EOF => .EndOfFile,
+        .EOL => .EndOfLine, // was Invalid; ABI exposes EndOfLine.
     };
 }
 fn doAnalyze(
-    a_alloc: std.mem.Allocator, src_file: frontend_mod.SourceFile, arena_owner: *std.heap.ArenaAllocator,
-) ?*Vizg_Result {
-    const fr = frontend_mod.analyze(a_alloc, src_file, .{}) catch {
-        // Analyzer failed (e.g. I/O error, OOM mid-parse). Roll back all allocations.
-        arena_owner.deinit();
-        std.heap.page_allocator.destroy(arena_owner);
-        return null;
-    };
+    a_alloc: std.mem.Allocator,
+    src_file: frontend_mod.SourceFile,
+    arena_owner: *std.heap.ArenaAllocator,
+) !*Vizg_Result {
+    const fr = try frontend_mod.analyze(a_alloc, src_file, .{});
 
     var owned_tokens: []Vizg_Token = &[_]Vizg_Token{};
     if (fr.tokens.len > 0) {
-        const arr = a_alloc.alloc(Vizg_Token, fr.tokens.len) catch {
-            arena_owner.deinit(); std.heap.page_allocator.destroy(arena_owner); return null;
-        };
+        const arr = try a_alloc.alloc(Vizg_Token, fr.tokens.len);
         for (fr.tokens, 0..) |t, i| {
-            arr[i].kind           = mapKind(t.kind);
-            arr[i].span.start_offset    = @intCast(t.span.start);
-            arr[i].span.end_offset      = @intCast(t.span.end);
-            arr[i].span.line_start      = @intCast(t.span.line);
-            arr[i].span.col_start       = @intCast(t.span.column);
-            const lb = a_alloc.alloc(u8, t.lexeme.len) catch {
-                arena_owner.deinit(); std.heap.page_allocator.destroy(arena_owner); return null;
-            };
+            arr[i].kind = mapKind(t.kind);
+            arr[i].span.start_offset = @intCast(t.span.start);
+            arr[i].span.end_offset = @intCast(t.span.end);
+            arr[i].span.line_start = @intCast(t.span.line);
+            arr[i].span.col_start = @intCast(t.span.column);
+            const lb = try a_alloc.alloc(u8, t.lexeme.len);
             @memcpy(lb.ptr, t.lexeme);
-            arr[i].lexeme_ptr    = lb.ptr;
-            arr[i].lexeme_len    = t.lexeme.len;
+            arr[i].lexeme_ptr = lb.ptr;
+            arr[i].lexeme_len = t.lexeme.len;
             // Contextual metadata: only meaningful for Identifier tokens.
             // Hard keywords carry their identity in kind alone.
             arr[i].contextual_kind = contextKindFor(t.kind, t.lexeme);
@@ -617,33 +651,27 @@ fn doAnalyze(
 
     var owned_diags: []Vizg_Diagnostic = &[_]Vizg_Diagnostic{};
     if (fr.diagnostics.len > 0) {
-        const darr = a_alloc.alloc(Vizg_Diagnostic, fr.diagnostics.len) catch {
-            arena_owner.deinit(); std.heap.page_allocator.destroy(arena_owner); return null;
-        };
+        const darr = try a_alloc.alloc(Vizg_Diagnostic, fr.diagnostics.len);
         for (fr.diagnostics, 0..) |d, i| {
-            darr[i].severity   = toVizgSeverity(d.severity);
-            darr[i].code       = toVizgDiagnosticCode(d.code);
-            darr[i].phase      = toVizgDiagnosticPhase(d.phase);
+            darr[i].severity = toVizgSeverity(d.severity);
+            darr[i].code = toVizgDiagnosticCode(d.code);
+            darr[i].phase = toVizgDiagnosticPhase(d.phase);
 
-            const mb = a_alloc.alloc(u8, d.message.len) catch {
-                arena_owner.deinit(); std.heap.page_allocator.destroy(arena_owner); return null;
-            };
+            const mb = try a_alloc.alloc(u8, d.message.len);
             @memcpy(mb.ptr, d.message);
-            darr[i].message_ptr  = mb.ptr;
-            darr[i].message_len  = d.message.len;
+            darr[i].message_ptr = mb.ptr;
+            darr[i].message_len = d.message.len;
 
-            darr[i].span.start_offset   = @intCast(d.span.start);
-            darr[i].span.end_offset     = @intCast(d.span.end);
-            darr[i].span.line_start     = @intCast(d.span.line);
-            darr[i].span.col_start      = @intCast(d.span.column);
+            darr[i].span.start_offset = @intCast(d.span.start);
+            darr[i].span.end_offset = @intCast(d.span.end);
+            darr[i].span.line_start = @intCast(d.span.line);
+            darr[i].span.col_start = @intCast(d.span.column);
 
             if (d.path) |p| {
-                const pb = a_alloc.alloc(u8, p.len) catch {
-                    arena_owner.deinit(); std.heap.page_allocator.destroy(arena_owner); return null;
-                };
+                const pb = try a_alloc.alloc(u8, p.len);
                 @memcpy(pb.ptr, p);
-                darr[i].path_ptr  = pb.ptr;
-                darr[i].path_len  = p.len;
+                darr[i].path_ptr = pb.ptr;
+                darr[i].path_len = p.len;
             } else {
                 // ABI invariant: if path is absent, both fields must reflect that.
                 darr[i].path_ptr = null;
@@ -653,17 +681,22 @@ fn doAnalyze(
         owned_diags = darr;
     }
 
-const result_uninit: [*]u8 = std.heap.page_allocator.rawAlloc(
-        @sizeOf(Vizg_Result), std.mem.Alignment.fromByteUnits(@alignOf(Vizg_Result)), @returnAddress(),
-    ) orelse {
-        arena_owner.deinit(); std.heap.page_allocator.destroy(arena_owner); return null;
-    };
+    const result_uninit: [*]u8 = std.heap.page_allocator.rawAlloc(
+        @sizeOf(Vizg_Result),
+        std.mem.Alignment.fromByteUnits(@alignOf(Vizg_Result)),
+        @returnAddress(),
+    ) orelse return error.OutOfMemory;
+    errdefer std.heap.page_allocator.rawFree(
+        result_uninit[0..@sizeOf(Vizg_Result)],
+        std.mem.Alignment.fromByteUnits(@alignOf(Vizg_Result)),
+        @returnAddress(),
+    );
     const result_ptr: *Vizg_Result = @ptrCast(@alignCast(result_uninit));
     // Zero out all bytes of the extern struct — required so field pointers start as null.
     for (std.mem.asBytes(result_ptr)) |*b| b.* = 0;
     const result: *Vizg_Result = result_ptr;
-    result.token_count          = @intCast(fr.tokens.len);
-    result.diagnostic_count     = @intCast(fr.diagnostics.len);
+    result.token_count = @intCast(fr.tokens.len);
+    result.diagnostic_count = @intCast(fr.diagnostics.len);
     if (fr.tokens.len > 0) {
         result.tokens_ptr = owned_tokens.ptr;
     }
@@ -671,22 +704,12 @@ const result_uninit: [*]u8 = std.heap.page_allocator.rawAlloc(
         result.diagnostics_ptr = owned_diags.ptr;
     }
 
-    const o = a_alloc.create(OwnedResult) catch {
-        arena_owner.deinit(); std.heap.page_allocator.destroy(arena_owner); return null;
-    };
-    o.* = .{.arena = arena_owner};
-
     // Register: address of result struct -> owning ArenaAllocator.  Lookup
     // happens in Vizg_freeResult, so the map must persist for the lifetime
     // of any result still alive to free(). If map growth fails, roll back —
     // the arena is leaked otherwise since Vizg_freeResult can't find it.
-    const m = getOrCreateArenaMap();
-    _ = m.put(@intFromPtr(result), arena_owner) catch {
-        // Deinit all arena-backed allocations and release the allocator object.
-        arena_owner.deinit();
-        std.heap.page_allocator.destroy(arena_owner);
-        return null;
-    };
+    const m = try getOrCreateArenaMap();
+    try m.put(@intFromPtr(result), arena_owner);
 
     return result;
 }
@@ -699,69 +722,66 @@ const result_uninit: [*]u8 = std.heap.page_allocator.rawAlloc(
 // internally via the page allocator inside an arena owned by Vizg_Result.
 // ---------------------------------------------------------------------------
 
+fn analyzeFile(
+    path: []const u8,
+    text: []const u8,
+) !*Vizg_Result {
+    const page = std.heap.page_allocator;
+    const owner_arena = try page.create(std.heap.ArenaAllocator);
+    errdefer page.destroy(owner_arena);
+    owner_arena.* = std.heap.ArenaAllocator.init(page);
+    errdefer owner_arena.deinit();
+    const allocator = owner_arena.allocator();
+
+    if (text.len > 0) {
+        return try doAnalyze(allocator, .{ .text = text, .kind = .module }, owner_arena);
+    }
+    if (path.len > 0) {
+        const name = try allocator.dupe(u8, path);
+        const source = try readFileBytes(allocator, name);
+        return try doAnalyze(allocator, .{ .text = source, .path = name, .kind = .module }, owner_arena);
+    }
+    return try doAnalyze(allocator, .{ .text = "", .kind = .module }, owner_arena);
+}
+
 pub fn Vizg_analyzeFile(
     path_ptr: [*c]const u8,
     path_len: usize,
     text_ptr: [*c]const u8,
     text_len: usize,
 ) callconv(.c) ?*Vizg_Result {
-    const page = std.heap.page_allocator;
-
-    // Validate every pointer/length pair BEFORE slicing — prevents null+posLen
-    // from ever producing a dangling slice or undefined behavior downstream.
     if (!validateAbiPointerLen("text", text_ptr, text_len)) return null;
     if (!validateAbiPointerLen("path", path_ptr, path_len)) return null;
-
-    // Heap-allocate the arena so its pointer survives past this function's
-    // return — we register it in result_arena_map and look it up at free time.
-    const owner_arena = page.create(std.heap.ArenaAllocator) catch return null;
-    owner_arena.* = std.heap.ArenaAllocator.init(page);
-    const a_alloc: std.mem.Allocator = owner_arena.allocator();
-
-    if (text_len > 0) {
-        // Zero-copy text slice: caller owns the underlying buffer (no
-        // ownership transfer — just analyze as-is).
-        if (doAnalyze(a_alloc, .{ .text = text_ptr[0..text_len], .kind = .module }, owner_arena)) |r| return r;
-        // Failure path (analysis, allocation, or map registration) — release the arena back to page allocator.
-        const leaked_arena = owner_arena;
-        leaked_arena.deinit();
-        std.heap.page_allocator.destroy(leaked_arena);
-        return null;
-    } else if (path_len > 0) {
-        const name = a_alloc.dupe(u8, path_ptr[0..path_len]) catch {
-            owner_arena.deinit();
-            return null;
-        };
-        // Read the file contents via raw POSIX syscalls (no Io subsystem).
-        const src_buf = readFileBytes(a_alloc, name) orelse {
-            owner_arena.deinit();
-            return null;
-        };
-        var sf: frontend_mod.SourceFile = .{.text = src_buf, .kind = .module};
-        sf.path = name;
-        if (doAnalyze(a_alloc, sf, owner_arena)) |r| return r;
-        // Same cleanup as text-only path above.
-        const leaked_arena2 = owner_arena;
-        leaked_arena2.deinit();
-        std.heap.page_allocator.destroy(leaked_arena2);
-        return null;
-    } else {
-        // Nothing to analyze — pass an empty source.  Arena stays alive for
-        // free time even if there's nothing useful inside it.
-        const empty_text: []const u8 = "";
-        if (doAnalyze(
-            a_alloc,
-            .{ .text = empty_text, .kind = .module },
-            owner_arena,
-        )) |r| return r;
-        // Same cleanup for consistency.
-        const leaked_arena3 = owner_arena;
-        leaked_arena3.deinit();
-        std.heap.page_allocator.destroy(leaked_arena3);
-        return null;
-    }
+    const path: []const u8 = if (path_len == 0) "" else path_ptr[0..path_len];
+    const text: []const u8 = if (text_len == 0) "" else text_ptr[0..text_len];
+    return analyzeFile(path, text) catch null;
 }
 
+fn analyzeSource(
+    backing: std.mem.Allocator,
+    source: []const u8,
+    path: []const u8,
+) !*Vizg_Result {
+    const owner_arena = try backing.create(std.heap.ArenaAllocator);
+    errdefer backing.destroy(owner_arena);
+    owner_arena.* = std.heap.ArenaAllocator.init(backing);
+    errdefer owner_arena.deinit();
+    const allocator = owner_arena.allocator();
+
+    const source_copy: []const u8 = if (source.len == 0) "" else try allocator.dupe(u8, source);
+    var file: frontend_mod.SourceFile = .{ .text = source_copy };
+    if (path.len > 0) file.path = try allocator.dupe(u8, path);
+    return try doAnalyze(allocator, file, owner_arena);
+}
+
+fn statusFromError(err: anyerror) Vizg_Status {
+    return switch (err) {
+        error.OutOfMemory => .OUT_OF_MEMORY,
+        error.StreamTooLong, error.FileTooBig => .FILE_TOO_LARGE,
+        error.FileNotFound, error.AccessDenied, error.InputOutput => .IO_ERROR,
+        else => .INTERNAL_ERROR,
+    };
+}
 
 /// Memory-first analysis entry point — accepts source bytes directly
 /// without touching the filesystem. The path pointer is used only as a
@@ -769,48 +789,29 @@ pub fn Vizg_analyzeFile(
 pub fn Vizg_analyzeSource(
     source_ptr: [*c]const u8,
     source_len: usize,
-    path_ptr:   [*c]const u8,
-    path_len:   usize,
+    path_ptr: [*c]const u8,
+    path_len: usize,
 ) callconv(.c) ?*Vizg_Result {
-    const page = std.heap.page_allocator;
-
     if (!validateAbiPointerLen("source", source_ptr, source_len)) return null;
     if (!validateAbiPointerLen("path", path_ptr, path_len)) return null;
+    const source: []const u8 = if (source_len == 0) "" else source_ptr[0..source_len];
+    const path: []const u8 = if (path_len == 0) "" else path_ptr[0..path_len];
+    return analyzeSource(std.heap.page_allocator, source, path) catch null;
+}
 
-    // Heap-allocate the arena so its pointer survives past this function's
-    // return — same pattern as Vizg_analyzeFile.
-    const owner_arena = page.create(std.heap.ArenaAllocator) catch return null;
-    owner_arena.* = std.heap.ArenaAllocator.init(page);
-    const a_alloc: std.mem.Allocator = owner_arena.allocator();
-
-    // Ownership invariant for the memory-first contract: copy source bytes
-    // into the result arena so downstream stages may hold references past
-    // the caller's lifetime, and to keep ownership explicit (see AGENTS.md
-    // memory-safety rules). The path is treated as a diagnostic identifier,
-    // not an on-disk file.
-    const src_buf: []const u8 = if (source_len > 0) blk_src_copy: {
-        const b = a_alloc.dupe(u8, source_ptr[0..source_len]) catch {
-            owner_arena.deinit();
-            return null;
-        };
-        break :blk_src_copy b;
-    } else "";
-
-    var sf: frontend_mod.SourceFile = .{.text = src_buf};
-    if (path_len > 0) {
-        const p = a_alloc.dupe(u8, path_ptr[0..path_len]) catch {
-            owner_arena.deinit();
-            return null;
-        };
-        sf.path = p;
-    }
-
-    if (doAnalyze(a_alloc, sf, owner_arena)) |r| return r;
-    // Same cleanup as Vizg_analyzeFile for consistency.
-    const leaked_arena = owner_arena;
-    leaked_arena.deinit();
-    std.heap.page_allocator.destroy(leaked_arena);
-    return null;
+pub fn Vizg_analyzeSourceEx(
+    input: ?*const Vizg_SourceInput,
+    out_result: [*c]?*Vizg_Result,
+) callconv(.c) Vizg_Status {
+    if (input == null or out_result == null) return .INVALID_ARGUMENT;
+    out_result[0] = null;
+    const args = input.?;
+    if (!validateAbiPointerLen("source", args.text_ptr, args.text_len)) return .INVALID_ARGUMENT;
+    if (!validateAbiPointerLen("path", args.path_ptr, args.path_len)) return .INVALID_ARGUMENT;
+    const source: []const u8 = if (args.text_len == 0) "" else args.text_ptr[0..args.text_len];
+    const path: []const u8 = if (args.path_len == 0) "" else args.path_ptr[0..args.path_len];
+    out_result[0] = analyzeSource(std.heap.page_allocator, source, path) catch |err| return statusFromError(err);
+    return .OK;
 }
 
 pub fn Vizg_freeResult(result: ?*Vizg_Result) callconv(.c) void {
@@ -840,9 +841,10 @@ pub fn Vizg_freeResult(result: ?*Vizg_Result) callconv(.c) void {
 // pointer-to-function cast needed.
 // ---------------------------------------------------------------------------
 comptime {
-    @export(&Vizg_analyzeFile, .{.name = "vizg_analyze_file"});
-    @export(&Vizg_freeResult,   .{.name = "vizg_free_result"});
-    @export(&Vizg_analyzeSource, .{.name = "vizg_analyze_source"});
+    @export(&Vizg_analyzeFile, .{ .name = "vizg_analyze_file" });
+    @export(&Vizg_freeResult, .{ .name = "vizg_free_result" });
+    @export(&Vizg_analyzeSource, .{ .name = "vizg_analyze_source" });
+    @export(&Vizg_analyzeSourceEx, .{ .name = "vizg_analyze_source_ex" });
 }
 
 // ---------------------------------------------------------------------------
@@ -851,13 +853,14 @@ comptime {
 // Zig `test` blocks and call `Vizg_analyzeSource` directly via module scope;
 // no C FFI plumbing needed.
 
-
 test "memory-first: empty source yields no error and a valid (empty) result" {
     // Contract from Goal 36: empty source must be accepted without FS access.
     const src = "";
     const result = Vizg_analyzeSource(
-        @ptrCast(src.ptr), src.len,
-        null, 0,
+        @ptrCast(src.ptr),
+        src.len,
+        null,
+        0,
     ) orelse std.debug.panic("empty source returned null", .{});
     defer Vizg_freeResult(result);
 
@@ -873,8 +876,10 @@ test "memory-first: valid source returns tokens, no diagnostics" {
     const path = "/tmp/vizg_test_valid.ts";
 
     const result = Vizg_analyzeSource(
-        @ptrCast(src.ptr), src.len,
-        @ptrCast(path.ptr), path.len,
+        @ptrCast(src.ptr),
+        src.len,
+        @ptrCast(path.ptr),
+        path.len,
     ) orelse std.debug.panic("valid source returned null", .{});
     defer Vizg_freeResult(result);
 
@@ -886,24 +891,27 @@ test "memory-first: invalid source returns diagnostics" {
     const path = "/tmp/vizg_test_invalid.ts";
 
     const result = Vizg_analyzeSource(
-        @ptrCast(src.ptr), src.len,
-        @ptrCast(path.ptr), path.len,
+        @ptrCast(src.ptr),
+        src.len,
+        @ptrCast(path.ptr),
+        path.len,
     ) orelse std.debug.panic("invalid source returned null", .{});
     defer Vizg_freeResult(result);
 
     // The analyzer emits tokens for malformed input too; only check the diagnostic invariant.
     try std.testing.expect(result.diagnostic_count > 0);
-try std.testing.expect(result.diagnostic_count > 0);
+    try std.testing.expect(result.diagnostic_count > 0);
 }
 
 test "memory-first: UTF-8 source (emoji + CJK) is analysed" {
     const src = "const x = \"🌍\"; const y = \"中文\";\n";
     const result = Vizg_analyzeSource(
-        @ptrCast(src.ptr), src.len,
-        null, 0,
+        @ptrCast(src.ptr),
+        src.len,
+        null,
+        0,
     ) orelse std.debug.panic("UTF-8 source returned null", .{});
     defer Vizg_freeResult(result);
-
 }
 
 test "memory-first: UTF-8 path is preserved verbatim for diagnostics" {
@@ -913,11 +921,12 @@ test "memory-first: UTF-8 path is preserved verbatim for diagnostics" {
     const utf8_path = "テスト/ファイル.ts";
 
     const result = Vizg_analyzeSource(
-        @ptrCast(src.ptr), src.len,
-        @ptrCast(utf8_path.ptr), utf8_path.len,
+        @ptrCast(src.ptr),
+        src.len,
+        @ptrCast(utf8_path.ptr),
+        utf8_path.len,
     ) orelse std.debug.panic("UTF-8 path returned null", .{});
     defer Vizg_freeResult(result);
-
 }
 
 test "memory-first: no FS access — source bytes do not match any file" {
@@ -929,8 +938,10 @@ test "memory-first: no FS access — source bytes do not match any file" {
     const phantom_path = "/tmp/vizg_no_file_42abc_placeholder.ts";
 
     const result = Vizg_analyzeSource(
-        @ptrCast(src.ptr), src.len,
-        @ptrCast(phantom_path.ptr), phantom_path.len,
+        @ptrCast(src.ptr),
+        src.len,
+        @ptrCast(phantom_path.ptr),
+        phantom_path.len,
     ) orelse std.debug.panic("expected success", .{});
     defer Vizg_freeResult(result);
 
@@ -950,15 +961,18 @@ test "lifecycle: 200 cycles success path — stable analyze→free" {
     var i: usize = 0;
     while (i < 200) : (i += 1) {
         const result = Vizg_analyzeSource(
-            @ptrCast(src.ptr), src.len,
-            null, 0,
+            @ptrCast(src.ptr),
+            src.len,
+            null,
+            0,
         ) orelse std.debug.panic("lifecycle analyze returned null at iteration {d}", .{i});
 
         try std.testing.expect(result.token_count > 0);
         // Defensive: verify no diagnostics on well-formed input.
         if (result.diagnostic_count != 0) {
             std.debug.panic(
-                "unexpected diagnostics at iter {d}: {}", .{ i, result.diagnostic_count },
+                "unexpected diagnostics at iter {d}: {}",
+                .{ i, result.diagnostic_count },
             );
         }
 
@@ -970,8 +984,10 @@ test "lifecycle: empty source × 100 — exercises arena with no payload" {
     var i: usize = 0;
     while (i < 100) : (i += 1) {
         const result = Vizg_analyzeSource(
-            @ptrCast(""), 0,
-            null, 0,
+            @ptrCast(""),
+            0,
+            null,
+            0,
         ) orelse std.debug.panic("empty lifecycle returned null at iter {d}", .{i});
         defer Vizg_freeResult(result);
 
@@ -986,8 +1002,10 @@ test "lifecycle: mixed path — triggers analyzeFile with file-path branch" {
         // This file is real and readable by the test runner.
         const src_file = "Lib/vizg.zig";
         const result = Vizg_analyzeFile(
-            @ptrCast(src_file.ptr), src_file.len,
-            null, 0,
+            @ptrCast(src_file.ptr),
+            src_file.len,
+            null,
+            0,
         ) orelse std.debug.panic("analyzeFile lifecycle returned null at iter {d}", .{i});
 
         // Source file has tokens and may have diagnostics.
@@ -1002,8 +1020,10 @@ test "lifecycle: non-existent file triggers internal failure cleanup path" {
     // Trigger the analyzeFile branch that tries to read a missing file.
     // The implementation should return null, NOT leak anything on disk or in-memory.
     const result = Vizg_analyzeFile(
-        @ptrCast(phantom.ptr), phantom.len,
-        null, 0,
+        @ptrCast(phantom.ptr),
+        phantom.len,
+        null,
+        0,
     );
 
     try std.testing.expect(result == null);
@@ -1011,8 +1031,10 @@ test "lifecycle: non-existent file triggers internal failure cleanup path" {
     // A second analyze must still work — proves no state corruption between cycles.
     const src = "let a = 1;\n";
     const r2 = Vizg_analyzeSource(
-        @ptrCast(src.ptr), src.len,
-        null, 0,
+        @ptrCast(src.ptr),
+        src.len,
+        null,
+        0,
     ) orelse std.debug.panic("second analyze after phantom returned null", .{});
     defer Vizg_freeResult(r2);
 
@@ -1022,13 +1044,15 @@ test "lifecycle: non-existent file triggers internal failure cleanup path" {
 test "lifecycle: many small allocations stress — allocator fragmentation guard" {
     var i: usize = 0;
     while (i < 100) : (i += 1) {
-        const src = 
+        const src =
             \\if (true) {} else if (false) {}
             \\.foo.bar.baz().qux();
         ;
         const result = Vizg_analyzeSource(
-            @ptrCast(src.ptr), src.len,
-            null, 0,
+            @ptrCast(src.ptr),
+            src.len,
+            null,
+            0,
         ) orelse std.debug.panic("small allocs lifecycle returned null at iter {d}", .{i});
 
         try std.testing.expect(result.token_count > 0);
@@ -1037,7 +1061,7 @@ test "lifecycle: many small allocations stress — allocator fragmentation guard
 }
 
 test "lifecycle: malformed source stress — exercises diagnostic buffer allocation" {
-    const src = 
+    const src =
         \\let x = ;
         \\const y = {a: , b: ; c};
         \\function() {\n\treturn ;\n}\n
@@ -1045,8 +1069,10 @@ test "lifecycle: malformed source stress — exercises diagnostic buffer allocat
     var i: usize = 0;
     while (i < 50) : (i += 1) {
         const result = Vizg_analyzeSource(
-            @ptrCast(src.ptr), src.len,
-            null, 0,
+            @ptrCast(src.ptr),
+            src.len,
+            null,
+            0,
         ) orelse std.debug.panic("malformed lifecycle returned null at iter {d}", .{i});
 
         try std.testing.expect(result.diagnostic_count > 0);
@@ -1060,14 +1086,20 @@ test "lifecycle: interleaved valid + malformed — no state leak between types" 
     var i: usize = 0;
     while (i < 25) : (i += 1) {
         const rGood = Vizg_analyzeSource(
-            @ptrCast(good.ptr), good.len, null, 0,
+            @ptrCast(good.ptr),
+            good.len,
+            null,
+            0,
         ) orelse std.debug.panic("good returned null at iter {d}", .{i});
         defer Vizg_freeResult(rGood);
 
         try std.testing.expect(rGood.diagnostic_count == 0);
 
         const rBad = Vizg_analyzeSource(
-            @ptrCast(bad.ptr), bad.len, null, 0,
+            @ptrCast(bad.ptr),
+            bad.len,
+            null,
+            0,
         ) orelse std.debug.panic("bad returned null at iter {d}", .{i});
         defer Vizg_freeResult(rBad);
 
@@ -1081,20 +1113,27 @@ test "lifecycle: very large source — exercises heap growth path" {
 
     // Run twice — second iteration proves no leak accumulated from the first.
     const r1 = Vizg_analyzeSource(
-        @ptrCast(big_src.ptr), big_src.len, null, 0,
+        @ptrCast(big_src.ptr),
+        big_src.len,
+        null,
+        0,
     ) orelse std.debug.panic("large src analyze returned null", .{});
     defer Vizg_freeResult(r1);
     try std.testing.expect(r1.token_count > 0);
 
     const r2 = Vizg_analyzeSource(
-        @ptrCast(big_src.ptr), big_src.len, null, 0,
+        @ptrCast(big_src.ptr),
+        big_src.len,
+        null,
+        0,
     ) orelse std.debug.panic("large src analyze (second iter) returned null", .{});
     defer Vizg_freeResult(r2);
     try std.testing.expect(r2.token_count > 0);
 
     if (r1.token_count != r2.token_count) {
         std.debug.panic(
-            "token count drift: first={d}, second={d}", .{ r1.token_count, r2.token_count },
+            "token count drift: first={d}, second={d}",
+            .{ r1.token_count, r2.token_count },
         );
     }
 }
@@ -1114,24 +1153,34 @@ test "goal-039: multiple live results do not corrupt each other" {
     const src_c = "// block comment //";
 
     const ra = Vizg_analyzeSource(
-        @ptrCast(src_a.ptr), src_a.len, null, 0,
+        @ptrCast(src_a.ptr),
+        src_a.len,
+        null,
+        0,
     ) orelse std.debug.panic("analyze a returned null", .{});
     defer Vizg_freeResult(ra);
 
     const rb = Vizg_analyzeSource(
-        @ptrCast(src_b.ptr), src_b.len, null, 0,
+        @ptrCast(src_b.ptr),
+        src_b.len,
+        null,
+        0,
     ) orelse std.debug.panic("analyze b returned null", .{});
     defer Vizg_freeResult(rb);
 
     const rc = Vizg_analyzeSource(
-        @ptrCast(src_c.ptr), src_c.len, null, 0,
+        @ptrCast(src_c.ptr),
+        src_c.len,
+        null,
+        0,
     ) orelse std.debug.panic("analyze c returned null", .{});
     defer Vizg_freeResult(rc);
 
     // Lexemes differ — no aliasing.
     if (@intFromPtr(ra.tokens_ptr) == @intFromPtr(rb.tokens_ptr)) {
         std.debug.panic(
-            "aliasing: ra and rb share token storage\n", .{},
+            "aliasing: ra and rb share token storage\n",
+            .{},
         );
     }
     if (ra.token_count == 0 or rb.token_count == 0 or rc.token_count == 0) {
@@ -1144,7 +1193,8 @@ test "goal-039: multiple live results do not corrupt each other" {
     // Token counts are distinct (different source lengths).
     if (ra.token_count == rb.token_count) {
         std.debug.panic(
-            "token count collision between results a and b: both={d}", .{ra.token_count},
+            "token count collision between results a and b: both={d}",
+            .{ra.token_count},
         );
     }
 }
@@ -1159,7 +1209,10 @@ test "goal-039: free in reverse order from allocation works" {
 
     for (0..n) |i| {
         results[i] = Vizg_analyzeSource(
-            @ptrCast(src.ptr), src.len, null, 0,
+            @ptrCast(src.ptr),
+            src.len,
+            null,
+            0,
         ) orelse std.debug.panic("analyze returned null at index {d}", .{i});
     }
 
@@ -1179,7 +1232,10 @@ test "goal-039: many repeated analyze/free cycles (200) — no leak" {
     var i: usize = 0;
     while (i < 200) : (i += 1) {
         const r = Vizg_analyzeSource(
-            @ptrCast(src.ptr), src.len, null, 0,
+            @ptrCast(src.ptr),
+            src.len,
+            null,
+            0,
         ) orelse std.debug.panic("analyze failed at iter {d}", .{i});
         try std.testing.expect(r.token_count > 0);
         // No panic — free is self-contained and safe to call.
@@ -1199,10 +1255,16 @@ test "goal-039: interleaved allocate-free across analyses — no cross-state" {
 
     // Allocate both.
     r_a = Vizg_analyzeSource(
-        @ptrCast(src1.ptr), src1.len, null, 0,
+        @ptrCast(src1.ptr),
+        src1.len,
+        null,
+        0,
     ) orelse std.debug.panic("analyze src1 returned null", .{});
     r_b = Vizg_analyzeSource(
-        @ptrCast(src2.ptr), src2.len, null, 0,
+        @ptrCast(src2.ptr),
+        src2.len,
+        null,
+        0,
     ) orelse std.debug.panic("analyze src2 returned null", .{});
 
     // Free B first (not allocation order). A must still be valid.
@@ -1212,7 +1274,8 @@ test "goal-039: interleaved allocate-free across analyses — no cross-state" {
     // A should still produce tokens — prove no aliasing/interference from B's free.
     if (r_a.?.token_count == 0) {
         std.debug.panic(
-            "after freeing B, A lost its tokens: token_count=0\n", .{},
+            "after freeing B, A lost its tokens: token_count=0\n",
+            .{},
         );
     }
 
@@ -1265,8 +1328,10 @@ test "abi: contextual keyword metadata is exposed via C ABI" {
     const src = "import { x as y } from \"./m\";";
 
     const result = Vizg_analyzeSource(
-        @ptrCast(src.ptr), src.len,
-        @ptrCast("/test/contextual.ts".ptr), "/test/contextual.ts".len,
+        @ptrCast(src.ptr),
+        src.len,
+        @ptrCast("/test/contextual.ts".ptr),
+        "/test/contextual.ts".len,
     ) orelse std.debug.panic("contextual test returned null", .{});
     defer Vizg_freeResult(result);
 
@@ -1300,8 +1365,10 @@ test "abi: contextual keyword metadata is exposed via C ABI" {
 test "abi: ordinary identifier carries contextual_kind == 0" {
     const src = "let value = 1;";
     const result = Vizg_analyzeSource(
-        @ptrCast(src.ptr), src.len,
-        null, 0,
+        @ptrCast(src.ptr),
+        src.len,
+        null,
+        0,
     ) orelse std.debug.panic("contextual test returned null", .{});
     defer Vizg_freeResult(result);
 

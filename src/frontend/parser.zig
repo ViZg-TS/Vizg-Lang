@@ -19,6 +19,7 @@ const Parser = struct {
     nodes: std.ArrayList(ast_mod.Node) = .empty,
     diagnostics: std.ArrayList(diagnostics.Diagnostic) = .empty,
     recover_errors: bool = true,
+    allocation_error: ?anyerror = null,
     // H4 — current recursion depth during descent. Bumped per recursive parse call;
     // when it reaches max_parse_depth we abort with a diagnostic rather than recursing further.
     _depth: usize = 0,
@@ -28,6 +29,7 @@ const Parser = struct {
 
     fn parse(self: *Parser) anyerror!ParseResult {
         const root = try self.parseProgram();
+        if (self.allocation_error) |err| return err;
         return .{
             .ast = .{
                 .nodes = try self.nodes.toOwnedSlice(self.allocator),
@@ -446,7 +448,9 @@ const Parser = struct {
             return error.ParseRecursionLimitReached;
         }
         self._depth += 1;
-        defer { if (self._depth > 0) self._depth -= 1; }
+        defer {
+            if (self._depth > 0) self._depth -= 1;
+        }
 
         return self.parseAssignmentExpression();
     }
@@ -714,10 +718,10 @@ const Parser = struct {
         errdefer elements.deinit(self.allocator);
 
         while (!self.at(.RBracket) and !self.at(.EOF)) {
-            if (self.eat(.Comma)) continue;   // trailing comma — allow it
+            if (self.eat(.Comma)) continue; // trailing comma — allow it
             const elem = try self.parseExpression();
             try elements.append(self.allocator, elem);
-            _ = self.eat(.Comma);             // trailing comma allowed by spec
+            _ = self.eat(.Comma); // trailing comma allowed by spec
         }
 
         _ = self.expect(.RBracket, "expected ]");
@@ -898,7 +902,9 @@ const Parser = struct {
             .phase = .parser,
             .message = message,
             .span = token.span,
-        }) catch {};
+        }) catch |err| {
+            self.allocation_error = err;
+        };
     }
 
     fn isVariableKeyword(_: *const Parser, kind: TokenType) bool {

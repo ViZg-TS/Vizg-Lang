@@ -96,9 +96,7 @@ fn combineDiagnostics(allocator: std.mem.Allocator, lists: []const []const diagn
     // Dedup: keep only the first entry per unique `(DiagnosticCode, span.start)`.
     var write: usize = 0;
     for (combined) |entry| {
-        if (write == 0 or combined[write - 1].code != entry.code
-            or combined[write - 1].span.start != entry.span.start)
-        {
+        if (write == 0 or combined[write - 1].code != entry.code or combined[write - 1].span.start != entry.span.start) {
             // First occurrence of `(code, span.start)` — keep.
             if (write != @as(usize, @intCast(combined.len)))
                 combined[write] = entry;
@@ -106,7 +104,7 @@ fn combineDiagnostics(allocator: std.mem.Allocator, lists: []const []const diagn
         }
     }
 
-    return allocator.dupe(diagnostics.Diagnostic, combined[0..write]) catch @panic("OOM in diagnostics dedup");
+    return try allocator.dupe(diagnostics.Diagnostic, combined[0..write]);
 }
 
 test "frontend analyze runs scanner parser binder and cfg" {

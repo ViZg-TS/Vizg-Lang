@@ -15,10 +15,10 @@ const semantics = @import("semantics/root.zig");
 const types_pkg = @import("types/root.zig");
 
 // Backward-compat aliases matching main.zig's existing names.
-const frontend      = front;
-const resolver      = resolver_mod;
-const tokens        = tokens_mod;
-const Registry      = modules.Registry;
+const frontend = front;
+const resolver = resolver_mod;
+const tokens = tokens_mod;
+const Registry = modules.Registry;
 
 const max_source_bytes = 64 * 1024 * 1024;
 
@@ -88,7 +88,11 @@ pub fn main(init: std.process.Init) !void {
     // registry used by the module graph to validate non-relative imports.
     var externals: ?*Registry = null;
     defer if (externals) |reg| reg.deinit(arena);
-    externals = try parseExternalsArgs(args, arena, io);
+    externals = parseExternalsArgs(args, arena, io) catch |err| {
+        try stderr.print("external configuration error: {s}\n", .{@errorName(err)});
+        try stderr.flush();
+        std.process.exit(1);
+    };
 
     if (command == .modules) {
         const graph = modules.build(arena, io, path, .{
@@ -133,11 +137,12 @@ pub fn main(init: std.process.Init) !void {
     switch (command) {
         .check => blk: {
             // Run the type checker and merge its diagnostics with collector ones.
-            const info = semantics.analyzeFrontendResult(arena, result) catch |err| blk2: {
-                try stderr.print("{s}: type error: {t}\n", .{result.source.path, err});
-                break :blk2 null;
+            const info = semantics.analyzeFrontendResult(arena, result) catch |err| {
+                try stderr.print("{s}: type error: {s}\n", .{ result.source.path, @errorName(err) });
+                try stderr.flush();
+                std.process.exit(1);
             };
-            const all_diags = if (info) |i| i.diagnostics else result.diagnostics;
+            const all_diags = info.diagnostics;
             // Inline printCheck using merged diagnostics so we can keep the
             // existing printCheck signature that takes a FrontendResult.
             const counts = countDiagnostics(all_diags);
@@ -156,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
         .cfg => try printCfg(stdout, result.ast, result.cfgs),
         .types => {
             const info = semantics.analyzeFrontendResult(arena, result) catch |err| {
-                try stderr.print("{s}: types error: {s}\n", .{path, @errorName(err)});
+                try stderr.print("{s}: types error: {s}\n", .{ path, @errorName(err) });
                 std.process.exit(1);
             };
             const bind_sym = result.bind.symbols;
@@ -306,7 +311,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
         },
         .AsExpression => |as_expr| {
             try writer.print("AsExpression #{} expr=#{} type={s} {}..{}\n", .{
-                node_id, as_expr.expression, as_expr.type_annotation.name,
+                node_id,         as_expr.expression, as_expr.type_annotation.name,
                 node.span.start, node.span.end,
             });
         },
@@ -719,14 +724,14 @@ fn parseExternalsArgs(args: []const []const u8, allocator: std.mem.Allocator, io
                 return null;
             }
             i += 1;
-            parseExternalEntry(args[i], allocator, reg);
+            try parseExternalEntry(args[i], allocator, reg);
         } else if (std.mem.eql(u8, arg, "--externals-dir")) {
             if (i + 1 >= args.len) {
                 reg.deinit(allocator);
                 return null;
             }
             i += 1;
-            loadExternalsDir(io, args[i], allocator, reg);
+            try loadExternalsDir(io, args[i], allocator, reg);
         }
     }
 
@@ -735,19 +740,19 @@ fn parseExternalsArgs(args: []const []const u8, allocator: std.mem.Allocator, io
 }
 
 /// Parse "name=path"; bare name also accepted (decl_path becomes null).
-fn parseExternalEntry(entry: []const u8, allocator: std.mem.Allocator, reg: *Registry) void {
+fn parseExternalEntry(entry: []const u8, allocator: std.mem.Allocator, reg: *Registry) !void {
     const eq = std.mem.indexOfScalar(u8, entry, '=');
     if (eq != null) {
         const name = entry[0..eq.?];
         const decl_path = entry[(eq.? + 1)..];
-        reg.add(allocator, name, decl_path);
+        try reg.add(allocator, name, decl_path);
         return;
     }
     // bare name — register without declaration file
-    reg.add(allocator, entry, null);
+    try reg.add(allocator, entry, null);
 }
 
-fn loadExternalsDir(io: Io, dir_path: []const u8, allocator: std.mem.Allocator, reg: *Registry) void {
+fn loadExternalsDir(io: Io, dir_path: []const u8, allocator: std.mem.Allocator, reg: *Registry) !void {
     var dir = Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
@@ -761,7 +766,7 @@ fn loadExternalsDir(io: Io, dir_path: []const u8, allocator: std.mem.Allocator, 
         const ext = std.fs.path.extension(entry.name);
         if (ext.len == 0) continue;
         const name = entry.name[0..(entry.name.len - ext.len)];
-        reg.add(allocator, name, null);
+        try reg.add(allocator, name, null);
     }
 }
 
@@ -863,21 +868,24 @@ test "printModules emits deterministic shape with module ids and status labels" 
     var edges = [_]modules.ImportEdge{
         .{
             .id = @as(u32, 0),
-            .from = 0, .to = 1,
+            .from = 0,
+            .to = 1,
             .specifier = "./a",
             .status = .local,
             .span = tokens.Span{ .start = 0, .end = 3, .line = 1, .column = 1 },
         },
         .{
             .id = @as(u32, 1),
-            .from = 0, .to = null,
+            .from = 0,
+            .to = null,
             .specifier = "console",
             .status = .external,
             .span = tokens.Span{ .start = 0, .end = 8, .line = 2, .column = 1 },
         },
         .{
             .id = @as(u32, 2),
-            .from = 0, .to = null,
+            .from = 0,
+            .to = null,
             .specifier = "./nonexistent",
             .status = .missing,
             .span = tokens.Span{ .start = 0, .end = 13, .line = 3, .column = 1 },
@@ -915,7 +923,6 @@ test "printModules emits deterministic shape with module ids and status labels" 
     // Diagnostics section still present.
     try std.testing.expect(std.mem.indexOf(u8, out, "\nDiagnostics\n") != null);
 }
-
 
 /// Returns the canonical type name for a TypeId drawn from
 /// `types_pkg.builtinKinds_static`. Falls back to "<unknown>".

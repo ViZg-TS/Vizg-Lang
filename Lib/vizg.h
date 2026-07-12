@@ -260,7 +260,6 @@ typedef enum {
     VIZG_STATUS_FILE_TOO_LARGE        = 5,
 } Vizg_Status;
 
-#ifdef __cplusplus
 typedef struct Vizg_SourceInput {
     const char     *text_ptr;
     size_t          text_len;
@@ -268,13 +267,15 @@ typedef struct Vizg_SourceInput {
     size_t          path_len;
 } Vizg_SourceInput;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 Vizg_Status vizg_analyze_source_ex(
     const Vizg_SourceInput *input,
     Vizg_Result **out_result);
 
 /* Deprecated: use vizg_analyze_source_ex(). Kept for back-compat. */
-extern "C" {
-#endif
 
 Vizg_Result *vizg_analyze_file(
     const char     *path_ptr, size_t path_len,

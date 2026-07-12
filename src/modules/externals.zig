@@ -47,24 +47,17 @@ pub const Registry = struct {
     }
 
     /// Register a new external. Copies `name` and optionally `decl_path`; the
-    /// caller retains ownership of its inputs. Returns an error when memory
-    /// cannot be allocated for the copy — callers may ignore it if duplicate
-    /// suppression is acceptable (the entry will just not be added).
-    pub fn add(self: *Registry, allocator: std.mem.Allocator, name: []const u8, decl_path: ?[]const u8) void {
+    /// caller retains ownership of its inputs. Allocation failures propagate.
+    pub fn add(self: *Registry, allocator: std.mem.Allocator, name: []const u8, decl_path: ?[]const u8) !void {
         if (self.find(name)) |_| return; // ignore duplicates silently
 
-        const name_copy = allocator.alloc(u8, name.len) catch return;
-        @memcpy(name_copy, name);
+        const name_copy = try allocator.dupe(u8, name);
+        errdefer allocator.free(name_copy);
 
-        var ep: ?[]const u8 = null;
-        if (decl_path) |dp| {
-            ep = allocator.dupe(u8, dp) catch {
-                allocator.free(name_copy);
-                return;
-            };
-        }
+        const path_copy = if (decl_path) |path| try allocator.dupe(u8, path) else null;
+        errdefer if (path_copy) |path| allocator.free(path);
 
-        self.entries.append(allocator, .{ .name = name_copy, .decl_path = ep }) catch return;
+        try self.entries.append(allocator, .{ .name = name_copy, .decl_path = path_copy });
     }
 };
 
@@ -74,7 +67,7 @@ test "Registry lookup by name" {
 
     try std.testing.expectEqual(@as(?*const ExternalModule, null), reg.find("unknown"));
 
-    reg.add(std.testing.allocator, "node:fs", "/abs/fs.ts");
+    try reg.add(std.testing.allocator, "node:fs", "/abs/fs.ts");
     const found = reg.find("node:fs") orelse unreachable;
     try std.testing.expectEqualStrings("/abs/fs.ts", found.decl_path.?);
 }
@@ -83,7 +76,16 @@ test "Registry dedupes identical names" {
     var reg = Registry.init();
     defer reg.deinit(std.testing.allocator);
 
-    reg.add(std.testing.allocator, "a", "/1.ts");
-    reg.add(std.testing.allocator, "a", "/2.ts");
+    try reg.add(std.testing.allocator, "a", "/1.ts");
+    try reg.add(std.testing.allocator, "a", "/2.ts");
     try std.testing.expectEqual(@as(usize, 1), reg.entries.items.len);
+}
+
+test "Registry.add propagates allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var reg = Registry.init();
+    defer reg.deinit(failing.allocator());
+
+    try std.testing.expectError(error.OutOfMemory, reg.add(failing.allocator(), "node:fs", null));
+    try std.testing.expectEqual(@as(usize, 0), reg.entries.items.len);
 }

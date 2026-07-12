@@ -74,7 +74,7 @@ const Builder = struct {
     imports: std.ArrayList(ImportEdge) = .empty,
     states: std.ArrayList(ModuleState) = .empty,
     diagnostics_list: std.ArrayList(diagnostics.Diagnostic) = .empty,
-    // H4 — module-graph DFS depth tracker. Bumped per call to analyzeModule; when reaching 
+    // H4 — module-graph DFS depth tracker. Bumped per call to analyzeModule; when reaching
     // max_module_graph_depth from options we emit a diagnostic and abort rather than recursing .
     // further (DoS mitigation for circular import chains / deep module trees).
     graph_depth: usize = 0,
@@ -99,13 +99,13 @@ const Builder = struct {
     }
 
     fn analyzeModule(self: *Builder, input_path: []const u8, source_path: []const u8, from_path: ?[]const u8) anyerror!ModuleId {
-        // H4 — module-graph DFS depth check. When graph_depth reaches max_module_graph_depth we 
-        // emit a diagnostic and abort instead of recursing further (DoS mitigation for circular 
+        // H4 — module-graph DFS depth check. When graph_depth reaches max_module_graph_depth we
+        // emit a diagnostic and abort instead of recursing further (DoS mitigation for circular
         // import chains / deep module trees).
         if (self.graph_depth >= self.options.max_module_graph_depth) {
             try self.diagnostics_list.append(self.allocator, .{
                 .severity = .@"error",
-                .code = .parse_recursion_limit_reached,  // reused for graph depth too; code space shared
+                .code = .parse_recursion_limit_reached, // reused for graph depth too; code space shared
                 .phase = .module_graph,
                 .message = "maximum module-graph traversal depth exceeded",
                 .span = emptySpan(),
@@ -114,7 +114,9 @@ const Builder = struct {
             return error.ModuleGraphDepthLimitReached;
         }
         self.graph_depth += 1;
-        defer { if (self.graph_depth > 0) self.graph_depth -= 1; }
+        defer {
+            if (self.graph_depth > 0) self.graph_depth -= 1;
+        }
 
         const canonical = try self.resolver.canonicalize(input_path);
         // M4 — detect direct self-imports: when the import specifier resolves to a
@@ -146,7 +148,7 @@ const Builder = struct {
                 .severity = .@"error",
                 .code = .module_not_found,
                 .phase = .module_graph,
-                .message = try std.fmt.allocPrint(self.allocator, "cannot find module '{s}'", .{ source_path }),
+                .message = try std.fmt.allocPrint(self.allocator, "cannot find module '{s}'", .{source_path}),
                 .span = emptySpan(),
                 .label = "module specifier could not be resolved",
                 .path = source_path,
@@ -190,8 +192,8 @@ const Builder = struct {
                         // the graph when a known-external name is encountered. The call
                         // below does NOT gate edge creation; it's purely informational.
                         _ = self.tryLoadExternalModule(import_decl.source, if (import_decl.source.len > 0) import_decl.source_span else node.span);
-try self.imports.append(self.allocator, .{
-.id = @intCast(self.imports.items.len),
+                        try self.imports.append(self.allocator, .{
+                            .id = @intCast(self.imports.items.len),
                             .from = module_id,
                             .to = null,
                             .specifier = import_decl.source,
@@ -203,8 +205,8 @@ try self.imports.append(self.allocator, .{
 
                     const resolved = try self.resolver.resolveRelative(module.path, import_decl.source);
                     if (resolved == null) {
-try self.imports.append(self.allocator, .{
-.id = @intCast(self.imports.items.len),
+                        try self.imports.append(self.allocator, .{
+                            .id = @intCast(self.imports.items.len),
                             .from = module_id,
                             .to = null,
                             .specifier = import_decl.source,
@@ -228,8 +230,8 @@ try self.imports.append(self.allocator, .{
                         break :target try self.analyzeModule(target_path, target_path, module.path);
                     };
 
-try self.imports.append(self.allocator, .{
-.id = @intCast(self.imports.items.len),
+                    try self.imports.append(self.allocator, .{
+                        .id = @intCast(self.imports.items.len),
                         .from = module_id,
                         .to = target_id,
                         .specifier = import_decl.source,
@@ -262,14 +264,14 @@ try self.imports.append(self.allocator, .{
         // mark it with status `.external` (no module_not_found diagnostic emitted).
         if (self.externals) |reg| {
             if (reg.find(specifier)) |_| {
-                return true;  // caller should emit edge and continue normally
+                return true; // caller should emit edge and continue normally
             }
         }
         _ = span;
-        return false;  // not registered -> fall through to default external handling below
+        return false; // not registered -> fall through to default external handling below
     }
 
-fn validateNamedImports(self: *Builder, source: Module, target: Module, import_decl: ast_mod.ImportDeclaration) !void {
+    fn validateNamedImports(self: *Builder, source: Module, target: Module, import_decl: ast_mod.ImportDeclaration) !void {
         for (import_decl.specifiers) |specifier| {
             if (!moduleExportsName(target, specifier.imported_name)) {
                 try self.diagnostics_list.append(self.allocator, .{
@@ -310,7 +312,9 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
     /// local branches safely. Arena-owned slice returned to the caller.
     fn buildLinkedImports(self: *Builder) ![]const linker.LinkedImport {
         var items: std.ArrayListUnmanaged(linker.LinkedImport) = .empty;
-        errdefer { items.deinit(self.allocator); }
+        errdefer {
+            items.deinit(self.allocator);
+        }
 
         for (self.modules.items) |m| {
             const mod_id: ModuleId = m.id;
@@ -323,7 +327,6 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
                 const e_idx: ?usize = findEdgeForSourceIdx(self.imports.items, mod_id, decl.source);
                 if (e_idx == null) continue;
                 const edge = self.imports.items[e_idx.?];
-
 
                 switch (edge.status) {
                     .external => {
@@ -411,7 +414,6 @@ fn validateNamedImports(self: *Builder, source: Module, target: Module, import_d
         }
         return null;
     }
-
 };
 
 /// `externals` is an optional pointer to an externally-managed registry of non-relative specifiers.
@@ -423,7 +425,7 @@ pub fn build(allocator: std.mem.Allocator, io: Io, entry_path: []const u8, optio
 
     // C2 fix: pass extensions into resolver; fall back to default [".ts"] when unset. This is
     // the only construction site for Resolver in this codebase — one extension source of truth.
-    const ext_list: []const [:0]const u8 = if (options.extensions) |exts| exts else &[_][:0]const u8{ ".ts" };
+    const ext_list: []const [:0]const u8 = if (options.extensions) |exts| exts else &[_][:0]const u8{".ts"};
     var builder = Builder{
         .allocator = graph_allocator,
         .io = io,
@@ -452,7 +454,7 @@ pub fn build(allocator: std.mem.Allocator, io: Io, entry_path: []const u8, optio
 
 fn moduleExportsName(target: Module, imported_name: []const u8) bool {
     if (imported_name.len == 0) return false;
-    
+
     // Use the binder's `exports` list as the source of truth — it captures every
     // exported name regardless of form (named declarations wrapped in an
     // ExportDeclaration with zero specifiers, explicit re-exports via named
@@ -463,7 +465,7 @@ fn moduleExportsName(target: Module, imported_name: []const u8) bool {
     for (target.result.bind.module.exports) |rec| {
         if (std.mem.eql(u8, rec.name, imported_name)) return true;
     }
-    
+
     // Fallback: also check ExportDeclaration.specifiers for explicit named
     // re-exports like `export { y } from "./other"` — keeps us correct there too.
     for (target.result.ast.nodes) |node| {
@@ -476,16 +478,13 @@ fn moduleExportsName(target: Module, imported_name: []const u8) bool {
             else => {},
         }
     }
-    
+
     return false;
 }
 
 fn emptySpan() tokens.Span {
     return .{ .start = 0, .end = 0, .line = 0, .column = 0 };
 }
-
-
-
 
 // ---------------------------------------------------------------------------
 // Tests — module graph diagnostic message formats (VZG5001/5002/5003).
@@ -495,13 +494,10 @@ fn emptySpan() tokens.Span {
 // labels are set where expected, and phase is .module_graph.
 // ---------------------------------------------------------------------------
 
-
-
 // Diagnostic message shape tests — unit-level assertions over the format strings
 // and labels used by `modules.graph` for codes VZG5001, VZG5002, and VZG5003.
 // These avoid IO by constructing `diagnostics.Diagnostic` values directly from
 // the same formats the graph builder uses at runtime.
-
 
 fn diagnosticForTest(code: diagnostics.DiagnosticCode) struct {
     message: []const u8,
@@ -548,7 +544,6 @@ test "VZG5003 circular_import diagnostic shape" {
     try std.testing.expect(std.mem.indexOf(u8, d.message, "import detected through") != null);
 }
 
-
 test "ImportEdge accepts an id field" {
     const edge = ImportEdge{
         .id = @as(ImportEdgeId, 0),
@@ -579,8 +574,6 @@ test "ImportEdgeId is a u32 alias" {
     // 32-bit unsigned integer type, so the body here just confirms round-trip.
     try std.testing.expectEqual(@as(u32, 42), @as(u32, @bitCast(id)));
 }
-
-
 
 // ---------------------------------------------------------------------------
 // LinkedImport integration tests — exercise `build()` end-to-end and assert on
@@ -739,8 +732,6 @@ test "ModuleGraph emits unresolved linked import alongside VZG5002 on missing ex
     try std.testing.expect(saw_unresolved == true);
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Cross-file linking test cases (cases C/E/G). Exercises build() over dedicated
 // fixtures in `test/modules/linking/` and asserts on the resulting graph. The
@@ -763,7 +754,9 @@ test "Case C: aliased-export — graph builds, alias link resolves to local symb
     defer std.testing.allocator.free(cwd);
 
     const entry_path = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/alias-export/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/alias-export/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry_path);
 
@@ -840,7 +833,9 @@ test "Case E: missing-module — no crash, edge marked .missing, graph inspectab
     defer std.testing.allocator.free(cwd);
 
     const entry_path = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/missing-module/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/missing-module/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry_path);
 
@@ -895,7 +890,9 @@ test "Case G: duplicate-canonical-imports — two specifiers reuse same target m
     defer std.testing.allocator.free(cwd);
 
     const entry_path = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/named-duplicate/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/named-duplicate/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry_path);
 
@@ -947,7 +944,9 @@ test "External: unregistered non-relative specifier produces external edge and l
     defer std.testing.allocator.free(cwd);
 
     const entry_path = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/external/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/external/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry_path);
 
@@ -1002,7 +1001,9 @@ test "External: registered non-relative specifier produces external edge and lin
     defer std.testing.allocator.free(cwd);
 
     const entry_path = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/external/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/external/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry_path);
 
@@ -1013,7 +1014,7 @@ test "External: registered non-relative specifier produces external edge and lin
     // test arena so its lifetime ends with the test; we must hand a stable pointer
     // to build() before deinit runs.
     var externals = externals_mod.Registry.init();
-    externals.add(std.testing.allocator, "console", null);
+    try externals.add(std.testing.allocator, "console", null);
 
     const io = @import("std").Io.Threaded.io(@import("std").Io.Threaded.global_single_threaded);
     const graph = build(arena.allocator(), io, entry_path, .{}, &externals) catch unreachable;
@@ -1103,7 +1104,9 @@ test "Entry contract: missing imported module still builds graph with VZG5001" {
     defer std.testing.allocator.free(cwd);
 
     const entry_path = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/missing-module/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/missing-module/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry_path);
 
@@ -1117,7 +1120,7 @@ test "Entry contract: missing imported module still builds graph with VZG5001" {
     defer graph.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), graph.modules.len); // only main loaded
-    try std.testing.expect(graph.modules[0].id == graph.entry);   // valid graph shape — entry points at a real module
+    try std.testing.expect(graph.modules[0].id == graph.entry); // valid graph shape — entry points at a real module
 
     var saw_missing_edge: ?bool = null;
     for (graph.imports) |e| {
