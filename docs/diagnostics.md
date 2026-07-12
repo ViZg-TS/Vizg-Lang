@@ -33,6 +33,8 @@ Across the C ABI, diagnostic messages and paths are pointer/length pairs. Consum
 | `VZG1003` | `unterminated_block_comment` | scanner | Block comment did not terminate. |
 | `VZG1004` | `invalid_number` | scanner | Invalid number format, exponent, or numeric separator. |
 | `VZG1005` | `invalid_escape_sequence` | scanner | Invalid or incomplete string/template escape sequence. |
+| `VZG1006` | `unterminated_regexp` | scanner | RegExp literal did not terminate. |
+| `VZG1007` | `invalid_regexp` | scanner | RegExp literal contains invalid or duplicate flags. |
 | `VZG2001` | `unexpected_token` | parser | Token was not valid in the current parse position. |
 | `VZG2002` | `expected_token` | parser | Parser expected a specific token. |
 | `VZG3001` | `duplicate_declaration` | binder | Scope already contains a declaration with that name. |
