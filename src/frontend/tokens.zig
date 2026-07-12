@@ -210,6 +210,7 @@ pub const LexicalError = error{
     InvalidExponent,
     InvalidNumericSeparator,
     InvalidEscapeSequence,
+    UnterminatedRegExp,
     InvalidRegExp,
     UnexpectedEndOfFile,
 };
