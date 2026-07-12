@@ -8,6 +8,13 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+### Added
+
+- Template literals now tokenize interpolation segments and produce traversable `TemplateExpression` AST nodes for binder, resolver, type inference, and AST output.
+- Contextual RegExp literal scanning now distinguishes division, preserves patterns and flags in the AST, and reports invalid flags or unterminated literals.
+- Prefix unary expressions now support `!`, `~`, `-`, `+`, `typeof`, `void`, `delete`, and `await`, while preserving postfix non-null assertions.
+- Expression parsing now applies JavaScript-style precedence for right-associative exponentiation, shifts, bitwise operators, and their compound assignment forms.
+
 ## [0.0.2] — 2026-07-12
 
 ### Added
