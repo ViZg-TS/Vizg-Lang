@@ -11,11 +11,8 @@ const modules_mod = @import("root.zig");
 const max_source_bytes: usize = 64 * 1024 * 1024;
 
 fn projectRoot(allocator: std.mem.Allocator) ![:0]u8 {
-    var buf: [4096]u8 = undefined;
-    const n = @import("std").os.linux.readlink("/proc/self/cwd", &buf, buf.len);
-    if (n >= buf.len) return error.PathTooLong;
-    buf[n] = 0;
-    return allocator.dupeZ(u8, buf[0..n]);
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    return Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
 }
 
 fn buildGraph(allocator: std.mem.Allocator, path: []const u8) !modules_mod.ModuleGraph {
@@ -37,7 +34,9 @@ test "Contract A: clean named import resolves, no diagnostics" {
     defer std.testing.allocator.free(cwd);
 
     const entry = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/named/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/named/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry);
 
@@ -90,7 +89,9 @@ test "Contract B: aliased import binds to the original export" {
     defer std.testing.allocator.free(cwd);
 
     const entry = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/frontend/modules/manual/aliased_main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/frontend/modules/manual/aliased_main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry);
 
@@ -147,7 +148,9 @@ test "Contract C: aliased export resolves to the underlying local symbol" {
     defer std.testing.allocator.free(cwd);
 
     const entry = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/alias-export/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/alias-export/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry);
 
@@ -206,7 +209,9 @@ test "Contract D: external import stays external with zero VZG5xxx" {
     defer std.testing.allocator.free(cwd);
 
     const entry = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/external/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/external/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry);
 
@@ -240,8 +245,8 @@ test "Contract D: external import stays external with zero VZG5xxx" {
     for (graph.diagnostics) |d| {
         const tag = @tagName(d.code);
         if (std.mem.eql(u8, tag, "module_not_found") or
-                std.mem.eql(u8, tag, "missing_export") or
-                std.mem.eql(u8, tag, "circular_import")) try std.testing.expect(false);
+            std.mem.eql(u8, tag, "missing_export") or
+            std.mem.eql(u8, tag, "circular_import")) try std.testing.expect(false);
     }
 }
 
@@ -255,7 +260,9 @@ test "Contract E: missing module emits one VZG5001 and the graph stays valid" {
     defer std.testing.allocator.free(cwd);
 
     const entry = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/missing-module/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/missing-module/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry);
 
@@ -310,7 +317,9 @@ test "Contract F: missing export emits exactly one VZG5002" {
 
     // Use the dedicated fixture from Goal 08 fixtures, not the manual/ variant.
     const entry = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/missing-export/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/missing-export/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry);
 
@@ -362,7 +371,9 @@ test "Contract G: duplicate canonical imports — one target, two edges" {
     defer std.testing.allocator.free(cwd);
 
     const entry = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/named-duplicate/main.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/named-duplicate/main.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry);
 
@@ -417,7 +428,9 @@ test "Contract H: simple cycle yields VZG5003 and keeps graph inspectable" {
 
     // Pick `a.ts` as entry; the other imports it back → cycle guard kicks in.
     const entry = try std.fmt.allocPrint(
-        std.testing.allocator, "{s}/test/modules/linking/circular/a.ts", .{cwd},
+        std.testing.allocator,
+        "{s}/test/modules/linking/circular/a.ts",
+        .{cwd},
     );
     defer std.testing.allocator.free(entry);
 

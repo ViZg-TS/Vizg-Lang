@@ -16,11 +16,8 @@ const diagnostics = @import("../diagnostics/root.zig");
 const max_source_bytes: usize = 64 * 1024 * 1024;
 
 fn projectRoot(allocator: std.mem.Allocator) ![:0]u8 {
-    var buf: [4096]u8 = undefined;
-    const n = @import("std").os.linux.readlink("/proc/self/cwd", &buf, buf.len);
-    if (n >= buf.len) return error.PathTooLong;
-    buf[n] = 0;
-    return allocator.dupeZ(u8, buf[0..n]);
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    return Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
 }
 
 test "linked_imports: named import links to target symbol" {
@@ -66,7 +63,7 @@ test "linked_imports: named import links to target symbol" {
 
     // Target module must be the file exporting `x`.
     const target = graph.modules[named.target_module.?];
-    try std.testing.expect(std.mem.endsWith(u8, target.path, "/a.ts"));
+    try std.testing.expectEqualStrings("a.ts", std.fs.path.basename(target.path));
 }
 
 test "linked_imports: aliased import links to exported target symbol" {
@@ -98,7 +95,7 @@ test "linked_imports: aliased import links to exported target symbol" {
 
     // Target module should be ./aliased_target which exports `source`.
     const target = graph.modules[aliased.target_module.?];
-    try std.testing.expect(std.mem.endsWith(u8, target.path, "/aliased_target.ts"));
+    try std.testing.expectEqualStrings("aliased_target.ts", std.fs.path.basename(target.path));
 }
 
 test "linked_imports: external import has kind=external and no target" {
@@ -326,8 +323,8 @@ test "diagnostics: valid import -> zero diagnostics" {
     for (graph.diagnostics) |diag| {
         try std.testing.expect(
             diag.code != .module_not_found and
-            diag.code != .missing_export and
-            diag.code != .circular_import,
+                diag.code != .missing_export and
+                diag.code != .circular_import,
         );
     }
 
@@ -341,6 +338,39 @@ test "diagnostics: valid import -> zero diagnostics" {
         }
     }
     try std.testing.expect(saw_x);
+}
+
+test "module graph resolves relative imports inside a standard temporary directory" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "main.ts",
+        .data = "import { value } from \"./dependency\";\nexport const result = value;\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "dependency.ts",
+        .data = "export const value = 42;\n",
+    });
+
+    const entry_path = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
+    defer std.testing.allocator.free(entry_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const graph = try modules_mod.build(arena.allocator(), io, entry_path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null);
+
+    try std.testing.expectEqual(@as(usize, 2), graph.modules.len);
+    try std.testing.expectEqualStrings("dependency.ts", std.fs.path.basename(graph.modules[1].path));
+    try std.testing.expectEqual(@as(usize, 1), graph.imports.len);
+    try std.testing.expectEqual(modules_mod.ImportStatus.local, graph.imports[0].status);
+    try std.testing.expect(graph.linked_imports[0].target_module != null);
+    try std.testing.expect(graph.linked_imports[0].target_symbol != null);
 }
 
 test {

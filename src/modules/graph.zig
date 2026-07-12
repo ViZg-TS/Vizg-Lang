@@ -585,11 +585,8 @@ test "ImportEdgeId is a u32 alias" {
 // Helper uses the file-scope `Io` alias defined at line 2 of graph.zig so
 // test helpers can ask for a real-path project root without re-importing std.
 fn projectRoot(allocator: std.mem.Allocator) ![:0]u8 {
-    var buf: [4096]u8 = undefined;
-    const n = @import("std").os.linux.readlink("/proc/self/cwd", &buf, buf.len);
-    if (n >= buf.len) return error.PathTooLong;
-    buf[n] = 0;
-    return allocator.dupeZ(u8, buf[0..n]);
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    return Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
 }
 
 test "ModuleGraph builds LinkedImport for named import → target symbol" {
