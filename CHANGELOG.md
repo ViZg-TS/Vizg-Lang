@@ -8,8 +8,20 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- `do { ... } while (condition);` now has a body-first AST/CFG representation, with a required trailing semicolon and stable missing-`while` recovery.
+
 ### Added
 
+- `try` statements now support binding and bindingless `catch` clauses plus `finally`, with explicit AST branches, isolated catch bindings, resolver/type traversal, structural CFG paths, diagnostics for a missing clause, and AST output.
+- `throw expression;` statements now have AST, binder/resolver traversal, same-line expression diagnostics, terminating CFG edges, and AST output.
+- `switch` statements now preserve ordered `case`/`default` clauses in the AST, diagnose duplicate defaults, bind and resolve clause contents, and model dispatch, fallthrough, and `break` exits in CFGs.
+- Classic `for`, `for-in`, `for-of`, and syntax-only `for await...of` loops now have discriminated AST forms, loop-header binding scopes, resolver traversal, CFG exits, and AST output.
+- Unlabeled `break` and `continue` now have distinct AST nodes and loop-aware CFG edges; labeled forms diagnose consistently and remain deferred with the label system.
+- Spread elements now parse in call, array, and object literals; function and arrow rest parameters preserve AST metadata, bind normally, and diagnose non-final positions.
+- Optional chaining now preserves optional member, computed-access, and call boundaries in the AST, resolver traversal, and AST output.
+- Function expressions now support anonymous, named, and contextual `async` forms in expression positions, with private recursive names, function scopes, resolution, and AST output.
+- Arrow functions now support single and parenthesized parameters, type annotations, expression and block bodies, contextual `async`, nested arrows, scope binding, resolution, and AST output.
+- Primary expressions now represent `this`, `super`, and constructor-style `new` calls with distinct AST nodes, postfix chaining, resolution traversal, and AST output.
 - Template literals now tokenize interpolation segments and produce traversable `TemplateExpression` AST nodes for binder, resolver, type inference, and AST output.
 - Contextual RegExp literal scanning now distinguishes division, preserves patterns and flags in the AST, and reports invalid flags or unterminated literals.
 - Prefix unary expressions now support `!`, `~`, `-`, `+`, `typeof`, `void`, `delete`, and `await`, while preserving postfix non-null assertions.
@@ -130,7 +142,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - Validation script (`tools/validate.sh`) for repeatable CI-style checks.
 
 ### Supported Syntax Subset
-Comments, named/default imports, `let`/`const`/`var`, exported variables and functions, typed parameters, primitive literals (string, number), binary expressions, assignment operators, call expressions, member/accessor expressions, `if`/`else`, `while`, `for`, `return`, named exports, and aliased exports.
+Comments, named/default imports, `let`/`const`/`var`, exported variables and functions, typed parameters, primitive literals (string, number), binary expressions, assignment operators, call expressions, member/accessor expressions, optional member/call/computed chains, `if`/`else`, `while`, `for`, `return`, named exports, and aliased exports.
 
 ### Documentation
 - Architecture overview (`docs/architecture.md`).

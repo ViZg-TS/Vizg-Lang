@@ -19,7 +19,7 @@ Implemented today:
 - CLI inspection commands for checks, tokens, AST, symbols, references, CFGs, and modules.
 - Static library `libvizg.a` with a public C header and file/in-memory analysis entry points.
 
-Supported syntax is best described by `test/frontend/vizg_capabilities_test.ts`: comments, named/default imports, `let`/`const`/`var`, exported variables and functions, typed parameters, primitive literals, unary and precedence-aware binary expressions, assignments, calls, member expressions, `if`/`else`, `while`, `for`, `return`, named exports, and aliased exports.
+Supported syntax is best described by `test/frontend/vizg_capabilities_test.ts`: comments, named/default imports, `let`/`const`/`var`, exported variables and functions, typed and rest parameters, function expressions, arrow functions, `this`, `super`, constructor-style `new` expressions, primitive literals, unary and precedence-aware binary expressions, assignments, calls, call/array/object spread, member expressions, optional member/call/computed chains, `if`/`else`, `switch`/`case`/`default`, `try`/`catch`/`finally`, `while`, `do`/`while`, classic `for`, `for-in`, `for-of`, syntax-only `for await...of`, `break`, `continue`, `return`, `throw`, named exports, and aliased exports. Labeled `break` and `continue` remain deferred until labeled statements are supported.
 
 ## Build
 

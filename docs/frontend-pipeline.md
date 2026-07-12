@@ -65,14 +65,20 @@ The parser consumes scanner tokens and builds `ast.Ast`. The AST supports the cu
 - import declarations
 - export declarations and specifiers
 - variable declarations and declarators
-- function declarations and parameters
-- return and expression statements
+- function declarations, ordinary parameters, and final rest parameters
+- return, throw, try/catch/finally, break, continue, and expression statements
 - call, member, binary, conditional, assignment, and prefix unary expressions
+- spread elements in calls, arrays, and object literals
 - postfix non-null assertions, distinct from prefix `!`
 - right-associative exponentiation plus multiplicative, additive, shift, relational, equality, bitwise, logical, nullish-coalescing, conditional, and assignment precedence levels
 - deterministic parser diagnostics for unparenthesized mixing of `??` with `&&` or `||`
 - template expressions with traversable interpolation expressions
-- `if`, `while`, and `for` statements
+- `if`, `switch`/`case`/`default`, `while`, `do`/`while`, classic `for`, `for-in`, `for-of`, and syntax-only `for await...of` statements
+
+`break` and `continue` are currently unlabeled. A following label produces a stable parser diagnostic and parsing resumes after the statement.
+`throw` requires an expression on the same source line. Its expression is traversed normally, and its CFG block terminates the current path; exception typing remains out of scope.
+`try` requires at least one `catch` or `finally` clause. A catch binding lives in a dedicated block scope and does not leak outside its clause. The CFG preserves try, catch, and finally branches without exception-flow type analysis.
+Iteration declarations accept exactly one variable without an initializer. Their binding lives in a loop-header scope shared with the iteration RHS and body.
 
 Parser diagnostics use `VZG2xxx` codes.
 
@@ -140,6 +146,10 @@ The CFG builder creates one preliminary graph per function. Each graph has:
 - predecessor block ids
 
 Current basic block kinds are `entry`, `exit`, `normal`, `condition`, and `unreachable`.
+
+Loop CFGs route `break` to the loop exit and `continue` to the condition, or to a classic `for` update block when present. `for-in` and `for-of` condition blocks retain body and exit edges. A `do`/`while` CFG enters the body before its condition. Switch dispatch blocks reach every clause, omit the unmatched exit when a default exists, and connect non-terminating clauses to the next clause to preserve fallthrough. `break` uses the innermost loop or switch exit; `continue` remains loop-only.
+
+Try CFGs expose normal try and catch paths and join their fallthrough through an explicit finally branch when present. Exception-flow typing and lowering remain out of scope.
 
 `cfg <file>` prints function graphs for inspection. The current CFG is a frontend analysis artifact, not a lowered IR.
 
