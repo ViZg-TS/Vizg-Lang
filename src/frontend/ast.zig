@@ -26,6 +26,18 @@ pub const Literal = struct {
     value: []const u8,
 };
 
+pub const RegExpLiteral = tokens.RegExpValue;
+
+pub const TemplatePart = struct {
+    text: []const u8,
+    expression: ?NodeId,
+    span: tokens.Span,
+};
+
+pub const TemplateExpression = struct {
+    parts: []const TemplatePart,
+};
+
 pub const ImportDeclaration = struct {
     names: []const []const u8,
     specifiers: []const ImportSpecifier = &.{},
@@ -109,6 +121,11 @@ pub const NonNullExpression = struct {
     expression: NodeId,
 };
 
+pub const UnaryExpression = struct {
+    operator: tokens.TokenType,
+    argument: NodeId,
+};
+
 pub const BinaryExpression = struct {
     operator: tokens.TokenType,
     left: NodeId,
@@ -165,6 +182,8 @@ pub const NodeData = union(enum) {
     ExpressionStatement: ExpressionStatement,
     Identifier: Identifier,
     Literal: Literal,
+    RegExpLiteral: RegExpLiteral,
+    TemplateExpression: TemplateExpression,
     VariableDeclaration: VariableDeclaration,
     VariableDeclarator: VariableDeclarator,
     FunctionDeclaration: FunctionDeclaration,
@@ -175,6 +194,7 @@ pub const NodeData = union(enum) {
     ElementAccessExpression: ElementAccessExpression,
     AsExpression: AsExpression,
     NonNullExpression: NonNullExpression,
+    UnaryExpression: UnaryExpression,
     BinaryExpression: BinaryExpression,
     UpdateExpression: UpdateExpression,
     AssignmentExpression: AssignmentExpression,
