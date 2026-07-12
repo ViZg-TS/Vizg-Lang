@@ -47,6 +47,8 @@ typedef enum {
     VIZG_DIAG_TYPE_MISMATCH            = 13,
     VIZG_DIAG_PARSE_RECURSION_LIMIT    = 14,
     VIZG_DIAG_INVALID_ESCAPE_SEQUENCE  = 15,
+    VIZG_DIAG_UNTERMINATED_REGEXP      = 16,
+    VIZG_DIAG_INVALID_REGEXP           = 17,
 } Vizg_DiagnosticCode;
 
 typedef enum {
