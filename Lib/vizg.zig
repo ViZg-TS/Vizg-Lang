@@ -4,6 +4,13 @@
 // every function tagged with @export() are visible in the resulting archive.
 // Consumers (C, C++, Zig) include Lib/vizg.h and link against this archive.
 
+// Contextual keyword contract (Goal 043):
+//
+//   Hard keyword       -> Vizg_TokenType.Keyword_*        (kind field)
+//   Contextual keyword -> Vizg_TokenType.Identifier        + VIZG_CONTEXTUAL_* discriminant
+//   Literal            -> Vizg_TokenType.*Literal         (kind field)
+//   Ordinary ident     -> Vizg_TokenType.Identifier        + contextual_kind = 0
+//   Invalid input      -> Vizg_TokenType.Invalid           (reserved, never mapped from valid tokens)
 const std = @import("std");
 const vizg_pkg = @import("vizg-impl");
 const frontend_mod = vizg_pkg.frontend;
@@ -164,9 +171,14 @@ pub const Vizg_TokenFlags = extern struct {
     synthetic:           u8 = 0,
 };
 
+/// ABI-safe token representation — layout matches Lib/vizg.h `Vizg_Token`.
+/// `kind` is the lexical classification; contextual_kind adds fine-grained
+/// metadata for Identifier tokens that are actually contextual keywords.
 pub const Vizg_Token = extern struct {
     kind: Vizg_TokenType, span: Vizg_Span,
     lexeme_ptr: [*c]const u8, lexeme_len: usize,
+    /// VIZG_CONTEXTUAL_KEYWORD_* — only meaningful when kind == Identifier.
+    contextual_kind: i32 = 0,
 };
 
 pub const Vizg_Diagnostic = extern struct {
@@ -238,6 +250,75 @@ fn toVizgDiagnosticPhase(v: diagnostics_mod.DiagnosticPhase) Vizg_DiagnosticPhas
         .runtime => .Runtime,
         .internal => .Internal,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Contextual keyword mapping — internal ContextualKeyword -> C ABI i32.
+// Only words that exist in the scanner are exposed.  The values match the
+// VIZG_CONTEXTUAL_KEYWORD_* constants in Lib/vizg.h exactly so that consumers
+// can use these integers as direct enum discriminants without translation.
+// ---------------------------------------------------------------------------
+fn toVizgContextualKeyword(v: tokens_mod.ContextualKeyword) i32 {
+    // Values match VIZG_CONTEXTUAL_KEYWORD_* in Lib/vizg.h exactly so that
+    // consumers can use these integers as direct enum discriminants.
+    return switch (v) {
+        .Contextual_abstract     => 5,
+        .Contextual_accessor     => 10,
+        .Contextual_any          => 11,
+        .Contextual_as           => 1,
+        .Contextual_assert       => 12,
+        .Contextual_asserts      => 13,
+        .Contextual_async        => 14,
+        .Contextual_bigint       => 15,
+        .Contextual_boolean      => 16,
+        .Contextual_constructor  => 17,
+        .Contextual_declare      => 6,
+        .Contextual_from         => 2,
+        .Contextual_get          => 43,   // extends VIZG_CONTEXTUAL_KEYWORD_* past USING (42).
+        .Contextual_global       => 18,
+        .Contextual_implements   => 19,
+        .Contextual_infer        => 8,
+        .Contextual_interface    => 20,
+        .Contextual_intrinsic    => 21,
+        .Contextual_is           => 22,
+        .Contextual_keyof        => 9,
+        .Contextual_module       => 23,
+        .Contextual_namespace    => 24,
+        .Contextual_never        => 25,
+        .Contextual_number       => 26,
+        .Contextual_object       => 27,
+        .Contextual_of           => 3,
+        .Contextual_out          => 28,
+        .Contextual_override     => 29,
+        .Contextual_package      => 30,
+        .Contextual_private      => 31,
+        .Contextual_protected    => 32,
+        .Contextual_public       => 33,
+        .Contextual_readonly     => 4,
+        .Contextual_satisfies    => 7,
+        .Contextual_set          => 34,
+        .Contextual_static       => 35,
+        .Contextual_string       => 36,
+        .Contextual_symbol       => 37,
+        .Contextual_type         => 38,
+        .Contextual_undefined    => 39,
+        .Contextual_unique       => 40,
+        .Contextual_unknown      => 41,
+        .Contextual_using        => 42,
+    };
+}
+
+/// Resolve contextual_kind for a raw token (kind + lexeme).
+/// Returns the VIZG_CONTEXTUAL_KEYWORD_* discriminant or 0 when no match.
+fn contextKindFor(kind: tokens_mod.TokenType, lexeme: []const u8) i32 {
+    // Only Identifier tokens can carry contextual metadata; hard keywords are
+    // already classified by kind and do not need a separate discriminator.
+    if (kind != .Identifier) return 0;
+
+    if (tokens_mod.findContextualKeyword(lexeme)) |ck| {
+        return toVizgContextualKeyword(ck);
+    }
+    return 0;
 }
 
 const OwnedResult = struct { arena: *std.heap.ArenaAllocator };
@@ -516,7 +597,7 @@ fn doAnalyze(
             arena_owner.deinit(); std.heap.page_allocator.destroy(arena_owner); return null;
         };
         for (fr.tokens, 0..) |t, i| {
-            arr[i].kind       = mapKind(t.kind);
+            arr[i].kind           = mapKind(t.kind);
             arr[i].span.start_offset    = @intCast(t.span.start);
             arr[i].span.end_offset      = @intCast(t.span.end);
             arr[i].span.line_start      = @intCast(t.span.line);
@@ -525,8 +606,11 @@ fn doAnalyze(
                 arena_owner.deinit(); std.heap.page_allocator.destroy(arena_owner); return null;
             };
             @memcpy(lb.ptr, t.lexeme);
-            arr[i].lexeme_ptr  = lb.ptr;
-            arr[i].lexeme_len  = t.lexeme.len;
+            arr[i].lexeme_ptr    = lb.ptr;
+            arr[i].lexeme_len    = t.lexeme.len;
+            // Contextual metadata: only meaningful for Identifier tokens.
+            // Hard keywords carry their identity in kind alone.
+            arr[i].contextual_kind = contextKindFor(t.kind, t.lexeme);
         }
         owned_tokens = arr;
     }
@@ -1139,16 +1223,11 @@ test "goal-039: interleaved allocate-free across analyses — no cross-state" {
 
 // ---- Table-driven mapping coverage test (Goal 043). ----
 test "abi: every internal token maps to a non-Invalid Vizg_TokenType" {
-    inline for (std.meta.fields(tokens_mod.TokenType)) |field| {
-        const internal: tokens_mod.TokenType = @enumFromInt(@intFromEnum(field.type{0}));
-        // Reconstruct the value by iterating over all enum values.
-        _ = internal;
-
-        // Walk every internal token kind and assert non-Invalid mapping.
-    }
-
+    // Exhaustive sweep: each internal TokenType must resolve to a real C ABI
+    // discriminant. Any missing case in mapKind surfaces here at compile/test
+    // time instead of silently becoming .Invalid at runtime.
     inline for (std.meta.all(tokens_mod.TokenType)) |kind| {
-        const mapped: Vizg_TokenType = mapKind(kind);
+        const mapped = mapKind(kind);
         if (mapped == .Invalid) {
             std.debug.panic(
                 "internal token '{s}' maps to Invalid — missing ABI coverage\n",
@@ -1178,4 +1257,73 @@ test "abi: known-invalid tokens still cover the ABI" {
     try std.testing.expect(mapKind(.BarGreaterThan) != .Invalid);
     try std.testing.expect(mapKind(.Hash) != .Invalid);
     try std.testing.expect(mapKind(.EOL) != .Invalid);
+}
+
+test "abi: contextual keyword metadata is exposed via C ABI" {
+    // Source with `as` and `from` — these are contextual keywords in the
+    // scanner (kind == Identifier, lexeme determines contextual kind).
+    const src = "import { x as y } from \"./m\";";
+
+    const result = Vizg_analyzeSource(
+        @ptrCast(src.ptr), src.len,
+        @ptrCast("/test/contextual.ts".ptr), "/test/contextual.ts".len,
+    ) orelse std.debug.panic("contextual test returned null", .{});
+    defer Vizg_freeResult(result);
+
+    // Walk tokens and find `as` and `from`.  The scanner classifies them as
+    // Identifier tokens; contextual_kind carries the actual classification.
+    var found_as = false;
+    var found_from = false;
+    for (0..result.token_count) |i| {
+        const t = result.tokens_ptr[i];
+        if (@intFromPtr(t.lexeme_ptr) == 0) continue; // safety guard
+
+        const lex = t.lexeme_ptr[0..t.lexeme_len];
+
+        if (std.mem.eql(u8, lex, "as") and std.mem.eql(u8, lex, "as")) {
+            try std.testing.expectEqual(.Identifier, t.kind);
+            try std.testing.expectEqual(@as(i32, 1), t.contextual_kind); // VIZG_CONTEXTUAL_KEYWORD_AS
+            found_as = true;
+        }
+
+        if (std.mem.eql(u8, lex, "from")) {
+            try std.testing.expectEqual(.Identifier, t.kind);
+            try std.testing.expectEqual(@as(i32, 2), t.contextual_kind); // VIZG_CONTEXTUAL_KEYWORD_FROM
+            found_from = true;
+        }
+    }
+
+    if (!found_as) std.debug.panic("contextual test: did not find `as` token", .{});
+    if (!found_from) std.debug.panic("contextual test: did not find `from` token", .{});
+}
+
+test "abi: ordinary identifier carries contextual_kind == 0" {
+    const src = "let value = 1;";
+    const result = Vizg_analyzeSource(
+        @ptrCast(src.ptr), src.len,
+        null, 0,
+    ) orelse std.debug.panic("contextual test returned null", .{});
+    defer Vizg_freeResult(result);
+
+    for (0..result.token_count) |i| {
+        const t = result.tokens_ptr[i];
+        if (@intFromPtr(t.lexeme_ptr) == 0) continue;
+        const lex = t.lexeme_ptr[0..t.lexeme_len];
+        if (std.mem.eql(u8, lex, "value")) {
+            try std.testing.expectEqual(.Identifier, t.kind);
+            try std.testing.expectEqual(@as(i32, 0), t.contextual_kind); // VIZG_CONTEXTUAL_KEYWORD_NONE
+            break;
+        }
+    } else unreachable; // "value" is always in the token stream for this source.
+
+    // Verify that non-Identifier tokens carry contextual_kind == 0 (invariant).
+    for (0..result.token_count) |i| {
+        const t = result.tokens_ptr[i];
+        if (t.kind != .Identifier and t.contextual_kind != 0) {
+            std.debug.panic(
+                "non-Identifier token '{s}' has non-zero contextual_kind={d}",
+                .{ t.lexeme_ptr[0..t.lexeme_len], t.contextual_kind },
+            );
+        }
+    }
 }
