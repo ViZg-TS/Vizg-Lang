@@ -18,6 +18,7 @@ const Parser = struct {
     index: usize = 0,
     nodes: std.ArrayList(ast_mod.Node) = .empty,
     diagnostics: std.ArrayList(diagnostics.Diagnostic) = .empty,
+    parenthesized_nodes: std.ArrayList(NodeId) = .empty,
     recover_errors: bool = true,
     allocation_error: ?anyerror = null,
     // H4 — current recursion depth during descent. Bumped per recursive parse call;
@@ -28,6 +29,7 @@ const Parser = struct {
     max_parse_depth: usize = 1000,
 
     fn parse(self: *Parser) anyerror!ParseResult {
+        defer self.parenthesized_nodes.deinit(self.allocator);
         const root = try self.parseProgram();
         if (self.allocation_error) |err| return err;
         return .{
@@ -457,24 +459,26 @@ const Parser = struct {
 
     fn binaryPrecedence(kind: TokenType) ?u8 {
         return switch (kind) {
-            .PlusEqual, .MinusEqual, .AsteriskEqual, .AsteriskAsteriskEqual, .SlashEqual, .PercentEqual, .AmpersandEqual, .BarEqual, .CaretEqual, .LessThanLessThanEqual, .GreaterThanGreaterThanEqual, .GreaterThanGreaterThanGreaterThanEqual => @as(u8, 0),
-            .BarBar => @as(u8, 1),
-            .AmpersandAmpersand => @as(u8, 2),
-            .Bar => @as(u8, 3),
-            .Caret => @as(u8, 4),
-            .Ampersand => @as(u8, 5),
-            .EqualsEquals, .ExclamationEquals, .EqualsEqualsEquals, .ExclamationEqualsEquals => @as(u8, 6),
-            .LessThan, .LessThanEquals, .GreaterThan, .GreaterThanEquals => @as(u8, 7),
-            .LessThanLessThan, .GreaterThanGreaterThan, .GreaterThanGreaterThanGreaterThan => @as(u8, 8),
-            .Plus, .Minus => @as(u8, 9),
-            .Asterisk, .Slash, .Percent => @as(u8, 10),
-            .AsteriskAsterisk => @as(u8, 11),
+            .PlusEqual, .MinusEqual, .AsteriskEqual, .AsteriskAsteriskEqual, .SlashEqual, .PercentEqual, .AmpersandEqual, .BarEqual, .CaretEqual, .LessThanLessThanEqual, .GreaterThanGreaterThanEqual, .GreaterThanGreaterThanGreaterThanEqual, .QuestionQuestionEqual => @as(u8, 0),
+            .Question => @as(u8, 1),
+            .QuestionQuestion => @as(u8, 2),
+            .BarBar => @as(u8, 3),
+            .AmpersandAmpersand => @as(u8, 4),
+            .Bar => @as(u8, 5),
+            .Caret => @as(u8, 6),
+            .Ampersand => @as(u8, 7),
+            .EqualsEquals, .ExclamationEquals, .EqualsEqualsEquals, .ExclamationEqualsEquals => @as(u8, 8),
+            .LessThan, .LessThanEquals, .GreaterThan, .GreaterThanEquals => @as(u8, 9),
+            .LessThanLessThan, .GreaterThanGreaterThan, .GreaterThanGreaterThanGreaterThan => @as(u8, 10),
+            .Plus, .Minus => @as(u8, 11),
+            .Asterisk, .Slash, .Percent => @as(u8, 12),
+            .AsteriskAsterisk => @as(u8, 13),
             else => null,
         };
     }
 
     fn parseAssignmentExpression(self: *Parser) anyerror!NodeId {
-        const left = try self.parseLogicalOrExpression();
+        const left = try self.parseConditionalExpression();
 
         // Assignment (=, +=, -=, *=, /= %=). Right-associative.
         if (self.current().kind == .Equal or
@@ -489,7 +493,8 @@ const Parser = struct {
             self.current().kind == .CaretEqual or
             self.current().kind == .LessThanLessThanEqual or
             self.current().kind == .GreaterThanGreaterThanEqual or
-            self.current().kind == .GreaterThanGreaterThanGreaterThanEqual)
+            self.current().kind == .GreaterThanGreaterThanGreaterThanEqual or
+            self.current().kind == .QuestionQuestionEqual)
         {
             const op_tok = self.advance();
             // RHS is at the SAME level (assignment), not lower. This makes `a = b = c` group as `a = (b = c)`.
@@ -500,6 +505,45 @@ const Parser = struct {
             });
         }
         return left;
+    }
+
+    fn parseConditionalExpression(self: *Parser) anyerror!NodeId {
+        const condition = try self.parseCoalescingExpression();
+        if (!self.eat(.Question)) return condition;
+
+        const consequent = try self.parseAssignmentExpression();
+        _ = self.expect(.Colon, "expected : in conditional expression");
+        const alternate = try self.parseAssignmentExpression();
+        return self.addNode(.{
+            .span = joinSpans(self.nodes.items[@intCast(condition)].span, self.nodes.items[@intCast(alternate)].span),
+            .data = .{ .ConditionalExpression = .{
+                .condition = condition,
+                .consequent = consequent,
+                .alternate = alternate,
+            } },
+        });
+    }
+
+    fn parseCoalescingExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseLogicalOrExpression();
+        while (self.at(.QuestionQuestion)) {
+            const operator = self.advance();
+            const left_mixes_logical = self.isUnparenthesizedLogicalExpression(left);
+            const right = try self.parseLogicalOrExpression();
+            if (left_mixes_logical or self.isUnparenthesizedLogicalExpression(right)) {
+                self.reportAt(operator, "cannot mix ?? with && or || without parentheses", .unexpected_token);
+            }
+            left = try self.addBinaryExpression(operator.kind, left, right);
+        }
+        return left;
+    }
+
+    fn isUnparenthesizedLogicalExpression(self: *const Parser, node_id: NodeId) bool {
+        if (std.mem.indexOfScalar(NodeId, self.parenthesized_nodes.items, node_id) != null) return false;
+        return switch (self.nodes.items[@intCast(node_id)].data) {
+            .BinaryExpression => |binary| binary.operator == .AmpersandAmpersand or binary.operator == .BarBar,
+            else => false,
+        };
     }
 
     fn parseLogicalOrExpression(self: *Parser) anyerror!NodeId {
@@ -896,6 +940,7 @@ const Parser = struct {
             .LParen => {
                 node = try self.parseExpression();
                 _ = self.expect(.RParen, "expected )");
+                try self.parenthesized_nodes.append(self.allocator, node);
             },
             .LBrace => {
                 node = try self.parseObjectExpression();
@@ -1085,6 +1130,7 @@ const Parser = struct {
             .GreaterThanEquals,
             .AmpersandAmpersand,
             .BarBar,
+            .QuestionQuestion,
             => true,
             else => false,
         };
@@ -1268,4 +1314,106 @@ test "parser groups exponentiation shifts and bitwise operators" {
         const expression = parsed.ast.node(statements[index]).data.ExpressionStatement.expression;
         try std.testing.expectEqual(operator, parsed.ast.node(expression).data.AssignmentExpression.operator);
     }
+}
+
+test "parser handles nullish coalescing precedence assignment and mixing restriction" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const valid_source =
+        \\let simple = a ?? b;
+        \\let chain = a ?? b ?? c;
+        \\let grouped_left = (a ?? b) || c;
+        \\let grouped_right = a ?? (b || c);
+        \\a ??= b;
+    ;
+    const valid_scan = try scanner.scanAll(allocator, valid_source, true);
+    const valid = try parse(allocator, valid_scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), valid.diagnostics.len);
+    const statements = valid.ast.node(valid.ast.root).data.Program.statements;
+
+    const simple_decl = valid.ast.node(statements[0]).data.VariableDeclaration;
+    const simple = valid.ast.node(valid.ast.node(simple_decl.declarations[0]).data.VariableDeclarator.init.?).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.QuestionQuestion, simple.operator);
+
+    const chain_decl = valid.ast.node(statements[1]).data.VariableDeclaration;
+    const chain = valid.ast.node(valid.ast.node(chain_decl.declarations[0]).data.VariableDeclarator.init.?).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.QuestionQuestion, chain.operator);
+    try std.testing.expectEqual(TokenType.QuestionQuestion, valid.ast.node(chain.left).data.BinaryExpression.operator);
+
+    const grouped_left_decl = valid.ast.node(statements[2]).data.VariableDeclaration;
+    const grouped_left = valid.ast.node(valid.ast.node(grouped_left_decl.declarations[0]).data.VariableDeclarator.init.?).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.BarBar, grouped_left.operator);
+    try std.testing.expectEqual(TokenType.QuestionQuestion, valid.ast.node(grouped_left.left).data.BinaryExpression.operator);
+
+    const grouped_right_decl = valid.ast.node(statements[3]).data.VariableDeclaration;
+    const grouped_right = valid.ast.node(valid.ast.node(grouped_right_decl.declarations[0]).data.VariableDeclarator.init.?).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.QuestionQuestion, grouped_right.operator);
+    try std.testing.expectEqual(TokenType.BarBar, valid.ast.node(grouped_right.right).data.BinaryExpression.operator);
+
+    const assignment = valid.ast.node(statements[4]).data.ExpressionStatement.expression;
+    try std.testing.expectEqual(TokenType.QuestionQuestionEqual, valid.ast.node(assignment).data.AssignmentExpression.operator);
+
+    const invalid_sources = [_][]const u8{
+        "let value = a ?? b || c;",
+        "let value = a || b ?? c;",
+        "let value = a ?? b && c;",
+        "let value = a && b ?? c;",
+    };
+    for (invalid_sources) |source| {
+        const invalid_scan = try scanner.scanAll(allocator, source, true);
+        const invalid = try parse(allocator, invalid_scan.tokens, .{});
+        try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);
+        try std.testing.expectEqual(diagnostics.DiagnosticCode.unexpected_token, invalid.diagnostics[0].code);
+        try std.testing.expectEqualStrings("cannot mix ?? with && or || without parentheses", invalid.diagnostics[0].message);
+    }
+}
+
+test "parser handles conditional expressions associativity assignments and recovery" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\let simple = condition ? whenTrue : whenFalse;
+        \\let nested = a ? b : c ? d : e;
+        \\target = condition ? whenTrue : whenFalse;
+        \\let branches = condition ? left = one : right = two;
+    ;
+    const scanned = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+
+    const simple_decl = parsed.ast.node(statements[0]).data.VariableDeclaration;
+    const simple = parsed.ast.node(parsed.ast.node(simple_decl.declarations[0]).data.VariableDeclarator.init.?).data.ConditionalExpression;
+    try std.testing.expectEqualStrings("condition", parsed.ast.node(simple.condition).data.Identifier.name);
+    try std.testing.expectEqualStrings("whenTrue", parsed.ast.node(simple.consequent).data.Identifier.name);
+    try std.testing.expectEqualStrings("whenFalse", parsed.ast.node(simple.alternate).data.Identifier.name);
+
+    const nested_decl = parsed.ast.node(statements[1]).data.VariableDeclaration;
+    const nested = parsed.ast.node(parsed.ast.node(nested_decl.declarations[0]).data.VariableDeclarator.init.?).data.ConditionalExpression;
+    try std.testing.expectEqual(std.meta.Tag(ast_mod.NodeData).ConditionalExpression, std.meta.activeTag(parsed.ast.node(nested.alternate).data));
+
+    const outer_assignment = parsed.ast.node(parsed.ast.node(statements[2]).data.ExpressionStatement.expression).data.AssignmentExpression;
+    try std.testing.expectEqual(std.meta.Tag(ast_mod.NodeData).ConditionalExpression, std.meta.activeTag(parsed.ast.node(outer_assignment.right).data));
+
+    const branches_decl = parsed.ast.node(statements[3]).data.VariableDeclaration;
+    const branches = parsed.ast.node(parsed.ast.node(branches_decl.declarations[0]).data.VariableDeclarator.init.?).data.ConditionalExpression;
+    try std.testing.expectEqual(std.meta.Tag(ast_mod.NodeData).AssignmentExpression, std.meta.activeTag(parsed.ast.node(branches.consequent).data));
+    try std.testing.expectEqual(std.meta.Tag(ast_mod.NodeData).AssignmentExpression, std.meta.activeTag(parsed.ast.node(branches.alternate).data));
+
+    const recovery_scan = try scanner.scanAll(allocator, "let recovered = a ? b c; let after = d;", true);
+    const recovered = try parse(allocator, recovery_scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 1), recovered.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.expected_token, recovered.diagnostics[0].code);
+    try std.testing.expectEqualStrings("expected : in conditional expression", recovered.diagnostics[0].message);
+    const recovered_statements = recovered.ast.node(recovered.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 2), recovered_statements.len);
+    const recovered_decl = recovered.ast.node(recovered_statements[0]).data.VariableDeclaration;
+    const recovered_conditional = recovered.ast.node(recovered.ast.node(recovered_decl.declarations[0]).data.VariableDeclarator.init.?).data.ConditionalExpression;
+    try std.testing.expectEqualStrings("c", recovered.ast.node(recovered_conditional.alternate).data.Identifier.name);
 }
