@@ -457,13 +457,18 @@ const Parser = struct {
 
     fn binaryPrecedence(kind: TokenType) ?u8 {
         return switch (kind) {
-            .PlusEqual, .MinusEqual, .AsteriskEqual, .SlashEqual, .PercentEqual => @as(u8, 0),
+            .PlusEqual, .MinusEqual, .AsteriskEqual, .AsteriskAsteriskEqual, .SlashEqual, .PercentEqual, .AmpersandEqual, .BarEqual, .CaretEqual, .LessThanLessThanEqual, .GreaterThanGreaterThanEqual, .GreaterThanGreaterThanGreaterThanEqual => @as(u8, 0),
             .BarBar => @as(u8, 1),
             .AmpersandAmpersand => @as(u8, 2),
-            .EqualsEquals, .ExclamationEquals, .EqualsEqualsEquals, .ExclamationEqualsEquals => @as(u8, 4),
-            .LessThan, .LessThanEquals, .GreaterThan, .GreaterThanEquals => @as(u8, 5),
-            .Plus, .Minus => @as(u8, 6),
-            .Asterisk, .Slash, .Percent => @as(u8, 7),
+            .Bar => @as(u8, 3),
+            .Caret => @as(u8, 4),
+            .Ampersand => @as(u8, 5),
+            .EqualsEquals, .ExclamationEquals, .EqualsEqualsEquals, .ExclamationEqualsEquals => @as(u8, 6),
+            .LessThan, .LessThanEquals, .GreaterThan, .GreaterThanEquals => @as(u8, 7),
+            .LessThanLessThan, .GreaterThanGreaterThan, .GreaterThanGreaterThanGreaterThan => @as(u8, 8),
+            .Plus, .Minus => @as(u8, 9),
+            .Asterisk, .Slash, .Percent => @as(u8, 10),
+            .AsteriskAsterisk => @as(u8, 11),
             else => null,
         };
     }
@@ -476,8 +481,15 @@ const Parser = struct {
             self.current().kind == .PlusEqual or
             self.current().kind == .MinusEqual or
             self.current().kind == .AsteriskEqual or
+            self.current().kind == .AsteriskAsteriskEqual or
             self.current().kind == .SlashEqual or
-            self.current().kind == .PercentEqual)
+            self.current().kind == .PercentEqual or
+            self.current().kind == .AmpersandEqual or
+            self.current().kind == .BarEqual or
+            self.current().kind == .CaretEqual or
+            self.current().kind == .LessThanLessThanEqual or
+            self.current().kind == .GreaterThanGreaterThanEqual or
+            self.current().kind == .GreaterThanGreaterThanGreaterThanEqual)
         {
             const op_tok = self.advance();
             // RHS is at the SAME level (assignment), not lower. This makes `a = b = c` group as `a = (b = c)`.
@@ -504,14 +516,44 @@ const Parser = struct {
     }
 
     fn parseLogicalAndExpression(self: *Parser) anyerror!NodeId {
-        var left = try self.parseEqualityExpression();
+        var left = try self.parseBitwiseOrExpression();
         while (self.at(.AmpersandAmpersand)) {
             const op_tok = self.advance();
-            const right = try self.parseEqualityExpression();
+            const right = try self.parseBitwiseOrExpression();
             left = try self.addNode(.{
                 .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
                 .data = .{ .BinaryExpression = .{ .operator = op_tok.kind, .left = left, .right = right } },
             });
+        }
+        return left;
+    }
+
+    fn parseBitwiseOrExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseBitwiseXorExpression();
+        while (self.at(.Bar)) {
+            const operator = self.advance();
+            const right = try self.parseBitwiseXorExpression();
+            left = try self.addBinaryExpression(operator.kind, left, right);
+        }
+        return left;
+    }
+
+    fn parseBitwiseXorExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseBitwiseAndExpression();
+        while (self.at(.Caret)) {
+            const operator = self.advance();
+            const right = try self.parseBitwiseAndExpression();
+            left = try self.addBinaryExpression(operator.kind, left, right);
+        }
+        return left;
+    }
+
+    fn parseBitwiseAndExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseEqualityExpression();
+        while (self.at(.Ampersand)) {
+            const operator = self.advance();
+            const right = try self.parseEqualityExpression();
+            left = try self.addBinaryExpression(operator.kind, left, right);
         }
         return left;
     }
@@ -559,12 +601,12 @@ const Parser = struct {
     }
 
     fn parseRelationalExpression(self: *Parser) anyerror!NodeId {
-        var left = try self.parseAdditiveExpression();
+        var left = try self.parseShiftExpression();
         while (true) {
             left = switch (self.current().kind) {
                 .LessThan => blk: {
                     _ = self.advance();
-                    const right = try self.parseAdditiveExpression();
+                    const right = try self.parseShiftExpression();
                     break :blk try self.addNode(.{
                         .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
                         .data = .{ .BinaryExpression = .{ .operator = .LessThan, .left = left, .right = right } },
@@ -572,7 +614,7 @@ const Parser = struct {
                 },
                 .LessThanEquals => blk: {
                     _ = self.advance();
-                    const right = try self.parseAdditiveExpression();
+                    const right = try self.parseShiftExpression();
                     break :blk try self.addNode(.{
                         .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
                         .data = .{ .BinaryExpression = .{ .operator = .LessThanEquals, .left = left, .right = right } },
@@ -580,7 +622,7 @@ const Parser = struct {
                 },
                 .GreaterThan => blk: {
                     _ = self.advance();
-                    const right = try self.parseAdditiveExpression();
+                    const right = try self.parseShiftExpression();
                     break :blk try self.addNode(.{
                         .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
                         .data = .{ .BinaryExpression = .{ .operator = .GreaterThan, .left = left, .right = right } },
@@ -588,7 +630,7 @@ const Parser = struct {
                 },
                 .GreaterThanEquals => blk: {
                     _ = self.advance();
-                    const right = try self.parseAdditiveExpression();
+                    const right = try self.parseShiftExpression();
                     break :blk try self.addNode(.{
                         .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
                         .data = .{ .BinaryExpression = .{ .operator = .GreaterThanEquals, .left = left, .right = right } },
@@ -596,6 +638,19 @@ const Parser = struct {
                 },
                 else => break,
             };
+        }
+        return left;
+    }
+
+    fn parseShiftExpression(self: *Parser) anyerror!NodeId {
+        var left = try self.parseAdditiveExpression();
+        while (true) {
+            const operator = switch (self.current().kind) {
+                .LessThanLessThan, .GreaterThanGreaterThan, .GreaterThanGreaterThanGreaterThan => self.advance(),
+                else => break,
+            };
+            const right = try self.parseAdditiveExpression();
+            left = try self.addBinaryExpression(operator.kind, left, right);
         }
         return left;
     }
@@ -627,12 +682,12 @@ const Parser = struct {
     }
 
     fn parseMultiplicativeExpression(self: *Parser) anyerror!NodeId {
-        var left = try self.parsePrimary();
+        var left = try self.parseExponentiationExpression();
         while (true) {
             left = switch (self.current().kind) {
                 .Asterisk => blk: {
                     _ = self.advance();
-                    const right = try self.parsePrimary();
+                    const right = try self.parseExponentiationExpression();
                     break :blk try self.addNode(.{
                         .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
                         .data = .{ .BinaryExpression = .{ .operator = .Asterisk, .left = left, .right = right } },
@@ -640,7 +695,7 @@ const Parser = struct {
                 },
                 .Slash => blk: {
                     _ = self.advance();
-                    const right = try self.parsePrimary();
+                    const right = try self.parseExponentiationExpression();
                     break :blk try self.addNode(.{
                         .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
                         .data = .{ .BinaryExpression = .{ .operator = .Slash, .left = left, .right = right } },
@@ -648,7 +703,7 @@ const Parser = struct {
                 },
                 .Percent => blk: {
                     _ = self.advance();
-                    const right = try self.parsePrimary();
+                    const right = try self.parseExponentiationExpression();
                     break :blk try self.addNode(.{
                         .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
                         .data = .{ .BinaryExpression = .{ .operator = .Percent, .left = left, .right = right } },
@@ -658,6 +713,44 @@ const Parser = struct {
             };
         }
         return left;
+    }
+
+    fn parseExponentiationExpression(self: *Parser) anyerror!NodeId {
+        const left = try self.parseUnaryExpression();
+        if (!self.at(.AsteriskAsterisk)) return left;
+
+        const operator = self.advance();
+        const right = try self.parseExponentiationExpression();
+        return self.addBinaryExpression(operator.kind, left, right);
+    }
+
+    fn addBinaryExpression(self: *Parser, operator: TokenType, left: NodeId, right: NodeId) anyerror!NodeId {
+        return self.addNode(.{
+            .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
+            .data = .{ .BinaryExpression = .{ .operator = operator, .left = left, .right = right } },
+        });
+    }
+
+    fn parseUnaryExpression(self: *Parser) anyerror!NodeId {
+        return switch (self.current().kind) {
+            .Exclamation,
+            .Tilde,
+            .Minus,
+            .Plus,
+            .Keyword_typeof,
+            .Keyword_void,
+            .Keyword_delete,
+            .Keyword_await,
+            => blk: {
+                const operator = self.advance();
+                const argument = try self.parseUnaryExpression();
+                break :blk try self.addNode(.{
+                    .span = joinSpans(operator.span, self.nodes.items[@intCast(argument)].span),
+                    .data = .{ .UnaryExpression = .{ .operator = operator.kind, .argument = argument } },
+                });
+            },
+            else => self.parsePrimary(),
+        };
     }
 
     fn isLogicalOrOperator(_: *const Parser, kind: TokenType) bool {
@@ -731,6 +824,50 @@ const Parser = struct {
         });
     }
 
+    fn parseTemplateExpression(self: *Parser, head: Token) anyerror!NodeId {
+        var parts: std.ArrayList(ast_mod.TemplatePart) = .empty;
+        errdefer parts.deinit(self.allocator);
+        var chunk = head;
+
+        while (true) {
+            const expression = try self.parseExpression();
+            try parts.append(self.allocator, .{
+                .text = chunk.lexeme[1 .. chunk.lexeme.len - 2],
+                .expression = expression,
+                .span = .{
+                    .start = chunk.span.start + 1,
+                    .end = chunk.span.end - 2,
+                    .line = chunk.span.line,
+                    .column = chunk.span.column + 1,
+                },
+            });
+
+            if (!self.at(.TemplateMiddle) and !self.at(.TemplateTail)) {
+                self.reportAt(self.current(), "expected template continuation", .expected_token);
+                break;
+            }
+            chunk = self.advance();
+            if (chunk.kind == .TemplateTail) {
+                try parts.append(self.allocator, .{
+                    .text = chunk.lexeme[1 .. chunk.lexeme.len - 1],
+                    .expression = null,
+                    .span = .{
+                        .start = chunk.span.start + 1,
+                        .end = chunk.span.end - 1,
+                        .line = chunk.span.line,
+                        .column = chunk.span.column + 1,
+                    },
+                });
+                break;
+            }
+        }
+
+        return self.addNode(.{
+            .span = joinSpans(head.span, chunk.span),
+            .data = .{ .TemplateExpression = .{ .parts = try parts.toOwnedSlice(self.allocator) } },
+        });
+    }
+
     fn parsePrimary(self: *Parser) anyerror!NodeId {
         var node: NodeId = undefined;
         const token = self.advance();
@@ -743,6 +880,19 @@ const Parser = struct {
                 .span = token.span,
                 .data = .{ .Literal = .{ .value = token.lexeme } },
             }),
+            .RegExpLiteral => {
+                const closing_slash = std.mem.lastIndexOfScalar(u8, token.lexeme, '/').?;
+                var flags = tokens.RegExpFlags{};
+                for (token.lexeme[closing_slash + 1 ..]) |flag_char| flags.set(tokens.regexpFlagFromChar(flag_char).?);
+                node = try self.addNode(.{
+                    .span = token.span,
+                    .data = .{ .RegExpLiteral = .{
+                        .pattern = token.lexeme[1..closing_slash],
+                        .flags = flags,
+                    } },
+                });
+            },
+            .TemplateHead => node = try self.parseTemplateExpression(token),
             .LParen => {
                 node = try self.parseExpression();
                 _ = self.expect(.RParen, "expected )");
@@ -918,6 +1068,13 @@ const Parser = struct {
             .Asterisk,
             .Slash,
             .Percent,
+            .AsteriskAsterisk,
+            .Ampersand,
+            .Bar,
+            .Caret,
+            .LessThanLessThan,
+            .GreaterThanGreaterThan,
+            .GreaterThanGreaterThanGreaterThan,
             .EqualsEquals,
             .EqualsEqualsEquals,
             .ExclamationEquals,
@@ -982,4 +1139,133 @@ test "parser builds declarations and function body" {
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
     const root = parsed.ast.node(parsed.ast.root);
     try std.testing.expectEqual(@as(usize, 2), root.data.Program.statements.len);
+}
+
+test "parser builds prefix unary expressions with correct precedence" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\let a = !value;
+        \\let b = ~value;
+        \\let c = -value;
+        \\let d = +value;
+        \\let e = typeof object.key;
+        \\let f = void value;
+        \\let g = delete object.key;
+        \\let h = await fn();
+        \\let i = !-value;
+        \\let j = -value * value;
+        \\let k = value!;
+    ;
+    const scan = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const expected = [_]TokenType{ .Exclamation, .Tilde, .Minus, .Plus, .Keyword_typeof, .Keyword_void, .Keyword_delete, .Keyword_await };
+    for (expected, 0..) |operator, index| {
+        const declaration = parsed.ast.node(statements[index]).data.VariableDeclaration;
+        const init = parsed.ast.node(declaration.declarations[0]).data.VariableDeclarator.init.?;
+        try std.testing.expectEqual(operator, parsed.ast.node(init).data.UnaryExpression.operator);
+    }
+
+    const chain_decl = parsed.ast.node(statements[8]).data.VariableDeclaration;
+    const chain_init = parsed.ast.node(chain_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const chain = parsed.ast.node(chain_init).data.UnaryExpression;
+    try std.testing.expectEqual(TokenType.Exclamation, chain.operator);
+    try std.testing.expectEqual(TokenType.Minus, parsed.ast.node(chain.argument).data.UnaryExpression.operator);
+
+    const product_decl = parsed.ast.node(statements[9]).data.VariableDeclaration;
+    const product_init = parsed.ast.node(product_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const product = parsed.ast.node(product_init).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Asterisk, product.operator);
+    try std.testing.expectEqual(TokenType.Minus, parsed.ast.node(product.left).data.UnaryExpression.operator);
+
+    const postfix_decl = parsed.ast.node(statements[10]).data.VariableDeclaration;
+    const postfix_init = parsed.ast.node(postfix_decl.declarations[0]).data.VariableDeclarator.init.?;
+    try std.testing.expectEqual(.NonNullExpression, std.meta.activeTag(parsed.ast.node(postfix_init).data));
+}
+
+test "parser groups exponentiation shifts and bitwise operators" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\let power = 2 ** 3 ** 2;
+        \\let shifted = 1 + 2 << 3;
+        \\let compared = a & b == c;
+        \\let logical = a | b && c;
+        \\let shifts = a << b >> c >>> d;
+        \\let bits = a | b ^ c & d;
+        \\a **= b;
+        \\a &= b;
+        \\a |= b;
+        \\a ^= b;
+        \\a <<= b;
+        \\a >>= b;
+        \\a >>>= b;
+    ;
+    const scan = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+
+    const power_decl = parsed.ast.node(statements[0]).data.VariableDeclaration;
+    const power_init = parsed.ast.node(power_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const power = parsed.ast.node(power_init).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.AsteriskAsterisk, power.operator);
+    try std.testing.expectEqual(TokenType.AsteriskAsterisk, parsed.ast.node(power.right).data.BinaryExpression.operator);
+
+    const shift_decl = parsed.ast.node(statements[1]).data.VariableDeclaration;
+    const shift_init = parsed.ast.node(shift_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const shift = parsed.ast.node(shift_init).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.LessThanLessThan, shift.operator);
+    try std.testing.expectEqual(TokenType.Plus, parsed.ast.node(shift.left).data.BinaryExpression.operator);
+
+    const compared_decl = parsed.ast.node(statements[2]).data.VariableDeclaration;
+    const compared_init = parsed.ast.node(compared_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const compared = parsed.ast.node(compared_init).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Ampersand, compared.operator);
+    try std.testing.expectEqual(TokenType.EqualsEquals, parsed.ast.node(compared.right).data.BinaryExpression.operator);
+
+    const logical_decl = parsed.ast.node(statements[3]).data.VariableDeclaration;
+    const logical_init = parsed.ast.node(logical_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const logical = parsed.ast.node(logical_init).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.AmpersandAmpersand, logical.operator);
+    try std.testing.expectEqual(TokenType.Bar, parsed.ast.node(logical.left).data.BinaryExpression.operator);
+
+    const shifts_decl = parsed.ast.node(statements[4]).data.VariableDeclaration;
+    const shifts_init = parsed.ast.node(shifts_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const unsigned_shift = parsed.ast.node(shifts_init).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.GreaterThanGreaterThanGreaterThan, unsigned_shift.operator);
+    const signed_shift = parsed.ast.node(unsigned_shift.left).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.GreaterThanGreaterThan, signed_shift.operator);
+    try std.testing.expectEqual(TokenType.LessThanLessThan, parsed.ast.node(signed_shift.left).data.BinaryExpression.operator);
+
+    const bits_decl = parsed.ast.node(statements[5]).data.VariableDeclaration;
+    const bits_init = parsed.ast.node(bits_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const bit_or = parsed.ast.node(bits_init).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Bar, bit_or.operator);
+    const bit_xor = parsed.ast.node(bit_or.right).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Caret, bit_xor.operator);
+    try std.testing.expectEqual(TokenType.Ampersand, parsed.ast.node(bit_xor.right).data.BinaryExpression.operator);
+
+    const assignment_operators = [_]TokenType{
+        .AsteriskAsteriskEqual,
+        .AmpersandEqual,
+        .BarEqual,
+        .CaretEqual,
+        .LessThanLessThanEqual,
+        .GreaterThanGreaterThanEqual,
+        .GreaterThanGreaterThanGreaterThanEqual,
+    };
+    for (assignment_operators, 6..) |operator, index| {
+        const expression = parsed.ast.node(statements[index]).data.ExpressionStatement.expression;
+        try std.testing.expectEqual(operator, parsed.ast.node(expression).data.AssignmentExpression.operator);
+    }
 }
