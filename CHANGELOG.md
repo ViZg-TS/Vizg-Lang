@@ -10,6 +10,10 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Added
 
+- Versioned C ABI v1 with `VIZG_ABI_VERSION`, the exported
+  `vizg_abi_version()` runtime check, a header/runtime match test, and explicit
+  ownership, lifetime, pointer/length, thread-safety, status, size, and platform
+  validation documentation.
 - Status-returning `vizg_analyze_source_ex` C API with explicit out-of-memory reporting.
 - C-compatible static library at `zig-out/lib/libvizg.a` with its public header installed as `zig-out/include/vizg.h`.
 - Exported C ABI entry points for file analysis, in-memory source analysis, and result cleanup: `vizg_analyze_file`, `vizg_analyze_source`, and `vizg_free_result`.

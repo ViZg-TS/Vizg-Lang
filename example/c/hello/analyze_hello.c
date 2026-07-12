@@ -13,6 +13,11 @@ static int analyze_stdin(void);
 static int analyze_path(const char *path);
 
 int main(int argc, char **argv) {
+    if (vizg_abi_version() != VIZG_ABI_VERSION) {
+        fprintf(stderr, "vizg C ABI version mismatch\n");
+        return 1;
+    }
+
     if (argc > 1 && strcmp(argv[1], "-") != 0) return analyze_path(argv[1]);
     return analyze_stdin();
 }
@@ -56,9 +61,18 @@ static int analyze_path(const char *path) {
 }
 
 static int run(const char *text, size_t text_len, const char *label) {
-    Vizg_Result *result = vizg_analyze_file(
-        NULL, 0, (const char *)text, text_len);
-    if (!result) { fprintf(stderr, "vizg_analyze_file returned null\n"); return 1; }
+    Vizg_SourceInput input = {
+        .text_ptr = text,
+        .text_len = text_len,
+        .path_ptr = label,
+        .path_len = strlen(label),
+    };
+    Vizg_Result *result = NULL;
+    Vizg_Status status = vizg_analyze_source_ex(&input, &result);
+    if (status != VIZG_STATUS_OK) {
+        fprintf(stderr, "vizg_analyze_source_ex failed with status %d\n", (int)status);
+        return 1;
+    }
 
     printf("=== vizg C-ABI example ===\n");
     if (*label) printf("Source   : %s\n", label);

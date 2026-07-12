@@ -4,7 +4,8 @@ Demonstrates consuming `libvizg.a` from **C** via the public header `Lib/vizg.h`
 
 ## What it exercises
 
-- Calls `vizg_analyze_file()` to tokenize source code.
+- Checks `VIZG_ABI_VERSION` against `vizg_abi_version()`.
+- Calls `vizg_analyze_source_ex()` and handles its explicit status.
 - Iterates over `Vizg_Token[]` and `Vizg_Diagnostic[]` produced by the analyzer.
 - Calls `vizg_free_result()` to release the arena-owned result (verifies zero leak).
 

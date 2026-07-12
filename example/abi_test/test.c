@@ -98,6 +98,11 @@ static int scenario_null_path(void) {
 }
 
 int main(void) {
+    if (vizg_abi_version() != VIZG_ABI_VERSION) {
+        fprintf(stderr, "vizg C ABI version mismatch\n");
+        return 1;
+    }
+
     scenario_normal_path();
     scenario_empty_path();
     scenario_utf8_path();
