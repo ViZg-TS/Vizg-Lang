@@ -104,6 +104,10 @@ const Resolver = struct {
             .ExpressionStatement => |statement| try self.resolveNode(statement.expression, scope),
             .Identifier => |identifier| try self.addReference(node_id, identifier.name, scope, .read),
             .Literal => {},
+            .RegExpLiteral => {},
+            .TemplateExpression => |template| {
+                for (template.parts) |part| if (part.expression) |expression| try self.resolveNode(expression, scope);
+            },
             .CallExpression => |call| {
                 try self.resolveCallee(call.callee, scope);
                 for (call.arguments) |arg| try self.resolveNode(arg, scope);
@@ -114,10 +118,11 @@ const Resolver = struct {
             },
             .AsExpression => |as_expr| {
                 // Resolve only the inner expression; do NOT resolve type_annotation as a value.
-                _ = as_expr.type_annotation;  // type names are not resolved at runtime
+                _ = as_expr.type_annotation; // type names are not resolved at runtime
                 try self.resolveNode(as_expr.expression, scope);
             },
             .NonNullExpression => |nonnull| try self.resolveNode(nonnull.expression, scope),
+            .UnaryExpression => |unary| try self.resolveNode(unary.argument, scope),
             .MemberExpression => |member| try self.resolveNode(member.object, scope),
             .BinaryExpression => |binary| {
                 try self.resolveNode(binary.left, scope);
@@ -240,4 +245,38 @@ pub fn resolve(allocator: std.mem.Allocator, tree: ast_mod.Ast, bound: binder.Bi
         .bind = bound,
     };
     return resolver.resolve();
+}
+
+test "resolver visits prefix unary operands" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\let value = 1;
+        \\let object = { key: value };
+        \\function fn() { return value; }
+        \\let a = !-value;
+        \\let b = typeof object.key;
+        \\let c = await fn();
+    ;
+    const scanned = try scanner.scanAll(allocator, source, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+
+    var saw_value = false;
+    var saw_object = false;
+    var saw_fn_call = false;
+    for (resolved.references) |reference| {
+        if (std.mem.eql(u8, reference.name, "value") and reference.kind == .read) saw_value = true;
+        if (std.mem.eql(u8, reference.name, "object") and reference.kind == .read) saw_object = true;
+        if (std.mem.eql(u8, reference.name, "fn") and reference.kind == .call) saw_fn_call = true;
+    }
+    try std.testing.expect(saw_value);
+    try std.testing.expect(saw_object);
+    try std.testing.expect(saw_fn_call);
 }
