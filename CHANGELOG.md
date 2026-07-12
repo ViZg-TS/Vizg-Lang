@@ -22,6 +22,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - Development roadmap in `VIZG_PLAN.md` covering planned post-frontend phases.
 - Android target-query and NDK-discovery helper coverage in `android.build.zig`.
 - Foreign-caller C ABI tests covering source analysis, invalid arguments, result lifecycles, and parallel use.
+- Compile-only `zig build cross-check` matrix for generic frontend, types, and semantics layers across Linux, Windows, macOS, and Android targets.
 
 ### Changed
 

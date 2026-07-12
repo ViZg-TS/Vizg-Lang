@@ -142,6 +142,12 @@ The frontend is split into small modules:
 
 The single-file pipeline does not require file system access except for CLI input. `frontend.analyze` receives source text directly. The module graph layer is the file-system-aware wrapper.
 
+## Platform Boundary
+
+`cross_check.zig` references the public declarations in the frontend, types, and semantics layers. `zig build cross-check` compiles that probe as an object for representative Linux, Windows, macOS, and Android targets. The step performs no foreign linking or execution.
+
+These generic layers must not branch on the target OS. Platform-dependent work stays in adapters: `src/main.zig` for CLI interaction, `src/modules/loader.zig` for filesystem-backed loading, `Lib/vizg.zig` for the C ABI, and build/packaging helpers. The compile matrix does not claim those adapters have runtime validation on foreign targets.
+
 Shared diagnostics live outside the frontend:
 
 - `src/diagnostics/root.zig`: severity, phase, stable diagnostic codes, messages, spans, and optional paths.

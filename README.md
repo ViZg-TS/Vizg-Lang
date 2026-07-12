@@ -43,6 +43,16 @@ zig build test
 
 The test step runs the frontend, module graph, semantic, ABI, Android-helper, and portable structural checks. C and Zig consumer contract tests remain available under `example/`.
 
+## Cross-target compile checks
+
+```sh
+zig build cross-check
+```
+
+This compile-only step builds the generic frontend, types, and semantics layers as objects for `x86_64-linux`, `aarch64-linux`, `x86_64-windows`, `aarch64-macos`, `x86_64-macos`, and `aarch64-linux-android` (API 24). It neither links nor runs foreign executables. Passing proves compile portability only, not runtime behavior. No listed target is currently unsupported by this core-layer check.
+
+The CLI, filesystem-backed module loader, C ABI, and packaging remain outside this matrix as platform adapters. Android core compilation uses Zig's target query and does not require an NDK; Android linking and runtime validation remain separate work.
+
 ## Static Library And C ABI
 
 The supported exported functions are:

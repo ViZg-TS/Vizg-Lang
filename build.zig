@@ -25,6 +25,38 @@ pub fn build(b: *std.Build) void {
         .root_module = lib_mod,
     });
 
+    // Compile the OS-independent frontend/types/semantics layers for a small
+    // representative target matrix. Objects are compiled only: no foreign
+    // executable is linked or run, and Android does not require an NDK here.
+    const cross_check_step = b.step("cross-check", "Compile generic layers for representative targets");
+    const cross_targets = [_]struct {
+        name: []const u8,
+        query: std.Target.Query,
+    }{
+        .{ .name = "x86_64-linux", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux } },
+        .{ .name = "aarch64-linux", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux } },
+        .{ .name = "x86_64-windows", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows } },
+        .{ .name = "aarch64-macos", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
+        .{ .name = "x86_64-macos", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos } },
+        .{ .name = "aarch64-linux-android", .query = .{
+            .cpu_arch = .aarch64,
+            .os_tag = .linux,
+            .abi = .android,
+            .android_api_level = 24,
+        } },
+    };
+    for (cross_targets) |cross_target| {
+        const probe = b.addObject(.{
+            .name = b.fmt("vizg-cross-{s}", .{cross_target.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("cross_check.zig"),
+                .target = b.resolveTargetQuery(cross_target.query),
+                .optimize = .Debug,
+            }),
+        });
+        cross_check_step.dependOn(&probe.step);
+    }
+
     // -------------------------------------------------------------------
     // 2. Install step — default prefix is zig-out/.
     //       zig build → installs everything into the prefix (default: zig-out)
