@@ -8,8 +8,11 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+## [0.0.2] — 2026-07-12
+
 ### Added
 
+- `zig build android-aarch64-lib` packages the public C ABI as an Android AArch64/API 24 static archive and header, with a target-compiled minimal C consumer probe.
 - Versioned C ABI v1 with `VIZG_ABI_VERSION`, the exported
   `vizg_abi_version()` runtime check, a header/runtime match test, and explicit
   ownership, lifetime, pointer/length, thread-safety, status, size, and platform
@@ -27,13 +30,15 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - Android target-query and NDK-discovery helper coverage in `android.build.zig`.
 - Foreign-caller C ABI tests covering source analysis, invalid arguments, result lifecycles, and parallel use.
 - Compile-only `zig build cross-check` matrix for generic frontend, types, and semantics layers across Linux, Windows, macOS, and Android targets.
+- Compile-only `zig build abi-cross-check` matrix producing consumer-equivalent C ABI static archives and compiling the public header for Linux, Windows, macOS, and Android targets.
+- C-compiled public ABI layout probe, exposed as `zig build abi-layout-test` and integrated into `zig build test`.
 
 ### Changed
 
 - `src/root.zig` is now both the public Zig package root and the root module of the static library; `Lib/vizg.zig` owns the C ABI surface.
 - C ABI diagnostics expose explicit message and path lengths, and token flags use fixed-width FFI-safe fields.
 - Result lifecycle coverage now includes repeated allocation/free cycles, reverse-order cleanup, empty files, missing files, long paths, and in-memory sources.
-- The library is silent by default; tests reject unconditional `std.debug.print` calls in `Lib/`.
+- The library is silent by default; `zig build lint-silent` rejects debug-print calls in library, semantic, and test source while preserving CLI and example output.
 - `zig build run -- <args>` forwards arguments to the development CLI.
 - The default build now installs `vizg`, `libvizg.a`, and `vizg.h`; shell validation and lint scripts are wrappers around Zig build steps.
 - Zig cache and generated example artifacts have broader `.gitignore` coverage.
@@ -48,6 +53,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - Ensured C ABI symbols are retained in `libvizg.a` and the public header is installed before consumer smoke tests compile.
 - Prevented out-of-bounds scanner reads for incomplete escape sequences at end of input.
 - Forced the C smoke-test executable to use a non-executable ELF stack (`GNU_STACK RW`) instead of inheriting `RWE` from missing `.note.GNU-stack` metadata.
+- Restored the missing `VIZG_DIAG_INVALID_ESCAPE_SEQUENCE` C declaration and named the contextual-keyword enum for direct ABI validation.
 
 ### Removed
 
@@ -124,4 +130,6 @@ Comments, named/default imports, `let`/`const`/`var`, exported variables and fun
 - CLI command reference (`docs/cli.md`).
 - Roadmap with planned milestones (`docs/roadmap.md`).
 
+[Unreleased]: https://github.com/moliko/vizg/compare/v0.0.2...HEAD
+[0.0.2]: https://github.com/moliko/vizg/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/moliko/vizg/releases/tag/v0.0.1
