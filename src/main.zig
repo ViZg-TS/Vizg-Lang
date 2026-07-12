@@ -308,20 +308,69 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             for (decl.params) |param| try printAstNode(writer, tree, param, depth + 1);
             try printAstNode(writer, tree, decl.body, depth + 1);
         },
-        .Parameter => |param| try writer.print("Parameter #{} name=\"{s}\" {}..{}\n", .{ node_id, param.name, node.span.start, node.span.end }),
+        .FunctionExpression => |expr| {
+            try writer.print("FunctionExpression #{}", .{node_id});
+            if (expr.name) |name| try writer.print(" name=\"{s}\"", .{name});
+            try writer.print(" async={} body=#{} {}..{}\n", .{ expr.is_async, expr.body, node.span.start, node.span.end });
+            for (expr.params) |param| try printAstNode(writer, tree, param, depth + 1);
+            try printAstNode(writer, tree, expr.body, depth + 1);
+        },
+        .ArrowFunctionExpression => |arrow| {
+            try writer.print("ArrowFunctionExpression #{} async={} expression_body={} body=#{} {}..{}\n", .{ node_id, arrow.is_async, arrow.expression_body, arrow.body, node.span.start, node.span.end });
+            for (arrow.params) |param| try printAstNode(writer, tree, param, depth + 1);
+            try printAstNode(writer, tree, arrow.body, depth + 1);
+        },
+        .Parameter => |param| try writer.print("Parameter #{} name=\"{s}\" rest={} {}..{}\n", .{ node_id, param.name, param.rest, node.span.start, node.span.end }),
+        .SpreadElement => |spread| {
+            try writer.print("SpreadElement #{} argument=#{} {}..{}\n", .{ node_id, spread.argument, node.span.start, node.span.end });
+            try printAstNode(writer, tree, spread.argument, depth + 1);
+        },
         .ReturnStatement => |statement| {
             try writer.print("ReturnStatement #{}", .{node_id});
             if (statement.argument) |arg| try writer.print(" argument=#{}", .{arg});
             try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
             if (statement.argument) |arg| try printAstNode(writer, tree, arg, depth + 1);
         },
+        .ThrowStatement => |statement| {
+            try writer.print("ThrowStatement #{} argument=#{} {}..{}\n", .{ node_id, statement.argument, node.span.start, node.span.end });
+            if (statement.argument != ast_mod.invalid_node) try printAstNode(writer, tree, statement.argument, depth + 1);
+        },
+        .TryStatement => |statement| {
+            try writer.print("TryStatement #{} block=#{}", .{ node_id, statement.block });
+            if (statement.handler) |handler| try writer.print(" handler=#{}", .{handler}) else try writer.writeAll(" handler=null");
+            if (statement.finalizer) |finalizer| try writer.print(" finalizer=#{}", .{finalizer}) else try writer.writeAll(" finalizer=null");
+            try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
+            try printAstNode(writer, tree, statement.block, depth + 1);
+            if (statement.handler) |handler| try printAstNode(writer, tree, handler, depth + 1);
+            if (statement.finalizer) |finalizer| try printAstNode(writer, tree, finalizer, depth + 1);
+        },
+        .CatchClause => |clause| {
+            try writer.print("CatchClause #{}", .{node_id});
+            if (clause.parameter) |parameter| try writer.print(" parameter=#{}", .{parameter}) else try writer.writeAll(" parameter=null");
+            try writer.print(" body=#{} {}..{}\n", .{ clause.body, node.span.start, node.span.end });
+            if (clause.parameter) |parameter| try printAstNode(writer, tree, parameter, depth + 1);
+            try printAstNode(writer, tree, clause.body, depth + 1);
+        },
+        .FinallyClause => |clause| {
+            try writer.print("FinallyClause #{} body=#{} {}..{}\n", .{ node_id, clause.body, node.span.start, node.span.end });
+            try printAstNode(writer, tree, clause.body, depth + 1);
+        },
+        .BreakStatement => try writer.print("BreakStatement #{} {}..{}\n", .{ node_id, node.span.start, node.span.end }),
+        .ContinueStatement => try writer.print("ContinueStatement #{} {}..{}\n", .{ node_id, node.span.start, node.span.end }),
+        .ThisExpression => try writer.print("ThisExpression #{} {}..{}\n", .{ node_id, node.span.start, node.span.end }),
+        .SuperExpression => try writer.print("SuperExpression #{} {}..{}\n", .{ node_id, node.span.start, node.span.end }),
+        .NewExpression => |new_expr| {
+            try writer.print("NewExpression #{} callee=#{} {}..{}\n", .{ node_id, new_expr.callee, node.span.start, node.span.end });
+            try printAstNode(writer, tree, new_expr.callee, depth + 1);
+            for (new_expr.arguments) |arg| try printAstNode(writer, tree, arg, depth + 1);
+        },
         .CallExpression => |call| {
-            try writer.print("CallExpression #{} callee=#{} {}..{}\n", .{ node_id, call.callee, node.span.start, node.span.end });
+            try writer.print("CallExpression #{} callee=#{} optional={} {}..{}\n", .{ node_id, call.callee, call.optional, node.span.start, node.span.end });
             try printAstNode(writer, tree, call.callee, depth + 1);
             for (call.arguments) |arg| try printAstNode(writer, tree, arg, depth + 1);
         },
         .ElementAccessExpression => |elem_access| {
-            try writer.print("ElementAccessExpression #{} object=#{} index=#{} {}..{}\n", .{ node_id, elem_access.object, elem_access.index, node.span.start, node.span.end });
+            try writer.print("ElementAccessExpression #{} object=#{} index=#{} optional={} {}..{}\n", .{ node_id, elem_access.object, elem_access.index, elem_access.optional, node.span.start, node.span.end });
             try printAstNode(writer, tree, elem_access.object, depth + 1);
             try printAstNode(writer, tree, elem_access.index, depth + 1);
         },
@@ -340,7 +389,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             });
         },
         .MemberExpression => |member| {
-            try writer.print("MemberExpression #{} object=#{} property=\"{s}\" {}..{}\n", .{ node_id, member.object, member.property, node.span.start, node.span.end });
+            try writer.print("MemberExpression #{} object=#{} property=\"{s}\" optional={} {}..{}\n", .{ node_id, member.object, member.property, member.optional, node.span.start, node.span.end });
             try printAstNode(writer, tree, member.object, depth + 1);
         },
         .BinaryExpression => |expr| {
@@ -377,16 +426,35 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, statement.condition, depth + 1);
             try printAstNode(writer, tree, statement.body, depth + 1);
         },
+        .DoWhileStatement => |statement| {
+            try writer.print("DoWhileStatement #{} body=#{} condition=#{} {}..{}\n", .{ node_id, statement.body, statement.condition, node.span.start, node.span.end });
+            try printAstNode(writer, tree, statement.body, depth + 1);
+            if (statement.condition != ast_mod.invalid_node) try printAstNode(writer, tree, statement.condition, depth + 1);
+        },
         .ForStatement => |statement| {
-            try writer.print("ForStatement #{}", .{node_id});
+            try writer.print("ForStatement #{} kind={s} await={}", .{ node_id, @tagName(statement.kind), statement.await });
             if (statement.init) |init| try writer.print(" init=#{}", .{init}) else try writer.print(" init=null", .{});
             if (statement.condition) |condition| try writer.print(" test=#{}", .{condition}) else try writer.print(" test=null", .{});
             if (statement.update) |update| try writer.print(" update=#{}", .{update}) else try writer.print(" update=null", .{});
+            if (statement.right) |right| try writer.print(" right=#{}", .{right}) else try writer.print(" right=null", .{});
             try writer.print(" body=#{} {}..{}\n", .{ statement.body, node.span.start, node.span.end });
             if (statement.init) |init| try printAstNode(writer, tree, init, depth + 1);
             if (statement.condition) |condition| try printAstNode(writer, tree, condition, depth + 1);
             if (statement.update) |update| try printAstNode(writer, tree, update, depth + 1);
+            if (statement.right) |right| try printAstNode(writer, tree, right, depth + 1);
             try printAstNode(writer, tree, statement.body, depth + 1);
+        },
+        .SwitchStatement => |statement| {
+            try writer.print("SwitchStatement #{} discriminant=#{} cases={} {}..{}\n", .{ node_id, statement.discriminant, statement.cases.len, node.span.start, node.span.end });
+            try printAstNode(writer, tree, statement.discriminant, depth + 1);
+            for (statement.cases) |case| try printAstNode(writer, tree, case, depth + 1);
+        },
+        .SwitchCase => |switch_case| {
+            try writer.print("SwitchCase #{}", .{node_id});
+            if (switch_case.condition) |condition| try writer.print(" test=#{}", .{condition}) else try writer.print(" default", .{});
+            try writer.print(" consequent={} {}..{}\n", .{ switch_case.consequent.len, node.span.start, node.span.end });
+            if (switch_case.condition) |condition| try printAstNode(writer, tree, condition, depth + 1);
+            for (switch_case.consequent) |statement| try printAstNode(writer, tree, statement, depth + 1);
         },
         .ImportDeclaration => |decl| {
             try writer.print("ImportDeclaration #{} source=\"{s}\" names=[", .{ node_id, decl.source });
@@ -415,7 +483,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try writer.print("ObjectExpression #{} props=[", .{node_id});
             for (obj_expr.properties, 0..) |prop, i| {
                 if (i > 0) try writer.print(", ", .{});
-                try writer.print("{s}", .{prop.key});
+                if (prop.spread) try writer.print("...", .{}) else try writer.print("{s}", .{prop.key});
             }
             try writer.print("] {}..{}\n", .{ node.span.start, node.span.end });
             for (obj_expr.properties) |prop| {
@@ -1037,8 +1105,20 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .VariableDeclaration => return "VariableDeclaration",
         .VariableDeclarator => return "VariableDeclarator",
         .FunctionDeclaration => return "FunctionDeclaration",
+        .FunctionExpression => return "FunctionExpression",
+        .ArrowFunctionExpression => return "ArrowFunctionExpression",
         .Parameter => return "Parameter",
+        .SpreadElement => return "SpreadElement",
         .ReturnStatement => return "ReturnStatement",
+        .ThrowStatement => return "ThrowStatement",
+        .TryStatement => return "TryStatement",
+        .CatchClause => return "CatchClause",
+        .FinallyClause => return "FinallyClause",
+        .BreakStatement => return "BreakStatement",
+        .ContinueStatement => return "ContinueStatement",
+        .ThisExpression => return "ThisExpression",
+        .SuperExpression => return "SuperExpression",
+        .NewExpression => return "NewExpression",
         .CallExpression => return "CallExpression",
         .ElementAccessExpression => return "ElementAccessExpression",
         .NonNullExpression => return "NonNullExpression",
@@ -1051,7 +1131,10 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .AssignmentExpression => return "AssignmentExpression",
         .IfStatement => return "IfStatement",
         .WhileStatement => return "WhileStatement",
+        .DoWhileStatement => return "DoWhileStatement",
         .ForStatement => return "ForStatement",
+        .SwitchStatement => return "SwitchStatement",
+        .SwitchCase => return "SwitchCase",
         .ImportDeclaration => return "ImportDeclaration",
         .ExportDeclaration => return "ExportDeclaration",
         .ObjectExpression => return "ObjectExpression",

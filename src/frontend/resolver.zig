@@ -87,6 +87,14 @@ const Resolver = struct {
                 for (function_decl.params) |_| {}
                 try self.resolveNode(function_decl.body, function_scope);
             },
+            .FunctionExpression => |function_expr| {
+                const function_scope = self.takeScope();
+                try self.resolveNode(function_expr.body, function_scope);
+            },
+            .ArrowFunctionExpression => |arrow| {
+                const function_scope = self.takeScope();
+                try self.resolveNode(arrow.body, function_scope);
+            },
             .BlockStatement => |block| {
                 const block_scope = self.takeScope();
                 for (block.statements) |statement| try self.resolveNode(statement, block_scope);
@@ -98,21 +106,41 @@ const Resolver = struct {
                 if (declarator.init) |initializer| try self.resolveNode(initializer, scope);
             },
             .Parameter => {},
+            .SpreadElement => |spread| try self.resolveNode(spread.argument, scope),
             .ReturnStatement => |return_stmt| {
                 if (return_stmt.argument) |expression| try self.resolveNode(expression, scope);
             },
+            .ThrowStatement => |throw_stmt| try self.resolveNode(throw_stmt.argument, scope),
+            .TryStatement => |try_stmt| {
+                try self.resolveNode(try_stmt.block, scope);
+                if (try_stmt.handler) |handler| try self.resolveNode(handler, scope);
+                if (try_stmt.finalizer) |finalizer| try self.resolveNode(finalizer, scope);
+            },
+            .CatchClause => |catch_clause| {
+                const catch_scope = self.takeScope();
+                try self.resolveNode(catch_clause.body, catch_scope);
+            },
+            .FinallyClause => |finally_clause| try self.resolveNode(finally_clause.body, scope),
+            .BreakStatement, .ContinueStatement => {},
             .ExpressionStatement => |statement| try self.resolveNode(statement.expression, scope),
             .Identifier => |identifier| try self.addReference(node_id, identifier.name, scope, .read),
+            .ThisExpression, .SuperExpression => {},
             .Literal => {},
             .RegExpLiteral => {},
             .TemplateExpression => |template| {
                 for (template.parts) |part| if (part.expression) |expression| try self.resolveNode(expression, scope);
             },
             .CallExpression => |call| {
+                _ = call.optional; // Syntax metadata only; resolution traverses both call forms identically.
                 try self.resolveCallee(call.callee, scope);
                 for (call.arguments) |arg| try self.resolveNode(arg, scope);
             },
+            .NewExpression => |new_expr| {
+                try self.resolveCallee(new_expr.callee, scope);
+                for (new_expr.arguments) |arg| try self.resolveNode(arg, scope);
+            },
             .ElementAccessExpression => |elem_access| {
+                _ = elem_access.optional; // Optionality has no nullability semantics yet.
                 try self.resolveNode(elem_access.object, scope);
                 try self.resolveNode(elem_access.index, scope);
             },
@@ -123,7 +151,10 @@ const Resolver = struct {
             },
             .NonNullExpression => |nonnull| try self.resolveNode(nonnull.expression, scope),
             .UnaryExpression => |unary| try self.resolveNode(unary.argument, scope),
-            .MemberExpression => |member| try self.resolveNode(member.object, scope),
+            .MemberExpression => |member| {
+                _ = member.optional; // Preserve syntax while resolving the same object reference.
+                try self.resolveNode(member.object, scope);
+            },
             .BinaryExpression => |binary| {
                 try self.resolveNode(binary.left, scope);
                 try self.resolveNode(binary.right, scope);
@@ -155,11 +186,26 @@ const Resolver = struct {
                 try self.resolveNode(while_stmt.condition, scope);
                 try self.resolveNode(while_stmt.body, scope);
             },
+            .DoWhileStatement => |do_while_stmt| {
+                try self.resolveNode(do_while_stmt.body, scope);
+                try self.resolveNode(do_while_stmt.condition, scope);
+            },
             .ForStatement => |for_stmt| {
-                if (for_stmt.init) |init| try self.resolveNode(init, scope);
-                if (for_stmt.condition) |condition| try self.resolveNode(condition, scope);
-                if (for_stmt.update) |update| try self.resolveNode(update, scope);
-                try self.resolveNode(for_stmt.body, scope);
+                const loop_scope = self.takeScope();
+                if (for_stmt.init) |init| try self.resolveNode(init, loop_scope);
+                if (for_stmt.condition) |condition| try self.resolveNode(condition, loop_scope);
+                if (for_stmt.update) |update| try self.resolveNode(update, loop_scope);
+                if (for_stmt.right) |right| try self.resolveNode(right, loop_scope);
+                try self.resolveNode(for_stmt.body, loop_scope);
+            },
+            .SwitchStatement => |switch_stmt| {
+                try self.resolveNode(switch_stmt.discriminant, scope);
+                const switch_scope = self.takeScope();
+                for (switch_stmt.cases) |case| try self.resolveNode(case, switch_scope);
+            },
+            .SwitchCase => |switch_case| {
+                if (switch_case.condition) |condition| try self.resolveNode(condition, scope);
+                for (switch_case.consequent) |statement| try self.resolveNode(statement, scope);
             },
             .ObjectExpression => |obj_expr| {
                 for (obj_expr.properties) |prop| try self.resolveNode(prop.value, scope);
@@ -317,4 +363,40 @@ test "resolver visits every conditional expression branch" {
     try std.testing.expect(condition_seen);
     try std.testing.expect(consequent_seen);
     try std.testing.expect(alternate_seen);
+}
+
+test "resolver keeps catch binding inside catch scope" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\try {} catch (caught) { caught; }
+        \\caught;
+    , true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+
+    var catch_symbol: ?binder.Symbol = null;
+    for (bound.symbols) |symbol| {
+        if (std.mem.eql(u8, symbol.name, "caught")) catch_symbol = symbol;
+    }
+    try std.testing.expect(catch_symbol != null);
+    try std.testing.expect(catch_symbol.?.scope != 0);
+    try std.testing.expectEqual(binder.ScopeKind.block, bound.scopes[@intCast(catch_symbol.?.scope)].kind);
+    try std.testing.expectEqual(@as(usize, 1), resolved.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.cannot_find_name, resolved.diagnostics[0].code);
+
+    var bound_reads: usize = 0;
+    var unresolved_reads: usize = 0;
+    for (resolved.references) |reference| {
+        if (!std.mem.eql(u8, reference.name, "caught")) continue;
+        if (reference.symbol == catch_symbol.?.id) bound_reads += 1;
+        if (reference.symbol == null) unresolved_reads += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), bound_reads);
+    try std.testing.expectEqual(@as(usize, 1), unresolved_reads);
 }

@@ -66,9 +66,15 @@ const Parser = struct {
         if (self.at(.Keyword_function)) return try self.parseFunctionDeclaration(false);
         if (self.at(.LBrace)) return try self.parseBlockStatement();
         if (self.at(.Keyword_return)) return try self.parseReturnStatement();
+        if (self.at(.Keyword_throw)) return try self.parseThrowStatement();
+        if (self.at(.Keyword_try)) return try self.parseTryStatement();
+        if (self.at(.Keyword_break)) return try self.parseLoopControlStatement(.Keyword_break);
+        if (self.at(.Keyword_continue)) return try self.parseLoopControlStatement(.Keyword_continue);
         if (self.at(.Keyword_if)) return try self.parseIfStatement();
+        if (self.at(.Keyword_do)) return try self.parseDoWhileStatement();
         if (self.at(.Keyword_while)) return try self.parseWhileStatement();
         if (self.at(.Keyword_for)) return try self.parseForStatement();
+        if (self.at(.Keyword_switch)) return try self.parseSwitchStatement();
         if (self.isVariableKeyword(self.current().kind)) return try self.parseVariableDeclarationStatement();
         if (self.at(.Semicolon)) {
             _ = self.advance();
@@ -270,16 +276,7 @@ const Parser = struct {
 
         var params: std.ArrayList(NodeId) = .empty;
         errdefer params.deinit(self.allocator);
-        while (!self.at(.RParen) and !self.at(.EOF)) {
-            const param_token = self.expectIdentifierLike("expected parameter name");
-            const param_type: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
-            while (!self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) _ = self.advance();
-            try params.append(self.allocator, try self.addNode(.{
-                .span = param_token.span,
-                .data = .{ .Parameter = .{ .name = param_token.lexeme, .type_annotation = param_type } },
-            }));
-            _ = self.eat(.Comma);
-        }
+        try self.parseParameterList(&params);
         _ = self.expect(.RParen, "expected )");
         const return_type: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
 
@@ -299,6 +296,34 @@ const Parser = struct {
             } },
         });
     }
+
+    fn parseFunctionExpression(self: *Parser, start: Token, is_async: bool) anyerror!NodeId {
+        if (is_async) _ = self.expect(.Keyword_function, "expected function");
+        const name: ?[]const u8 = if (self.at(.Identifier) or self.at(.PrivateIdentifier)) self.advance().lexeme else null;
+        _ = self.expect(.LParen, "expected (");
+
+        var params: std.ArrayList(NodeId) = .empty;
+        errdefer params.deinit(self.allocator);
+        try self.parseParameterList(&params);
+        _ = self.expect(.RParen, "expected )");
+        const return_type: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
+        const body = if (self.at(.LBrace)) try self.parseBlockStatement() else blk: {
+            self.report("expected function body", .expected_token);
+            break :blk ast_mod.invalid_node;
+        };
+        const end_span = if (body == ast_mod.invalid_node) self.previousOrCurrent().span else self.nodes.items[@intCast(body)].span;
+        return self.addNode(.{
+            .span = joinSpans(start.span, end_span),
+            .data = .{ .FunctionExpression = .{
+                .name = name,
+                .params = try params.toOwnedSlice(self.allocator),
+                .body = body,
+                .is_async = is_async,
+                .return_type = return_type,
+            } },
+        });
+    }
+
     fn parseOptionalTypeAnnotation(self: *Parser) ?ast_mod.TypeAnnotation {
         if (!self.at(.Colon)) return null;
         _ = self.advance(); // consume colon
@@ -316,6 +341,25 @@ const Parser = struct {
         return null;
     }
 
+    fn parseParameterList(self: *Parser, params: *std.ArrayList(NodeId)) !void {
+        while (!self.at(.RParen) and !self.at(.EOF)) {
+            const rest_token: ?Token = if (self.at(.Spread)) self.advance() else null;
+            const param_token = self.expectIdentifierLike("expected parameter name");
+            const param_type = self.parseOptionalTypeAnnotation();
+            while (!self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) _ = self.advance();
+            try params.append(self.allocator, try self.addNode(.{
+                .span = if (rest_token) |token| joinSpans(token.span, param_token.span) else param_token.span,
+                .data = .{ .Parameter = .{
+                    .name = param_token.lexeme,
+                    .type_annotation = param_type,
+                    .rest = rest_token != null,
+                } },
+            }));
+            if (!self.eat(.Comma)) break;
+            if (rest_token != null) self.reportAt(self.previous().?, "rest parameter must be last", .unexpected_token);
+        }
+    }
+
     fn parseBlockStatement(self: *Parser) anyerror!NodeId {
         const start = self.expect(.LBrace, "expected {").span;
         var statements: std.ArrayList(NodeId) = .empty;
@@ -331,14 +375,18 @@ const Parser = struct {
     }
 
     fn parseVariableDeclarationStatement(self: *Parser) anyerror!NodeId {
+        return self.parseVariableDeclaration(false);
+    }
+
+    fn parseVariableDeclaration(self: *Parser, for_header: bool) anyerror!NodeId {
         const start = self.advance();
         var declarations: std.ArrayList(NodeId) = .empty;
         errdefer declarations.deinit(self.allocator);
 
-        while (!self.at(.Semicolon) and !self.at(.EOF)) {
+        while (!self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) {
             const name = self.expectIdentifierLike("expected variable name");
             const type_annotation: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
-            while (!self.at(.Equal) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.EOF)) _ = self.advance();
+            while (!self.at(.Equal) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) _ = self.advance();
             const init = if (self.eat(.Equal)) try self.parseExpression() else null;
             try declarations.append(self.allocator, try self.addNode(.{
                 .span = joinSpans(name.span, self.previousOrCurrent().span),
@@ -346,7 +394,7 @@ const Parser = struct {
             }));
             if (!self.eat(.Comma)) break;
         }
-        _ = self.eat(.Semicolon);
+        if (!for_header) _ = self.eat(.Semicolon);
 
         return self.addNode(.{
             .span = joinSpans(start.span, self.previousOrCurrent().span),
@@ -364,6 +412,97 @@ const Parser = struct {
         return self.addNode(.{
             .span = joinSpans(start, self.previousOrCurrent().span),
             .data = .{ .ReturnStatement = .{ .argument = argument } },
+        });
+    }
+
+    fn parseThrowStatement(self: *Parser) anyerror!NodeId {
+        const start = self.expect(.Keyword_throw, "expected throw").span;
+        var argument = ast_mod.invalid_node;
+
+        if (self.current().span.line != start.line) {
+            self.report("line terminator not allowed after throw", .unexpected_token);
+        } else if (self.at(.Semicolon) or self.at(.RBrace) or self.at(.EOF)) {
+            self.report("expected expression after throw", .expected_token);
+        } else {
+            argument = try self.parseExpression();
+        }
+
+        _ = self.eat(.Semicolon);
+        const end = if (argument == ast_mod.invalid_node) start else self.previousOrCurrent().span;
+        return self.addNode(.{
+            .span = joinSpans(start, end),
+            .data = .{ .ThrowStatement = .{ .argument = argument } },
+        });
+    }
+
+    fn parseTryStatement(self: *Parser) anyerror!NodeId {
+        const start = self.expect(.Keyword_try, "expected try").span;
+        const block = try self.parseBlockStatement();
+
+        var handler: ?NodeId = null;
+        if (self.at(.Keyword_catch)) {
+            const catch_start = self.advance().span;
+            var parameter: ?NodeId = null;
+            if (self.eat(.LParen)) {
+                if (self.at(.Identifier)) {
+                    const binding = self.advance();
+                    parameter = try self.addNode(.{
+                        .span = binding.span,
+                        .data = .{ .Parameter = .{ .name = binding.lexeme } },
+                    });
+                } else {
+                    self.report("expected catch binding", .expected_token);
+                }
+                _ = self.expect(.RParen, "expected ) after catch binding");
+            }
+            const body = try self.parseBlockStatement();
+            handler = try self.addNode(.{
+                .span = joinSpans(catch_start, self.nodes.items[@intCast(body)].span),
+                .data = .{ .CatchClause = .{ .parameter = parameter, .body = body } },
+            });
+        }
+
+        var finalizer: ?NodeId = null;
+        if (self.at(.Keyword_finally)) {
+            const finally_start = self.advance().span;
+            const body = try self.parseBlockStatement();
+            finalizer = try self.addNode(.{
+                .span = joinSpans(finally_start, self.nodes.items[@intCast(body)].span),
+                .data = .{ .FinallyClause = .{ .body = body } },
+            });
+        }
+
+        if (handler == null and finalizer == null) {
+            self.report("expected catch or finally after try", .expected_token);
+        }
+        const end_node = finalizer orelse handler orelse block;
+        return self.addNode(.{
+            .span = joinSpans(start, self.nodes.items[@intCast(end_node)].span),
+            .data = .{ .TryStatement = .{ .block = block, .handler = handler, .finalizer = finalizer } },
+        });
+    }
+
+    fn parseLoopControlStatement(self: *Parser, kind: TokenType) anyerror!NodeId {
+        const start = self.advance();
+        if (self.at(.Identifier)) {
+            try self.diagnostics.append(self.allocator, .{
+                .severity = .@"error",
+                .code = .unexpected_token,
+                .phase = .parser,
+                .message = "labeled break and continue statements are not supported",
+                .span = self.current().span,
+            });
+            _ = self.advance();
+        }
+        _ = self.eat(.Semicolon);
+        const span = joinSpans(start.span, self.previousOrCurrent().span);
+        return self.addNode(.{
+            .span = span,
+            .data = switch (kind) {
+                .Keyword_break => .{ .BreakStatement = .{} },
+                .Keyword_continue => .{ .ContinueStatement = .{} },
+                else => unreachable,
+            },
         });
     }
 
@@ -401,19 +540,71 @@ const Parser = struct {
         });
     }
 
+    fn parseDoWhileStatement(self: *Parser) anyerror!NodeId {
+        const start = self.expect(.Keyword_do, "expected do").span;
+        const body = (try self.parseStatement()) orelse ast_mod.invalid_node;
+
+        if (!self.at(.Keyword_while)) {
+            self.report("expected while after do-while body", .expected_token);
+            return self.addNode(.{
+                .span = joinSpans(start, self.previousOrCurrent().span),
+                .data = .{ .DoWhileStatement = .{ .body = body, .condition = ast_mod.invalid_node } },
+            });
+        }
+
+        _ = self.advance();
+        _ = self.expect(.LParen, "expected (");
+        const condition = try self.parseExpression();
+        _ = self.expect(.RParen, "expected )");
+        _ = self.expect(.Semicolon, "expected ; after do-while statement");
+        return self.addNode(.{
+            .span = joinSpans(start, self.previousOrCurrent().span),
+            .data = .{ .DoWhileStatement = .{ .body = body, .condition = condition } },
+        });
+    }
+
     fn parseForStatement(self: *Parser) anyerror!NodeId {
         const start = self.expect(.Keyword_for, "expected for").span;
+        const is_await = self.eat(.Keyword_await);
         _ = self.expect(.LParen, "expected (");
 
-        const init: ?NodeId = if (self.eat(.Semicolon))
+        const init: ?NodeId = if (self.at(.Semicolon))
             null
         else if (self.isVariableKeyword(self.current().kind))
-            try self.parseVariableDeclarationStatement()
-        else init: {
-            const expression = try self.parseExpression();
-            _ = self.expect(.Semicolon, "expected ;");
-            break :init expression;
-        };
+            try self.parseVariableDeclaration(true)
+        else
+            try self.parseExpression();
+
+        const iteration_kind: ?ast_mod.ForStatementKind = if (self.eat(.Keyword_in))
+            .in
+        else if (self.atIdentifierText("of")) kind: {
+            _ = self.advance();
+            break :kind .of;
+        } else null;
+
+        if (iteration_kind) |kind| {
+            if (is_await and kind != .of) self.report("for await requires an of loop", .unexpected_token);
+            if (init) |init_node| switch (self.nodes.items[@intCast(init_node)].data) {
+                .VariableDeclaration => |declaration| {
+                    if (declaration.declarations.len != 1) self.report("for-in/of declaration must contain exactly one variable", .unexpected_token);
+                    if (declaration.declarations.len > 0) {
+                        const declarator = self.nodes.items[@intCast(declaration.declarations[0])].data.VariableDeclarator;
+                        if (declarator.init != null) self.report("for-in/of declaration may not have an initializer", .unexpected_token);
+                    }
+                },
+                else => {},
+            };
+            const right = try self.parseExpression();
+            _ = self.expect(.RParen, "expected )");
+            const body = if (self.at(.LBrace)) try self.parseBlockStatement() else (try self.parseStatement()) orelse ast_mod.invalid_node;
+            return self.addNode(.{
+                .span = joinSpans(start, self.previousOrCurrent().span),
+                .data = .{ .ForStatement = .{ .kind = kind, .await = is_await, .init = init, .condition = null, .update = null, .right = right, .body = body } },
+            });
+        }
+
+        if (is_await) self.report("for await requires an of loop", .unexpected_token);
+        _ = self.expect(.Semicolon, "expected ;");
 
         const condition: ?NodeId = if (self.eat(.Semicolon))
             null
@@ -433,6 +624,51 @@ const Parser = struct {
         return self.addNode(.{
             .span = joinSpans(start, self.previousOrCurrent().span),
             .data = .{ .ForStatement = .{ .init = init, .condition = condition, .update = update, .body = body } },
+        });
+    }
+
+    fn parseSwitchStatement(self: *Parser) anyerror!NodeId {
+        const start = self.expect(.Keyword_switch, "expected switch").span;
+        _ = self.expect(.LParen, "expected (");
+        const discriminant = try self.parseExpression();
+        _ = self.expect(.RParen, "expected )");
+        _ = self.expect(.LBrace, "expected {");
+
+        var cases: std.ArrayList(NodeId) = .empty;
+        errdefer cases.deinit(self.allocator);
+        var seen_default = false;
+        while (!self.at(.RBrace) and !self.at(.EOF)) {
+            const clause_start = self.current().span;
+            var condition: ?NodeId = null;
+            if (self.eat(.Keyword_case)) {
+                condition = try self.parseExpression();
+            } else if (self.eat(.Keyword_default)) {
+                if (seen_default) self.report("duplicate default clause in switch statement", .unexpected_token);
+                seen_default = true;
+            } else {
+                self.report("expected case or default in switch statement", .expected_token);
+                _ = self.advance();
+                continue;
+            }
+            _ = self.expect(.Colon, "expected : after switch clause");
+
+            var consequent: std.ArrayList(NodeId) = .empty;
+            errdefer consequent.deinit(self.allocator);
+            while (!self.at(.Keyword_case) and !self.at(.Keyword_default) and !self.at(.RBrace) and !self.at(.EOF)) {
+                const before = self.index;
+                if (try self.parseStatement()) |statement| try consequent.append(self.allocator, statement);
+                if (self.index == before) _ = self.advance();
+            }
+            const clause = try self.addNode(.{
+                .span = joinSpans(clause_start, self.previousOrCurrent().span),
+                .data = .{ .SwitchCase = .{ .condition = condition, .consequent = try consequent.toOwnedSlice(self.allocator) } },
+            });
+            try cases.append(self.allocator, clause);
+        }
+        _ = self.expect(.RBrace, "expected }");
+        return self.addNode(.{
+            .span = joinSpans(start, self.previousOrCurrent().span),
+            .data = .{ .SwitchStatement = .{ .discriminant = discriminant, .cases = try cases.toOwnedSlice(self.allocator) } },
         });
     }
 
@@ -478,6 +714,8 @@ const Parser = struct {
     }
 
     fn parseAssignmentExpression(self: *Parser) anyerror!NodeId {
+        if (self.isArrowFunctionStart()) return self.parseArrowFunctionExpression();
+
         const left = try self.parseConditionalExpression();
 
         // Assignment (=, +=, -=, *=, /= %=). Right-associative.
@@ -505,6 +743,79 @@ const Parser = struct {
             });
         }
         return left;
+    }
+
+    fn isArrowFunctionStart(self: *const Parser) bool {
+        var cursor = self.index;
+        if (self.tokens[cursor].kind == .Identifier and
+            std.mem.eql(u8, self.tokens[cursor].lexeme, "async") and
+            self.tokens[cursor + 1].kind != .EqualsGreaterThan)
+        {
+            cursor += 1;
+        }
+
+        if (self.tokens[cursor].kind == .Identifier) return self.tokens[cursor + 1].kind == .EqualsGreaterThan;
+        if (self.tokens[cursor].kind != .LParen) return false;
+        cursor += 1;
+
+        if (self.tokens[cursor].kind != .RParen) {
+            while (true) {
+                if (self.tokens[cursor].kind == .Spread) cursor += 1;
+                if (self.tokens[cursor].kind != .Identifier and self.tokens[cursor].kind != .PrivateIdentifier) return false;
+                cursor += 1;
+                if (self.tokens[cursor].kind == .Colon) {
+                    cursor += 1;
+                    if (self.tokens[cursor].kind != .Identifier and self.tokens[cursor].kind != .PrivateIdentifier) return false;
+                    cursor += 1;
+                }
+                if (self.tokens[cursor].kind != .Comma) break;
+                cursor += 1;
+                if (self.tokens[cursor].kind == .RParen) break;
+            }
+        }
+        if (self.tokens[cursor].kind != .RParen) return false;
+        cursor += 1;
+        if (self.tokens[cursor].kind == .Colon) {
+            cursor += 1;
+            if (self.tokens[cursor].kind != .Identifier and self.tokens[cursor].kind != .PrivateIdentifier) return false;
+            cursor += 1;
+        }
+        return self.tokens[cursor].kind == .EqualsGreaterThan;
+    }
+
+    fn parseArrowFunctionExpression(self: *Parser) anyerror!NodeId {
+        const start = self.current().span;
+        const is_async = self.atIdentifierText("async") and self.tokens[self.index + 1].kind != .EqualsGreaterThan;
+        if (is_async) _ = self.advance();
+
+        var params: std.ArrayList(NodeId) = .empty;
+        errdefer params.deinit(self.allocator);
+        var return_type: ?ast_mod.TypeAnnotation = null;
+        if (self.eat(.LParen)) {
+            try self.parseParameterList(&params);
+            _ = self.expect(.RParen, "expected )");
+            return_type = self.parseOptionalTypeAnnotation();
+        } else {
+            const param_token = self.expectIdentifierLike("expected parameter name");
+            try params.append(self.allocator, try self.addNode(.{
+                .span = param_token.span,
+                .data = .{ .Parameter = .{ .name = param_token.lexeme } },
+            }));
+        }
+
+        _ = self.expect(.EqualsGreaterThan, "expected =>");
+        const expression_body = !self.at(.LBrace);
+        const body = if (expression_body) try self.parseAssignmentExpression() else try self.parseBlockStatement();
+        return self.addNode(.{
+            .span = joinSpans(start, self.nodes.items[@intCast(body)].span),
+            .data = .{ .ArrowFunctionExpression = .{
+                .params = try params.toOwnedSlice(self.allocator),
+                .body = body,
+                .is_async = is_async,
+                .expression_body = expression_body,
+                .return_type = return_type,
+            } },
+        });
     }
 
     fn parseConditionalExpression(self: *Parser) anyerror!NodeId {
@@ -807,6 +1118,18 @@ const Parser = struct {
         var properties: std.ArrayList(ast_mod.ObjectProperty) = .empty;
         errdefer properties.deinit(self.allocator);
         while (!self.at(.RBrace) and !self.at(.EOF)) {
+            if (self.at(.Spread)) {
+                const spread_token = self.advance();
+                const value = try self.parseSpreadElement(spread_token);
+                try properties.append(self.allocator, .{
+                    .key = "",
+                    .key_span = spread_token.span,
+                    .value = value,
+                    .spread = true,
+                });
+                if (!self.eat(.Comma)) break;
+                continue;
+            }
             const key_tok = self.advance();
             const key_tok_kind = key_tok.kind;
 
@@ -856,7 +1179,10 @@ const Parser = struct {
 
         while (!self.at(.RBracket) and !self.at(.EOF)) {
             if (self.eat(.Comma)) continue; // trailing comma — allow it
-            const elem = try self.parseExpression();
+            const elem = if (self.at(.Spread)) blk: {
+                const spread_token = self.advance();
+                break :blk try self.parseSpreadElement(spread_token);
+            } else try self.parseExpression();
             try elements.append(self.allocator, elem);
             _ = self.eat(.Comma); // trailing comma allowed by spec
         }
@@ -913,62 +1239,43 @@ const Parser = struct {
     }
 
     fn parsePrimary(self: *Parser) anyerror!NodeId {
-        var node: NodeId = undefined;
-        const token = self.advance();
-        switch (token.kind) {
-            .Identifier, .PrivateIdentifier => node = try self.addNode(.{
-                .span = token.span,
-                .data = .{ .Identifier = .{ .name = token.lexeme } },
-            }),
-            .StringLiteral, .NoSubstitutionTemplate, .NumberLiteral, .BigIntLiteral, .TrueLiteral, .FalseLiteral, .NullLiteral => node = try self.addNode(.{
-                .span = token.span,
-                .data = .{ .Literal = .{ .value = token.lexeme } },
-            }),
-            .RegExpLiteral => {
-                const closing_slash = std.mem.lastIndexOfScalar(u8, token.lexeme, '/').?;
-                var flags = tokens.RegExpFlags{};
-                for (token.lexeme[closing_slash + 1 ..]) |flag_char| flags.set(tokens.regexpFlagFromChar(flag_char).?);
-                node = try self.addNode(.{
-                    .span = token.span,
-                    .data = .{ .RegExpLiteral = .{
-                        .pattern = token.lexeme[1..closing_slash],
-                        .flags = flags,
-                    } },
-                });
-            },
-            .TemplateHead => node = try self.parseTemplateExpression(token),
-            .LParen => {
-                node = try self.parseExpression();
-                _ = self.expect(.RParen, "expected )");
-                try self.parenthesized_nodes.append(self.allocator, node);
-            },
-            .LBrace => {
-                node = try self.parseObjectExpression();
-            },
-            .LBracket => {
-                node = try self.parseArrayExpression();
-            },
-            else => {
-                self.reportAt(token, "expected expression", .expected_token);
-                node = try self.addNode(.{
-                    .span = token.span,
-                    .data = .{ .Identifier = .{ .name = "" } },
-                });
-            },
-        }
+        var node = try self.parsePrimaryAtom();
 
         while (true) {
-            if (self.eat(.LParen)) {
-                var args: std.ArrayList(NodeId) = .empty;
-                errdefer args.deinit(self.allocator);
-                while (!self.at(.RParen) and !self.at(.EOF)) {
-                    try args.append(self.allocator, try self.parseExpression());
-                    _ = self.eat(.Comma);
+            if (self.eat(.QuestionDot)) {
+                if (self.eat(.LParen)) {
+                    const args = try self.parseArguments();
+                    node = try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(node)].span, self.previousOrCurrent().span),
+                        .data = .{ .CallExpression = .{ .callee = node, .arguments = args, .optional = true } },
+                    });
+                    continue;
                 }
-                _ = self.expect(.RParen, "expected )");
+                if (self.eat(.LBracket)) {
+                    const index_expr = try self.parseExpression();
+                    _ = self.expect(.RBracket, "expected ]");
+                    node = try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(node)].span, self.previousOrCurrent().span),
+                        .data = .{ .ElementAccessExpression = .{ .object = node, .index = index_expr, .optional = true } },
+                    });
+                    continue;
+                }
+                if (self.at(.Identifier) or self.at(.PrivateIdentifier)) {
+                    const property = self.advance();
+                    node = try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(node)].span, property.span),
+                        .data = .{ .MemberExpression = .{ .object = node, .property = property.lexeme, .optional = true } },
+                    });
+                    continue;
+                }
+                self.report("expected property name, [ or ( after ?.", .expected_token);
+                break;
+            }
+            if (self.eat(.LParen)) {
+                const args = try self.parseArguments();
                 node = try self.addNode(.{
                     .span = joinSpans(self.nodes.items[@intCast(node)].span, self.previousOrCurrent().span),
-                    .data = .{ .CallExpression = .{ .callee = node, .arguments = try args.toOwnedSlice(self.allocator) } },
+                    .data = .{ .CallExpression = .{ .callee = node, .arguments = args } },
                 });
                 continue;
             }
@@ -990,11 +1297,10 @@ const Parser = struct {
                 continue;
             }
             if (self.eat(.Exclamation)) {
-                const non_null = try self.addNode(.{
+                node = try self.addNode(.{
                     .span = joinSpans(self.nodes.items[@intCast(node)].span, self.previousOrCurrent().span),
                     .data = .{ .NonNullExpression = .{ .expression = node } },
                 });
-                node = non_null;
                 continue;
             }
             if (self.at(.PlusPlus) or self.at(.MinusMinus)) {
@@ -1033,6 +1339,120 @@ const Parser = struct {
         }
 
         return node;
+    }
+
+    fn parsePrimaryAtom(self: *Parser) anyerror!NodeId {
+        var node: NodeId = undefined;
+        const token = self.advance();
+        switch (token.kind) {
+            .Identifier, .PrivateIdentifier => {
+                if (std.mem.eql(u8, token.lexeme, "async") and self.at(.Keyword_function)) {
+                    node = try self.parseFunctionExpression(token, true);
+                } else {
+                    node = try self.addNode(.{
+                        .span = token.span,
+                        .data = .{ .Identifier = .{ .name = token.lexeme } },
+                    });
+                }
+            },
+            .Keyword_function => node = try self.parseFunctionExpression(token, false),
+            .Keyword_this => node = try self.addNode(.{ .span = token.span, .data = .{ .ThisExpression = .{} } }),
+            .Keyword_super => node = try self.addNode(.{ .span = token.span, .data = .{ .SuperExpression = .{} } }),
+            .Keyword_new => node = try self.parseNewExpression(token),
+            .StringLiteral, .NoSubstitutionTemplate, .NumberLiteral, .BigIntLiteral, .TrueLiteral, .FalseLiteral, .NullLiteral => node = try self.addNode(.{
+                .span = token.span,
+                .data = .{ .Literal = .{ .value = token.lexeme } },
+            }),
+            .RegExpLiteral => {
+                const closing_slash = std.mem.lastIndexOfScalar(u8, token.lexeme, '/').?;
+                var flags = tokens.RegExpFlags{};
+                for (token.lexeme[closing_slash + 1 ..]) |flag_char| flags.set(tokens.regexpFlagFromChar(flag_char).?);
+                node = try self.addNode(.{
+                    .span = token.span,
+                    .data = .{ .RegExpLiteral = .{
+                        .pattern = token.lexeme[1..closing_slash],
+                        .flags = flags,
+                    } },
+                });
+            },
+            .TemplateHead => node = try self.parseTemplateExpression(token),
+            .LParen => {
+                node = try self.parseExpression();
+                _ = self.expect(.RParen, "expected )");
+                try self.parenthesized_nodes.append(self.allocator, node);
+            },
+            .LBrace => {
+                node = try self.parseObjectExpression();
+            },
+            .LBracket => {
+                node = try self.parseArrayExpression();
+            },
+            else => {
+                self.reportAt(token, "expected expression", .expected_token);
+                node = try self.addNode(.{
+                    .span = token.span,
+                    .data = .{ .Identifier = .{ .name = "" } },
+                });
+            },
+        }
+        return node;
+    }
+
+    fn parseNewExpression(self: *Parser, new_token: Token) anyerror!NodeId {
+        var callee = try self.parsePrimaryAtom();
+        while (true) {
+            if (self.eat(.Dot)) {
+                const property = self.expectIdentifierLike("expected property name");
+                callee = try self.addNode(.{
+                    .span = joinSpans(self.nodes.items[@intCast(callee)].span, property.span),
+                    .data = .{ .MemberExpression = .{ .object = callee, .property = property.lexeme } },
+                });
+                continue;
+            }
+            if (self.eat(.LBracket)) {
+                const index_expr = try self.parseExpression();
+                _ = self.expect(.RBracket, "expected ]");
+                callee = try self.addNode(.{
+                    .span = joinSpans(self.nodes.items[@intCast(callee)].span, self.previousOrCurrent().span),
+                    .data = .{ .ElementAccessExpression = .{ .object = callee, .index = index_expr } },
+                });
+                continue;
+            }
+            break;
+        }
+
+        const arguments = if (self.eat(.LParen)) try self.parseArguments() else try self.allocator.alloc(NodeId, 0);
+        const end_span = if (arguments.len > 0 or self.previousOrCurrent().kind == .RParen)
+            self.previousOrCurrent().span
+        else
+            self.nodes.items[@intCast(callee)].span;
+        return self.addNode(.{
+            .span = joinSpans(new_token.span, end_span),
+            .data = .{ .NewExpression = .{ .callee = callee, .arguments = arguments } },
+        });
+    }
+
+    fn parseArguments(self: *Parser) anyerror![]const NodeId {
+        var args: std.ArrayList(NodeId) = .empty;
+        errdefer args.deinit(self.allocator);
+        while (!self.at(.RParen) and !self.at(.EOF)) {
+            const argument = if (self.at(.Spread)) blk: {
+                const spread_token = self.advance();
+                break :blk try self.parseSpreadElement(spread_token);
+            } else try self.parseExpression();
+            try args.append(self.allocator, argument);
+            _ = self.eat(.Comma);
+        }
+        _ = self.expect(.RParen, "expected )");
+        return args.toOwnedSlice(self.allocator);
+    }
+
+    fn parseSpreadElement(self: *Parser, spread_token: Token) anyerror!NodeId {
+        const argument = try self.parseAssignmentExpression();
+        return self.addNode(.{
+            .span = joinSpans(spread_token.span, self.nodes.items[@intCast(argument)].span),
+            .data = .{ .SpreadElement = .{ .argument = argument } },
+        });
     }
 
     fn addNode(self: *Parser, node: ast_mod.Node) anyerror!NodeId {
@@ -1416,4 +1836,179 @@ test "parser handles conditional expressions associativity assignments and recov
     const recovered_decl = recovered.ast.node(recovered_statements[0]).data.VariableDeclaration;
     const recovered_conditional = recovered.ast.node(recovered.ast.node(recovered_decl.declarations[0]).data.VariableDeclarator.init.?).data.ConditionalExpression;
     try std.testing.expectEqualStrings("c", recovered.ast.node(recovered_conditional.alternate).data.Identifier.name);
+}
+
+test "parser builds do while and recovers from missing while or semicolon" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const valid_scan = try scanner.scanAll(allocator, "do { work(); } while (condition);", true);
+    const valid = try parse(allocator, valid_scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), valid.diagnostics.len);
+    const statement = valid.ast.node(valid.ast.node(valid.ast.root).data.Program.statements[0]).data.DoWhileStatement;
+    try std.testing.expectEqual(std.meta.Tag(ast_mod.NodeData).BlockStatement, std.meta.activeTag(valid.ast.node(statement.body).data));
+    try std.testing.expectEqual(std.meta.Tag(ast_mod.NodeData).Identifier, std.meta.activeTag(valid.ast.node(statement.condition).data));
+
+    const missing_while_scan = try scanner.scanAll(allocator, "do {} let recovered = 1;", true);
+    const missing_while = try parse(allocator, missing_while_scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 1), missing_while.diagnostics.len);
+    try std.testing.expectEqualStrings("expected while after do-while body", missing_while.diagnostics[0].message);
+    try std.testing.expectEqual(@as(usize, 2), missing_while.ast.node(missing_while.ast.root).data.Program.statements.len);
+
+    const missing_semicolon_scan = try scanner.scanAll(allocator, "do {} while (condition) let recovered = 1;", true);
+    const missing_semicolon = try parse(allocator, missing_semicolon_scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 1), missing_semicolon.diagnostics.len);
+    try std.testing.expectEqualStrings("expected ; after do-while statement", missing_semicolon.diagnostics[0].message);
+    try std.testing.expectEqual(@as(usize, 2), missing_semicolon.ast.node(missing_semicolon.ast.root).data.Program.statements.len);
+}
+
+test "parser distinguishes classic for in for of and for await" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\for (let index = 0; index < limit; index = index + 1) {}
+        \\for (const key in object) {}
+        \\for (const value of iterable) {}
+        \\for await (const value of stream) {}
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 4), statements.len);
+
+    const classic = parsed.ast.node(statements[0]).data.ForStatement;
+    try std.testing.expectEqual(ast_mod.ForStatementKind.classic, classic.kind);
+    try std.testing.expect(!classic.await);
+    try std.testing.expect(classic.init != null);
+    try std.testing.expect(classic.condition != null);
+    try std.testing.expect(classic.update != null);
+    try std.testing.expect(classic.right == null);
+
+    const for_in = parsed.ast.node(statements[1]).data.ForStatement;
+    try std.testing.expectEqual(ast_mod.ForStatementKind.in, for_in.kind);
+    try std.testing.expect(!for_in.await);
+    try std.testing.expect(for_in.right != null);
+
+    const for_of = parsed.ast.node(statements[2]).data.ForStatement;
+    try std.testing.expectEqual(ast_mod.ForStatementKind.of, for_of.kind);
+    try std.testing.expect(!for_of.await);
+
+    const for_await = parsed.ast.node(statements[3]).data.ForStatement;
+    try std.testing.expectEqual(ast_mod.ForStatementKind.of, for_await.kind);
+    try std.testing.expect(for_await.await);
+    try std.testing.expectEqualStrings("stream", parsed.ast.node(for_await.right.?).data.Identifier.name);
+}
+
+test "parser diagnoses invalid for in and for of declaration shapes" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{ .source = "for (const first, second in object) {}", .message = "for-in/of declaration must contain exactly one variable" },
+        .{ .source = "for (const value = initial of iterable) {}", .message = "for-in/of declaration may not have an initializer" },
+        .{ .source = "for await (const key in object) {}", .message = "for await requires an of loop" },
+    };
+    for (cases) |case| {
+        const scanned = try scanner.scanAll(allocator, case.source, true);
+        const parsed = try parse(allocator, scanned.tokens, .{});
+        try std.testing.expectEqual(@as(usize, 1), parsed.diagnostics.len);
+        try std.testing.expectEqualStrings(case.message, parsed.diagnostics[0].message);
+        try std.testing.expectEqual(@as(usize, 1), parsed.ast.node(parsed.ast.root).data.Program.statements.len);
+    }
+}
+
+test "parser builds switch clauses and preserves empty case labels" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\switch (value) {
+        \\    case 1:
+        \\    case 2: work(); break;
+        \\    default: fallback();
+        \\}
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statement = parsed.ast.node(parsed.ast.node(parsed.ast.root).data.Program.statements[0]).data.SwitchStatement;
+    try std.testing.expectEqualStrings("value", parsed.ast.node(statement.discriminant).data.Identifier.name);
+    try std.testing.expectEqual(@as(usize, 3), statement.cases.len);
+    const first = parsed.ast.node(statement.cases[0]).data.SwitchCase;
+    const second = parsed.ast.node(statement.cases[1]).data.SwitchCase;
+    const default = parsed.ast.node(statement.cases[2]).data.SwitchCase;
+    try std.testing.expect(first.condition != null);
+    try std.testing.expectEqual(@as(usize, 0), first.consequent.len);
+    try std.testing.expect(second.condition != null);
+    try std.testing.expectEqual(@as(usize, 2), second.consequent.len);
+    try std.testing.expect(default.condition == null);
+    try std.testing.expectEqual(@as(usize, 1), default.consequent.len);
+}
+
+test "parser diagnoses duplicate switch defaults and recovers" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, "switch (value) { default: break; default: break; } let recovered = 1;", true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 1), parsed.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.unexpected_token, parsed.diagnostics[0].code);
+    try std.testing.expectEqualStrings("duplicate default clause in switch statement", parsed.diagnostics[0].message);
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(parsed.ast.root).data.Program.statements.len);
+    const statement = parsed.ast.node(parsed.ast.node(parsed.ast.root).data.Program.statements[0]).data.SwitchStatement;
+    try std.testing.expectEqual(@as(usize, 2), statement.cases.len);
+}
+
+test "parser builds explicit try catch finally branches" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\try {} catch (error) {} finally {}
+        \\try {} catch {}
+        \\try {} finally {}
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 3), statements.len);
+
+    const complete = parsed.ast.node(statements[0]).data.TryStatement;
+    try std.testing.expect(complete.handler != null);
+    try std.testing.expect(complete.finalizer != null);
+    try std.testing.expect(parsed.ast.node(complete.handler.?).data.CatchClause.parameter != null);
+    _ = parsed.ast.node(complete.finalizer.?).data.FinallyClause;
+
+    const bindingless = parsed.ast.node(statements[1]).data.TryStatement;
+    try std.testing.expect(parsed.ast.node(bindingless.handler.?).data.CatchClause.parameter == null);
+    try std.testing.expect(bindingless.finalizer == null);
+
+    const finally_only = parsed.ast.node(statements[2]).data.TryStatement;
+    try std.testing.expect(finally_only.handler == null);
+    try std.testing.expect(finally_only.finalizer != null);
+}
+
+test "parser diagnoses try without catch or finally" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, "try {}", true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 1), parsed.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.expected_token, parsed.diagnostics[0].code);
+    try std.testing.expectEqualStrings("expected catch or finally after try", parsed.diagnostics[0].message);
 }

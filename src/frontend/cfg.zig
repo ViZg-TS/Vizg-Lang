@@ -64,6 +64,19 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
         .BlockStatement => |block| {
             for (block.statements) |statement| try collectFunctions(allocator, tree, statement, functions);
         },
+        .TryStatement => |try_stmt| {
+            try collectFunctions(allocator, tree, try_stmt.block, functions);
+            if (try_stmt.handler) |handler| try collectFunctions(allocator, tree, handler, functions);
+            if (try_stmt.finalizer) |finalizer| try collectFunctions(allocator, tree, finalizer, functions);
+        },
+        .CatchClause => |catch_clause| try collectFunctions(allocator, tree, catch_clause.body, functions),
+        .FinallyClause => |finally_clause| try collectFunctions(allocator, tree, finally_clause.body, functions),
+        .SwitchStatement => |switch_stmt| {
+            for (switch_stmt.cases) |case| try collectFunctions(allocator, tree, case, functions);
+        },
+        .SwitchCase => |switch_case| {
+            for (switch_case.consequent) |statement| try collectFunctions(allocator, tree, statement, functions);
+        },
         else => {},
     }
 }
@@ -95,9 +108,15 @@ const BlockBuilder = struct {
 };
 
 const GraphBuilder = struct {
+    const LoopContext = struct {
+        continue_target: BasicBlockId,
+    };
+
     allocator: std.mem.Allocator,
     tree: ast_mod.Ast,
     blocks: std.ArrayList(BlockBuilder) = .empty,
+    loops: std.ArrayList(LoopContext) = .empty,
+    break_targets: std.ArrayList(BasicBlockId) = .empty,
     exit: BasicBlockId = 0,
 
     fn init(allocator: std.mem.Allocator, tree: ast_mod.Ast) GraphBuilder {
@@ -137,19 +156,70 @@ const GraphBuilder = struct {
         const node = self.tree.node(statement);
         switch (node.data) {
             .BlockStatement => |block| return self.buildStatementList(current, block.statements),
-            .ReturnStatement => {
+            .ReturnStatement, .ThrowStatement => {
                 try self.addStatement(current, statement);
                 try self.addEdge(current, self.exit);
                 return null;
             },
+            .BreakStatement => {
+                try self.addStatement(current, statement);
+                if (self.currentBreakTarget()) |target| try self.addEdge(current, target);
+                return null;
+            },
+            .ContinueStatement => {
+                try self.addStatement(current, statement);
+                if (self.currentLoop()) |loop| try self.addEdge(current, loop.continue_target);
+                return null;
+            },
             .IfStatement => |if_statement| return self.buildIfStatement(current, statement, if_statement),
+            .TryStatement => |try_statement| return self.buildTryStatement(current, statement, try_statement),
+            .CatchClause => |catch_clause| {
+                try self.addStatement(current, statement);
+                return self.buildStatement(current, catch_clause.body);
+            },
+            .FinallyClause => |finally_clause| {
+                try self.addStatement(current, statement);
+                return self.buildStatement(current, finally_clause.body);
+            },
             .WhileStatement => |while_statement| return self.buildWhileStatement(current, statement, while_statement),
+            .DoWhileStatement => |do_while_statement| return self.buildDoWhileStatement(current, statement, do_while_statement),
             .ForStatement => |for_statement| return self.buildForStatement(current, statement, for_statement),
+            .SwitchStatement => |switch_statement| return self.buildSwitchStatement(current, statement, switch_statement),
             else => {
                 try self.addStatement(current, statement);
                 return current;
             },
         }
+    }
+
+    fn buildTryStatement(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, try_statement: ast_mod.TryStatement) anyerror!?BasicBlockId {
+        const dispatch = try self.beginConditionBlock(current);
+        try self.addStatement(dispatch, statement);
+
+        const try_entry = try self.createBlock(.normal);
+        try self.addEdge(dispatch, try_entry);
+        const try_fallthrough = try self.buildStatement(try_entry, try_statement.block);
+
+        var catch_fallthrough: ?BasicBlockId = null;
+        if (try_statement.handler) |handler| {
+            const catch_entry = try self.createBlock(.normal);
+            try self.addEdge(dispatch, catch_entry);
+            catch_fallthrough = try self.buildStatement(catch_entry, handler);
+        }
+
+        if (try_statement.finalizer) |finalizer| {
+            const finally_entry = try self.createBlock(.normal);
+            if (try_fallthrough) |block| try self.addEdge(block, finally_entry);
+            if (catch_fallthrough) |block| try self.addEdge(block, finally_entry);
+            if (try_statement.handler == null) try self.addEdge(dispatch, finally_entry);
+            return self.buildStatement(finally_entry, finalizer);
+        }
+
+        if (try_fallthrough == null and catch_fallthrough == null) return null;
+        const after = try self.createBlock(.normal);
+        if (try_fallthrough) |block| try self.addEdge(block, after);
+        if (catch_fallthrough) |block| try self.addEdge(block, after);
+        return after;
     }
 
     fn buildIfStatement(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, if_statement: ast_mod.IfStatement) anyerror!?BasicBlockId {
@@ -189,8 +259,31 @@ const GraphBuilder = struct {
         try self.addEdge(condition, body);
         try self.addEdge(condition, after);
 
+        try self.loops.append(self.allocator, .{ .continue_target = condition });
+        defer _ = self.loops.pop();
+        try self.break_targets.append(self.allocator, after);
+        defer _ = self.break_targets.pop();
         const body_fallthrough = try self.buildStatement(body, while_statement.body);
         if (body_fallthrough) |block| try self.addEdge(block, condition);
+        return after;
+    }
+
+    fn buildDoWhileStatement(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, do_while_statement: ast_mod.DoWhileStatement) anyerror!?BasicBlockId {
+        const body = try self.createBlock(.normal);
+        const condition = try self.createBlock(.condition);
+        const after = try self.createBlock(.normal);
+        try self.addEdge(current, body);
+        try self.addStatement(condition, statement);
+
+        try self.loops.append(self.allocator, .{ .continue_target = condition });
+        defer _ = self.loops.pop();
+        try self.break_targets.append(self.allocator, after);
+        defer _ = self.break_targets.pop();
+        const body_fallthrough = try self.buildStatement(body, do_while_statement.body);
+        if (body_fallthrough) |block| try self.addEdge(block, condition);
+
+        try self.addEdge(condition, body);
+        try self.addEdge(condition, after);
         return after;
     }
 
@@ -218,22 +311,70 @@ const GraphBuilder = struct {
         const body = try self.createBlock(.normal);
         try self.addEdge(condition, body);
 
-        const after = if (for_statement.condition != null) try self.createBlock(.normal) else null;
-        if (after) |after_block| try self.addEdge(condition, after_block);
+        const after = try self.createBlock(.normal);
+        if (for_statement.kind != .classic or for_statement.condition != null) try self.addEdge(condition, after);
+
+        const update_block = if (for_statement.update != null) try self.createBlock(.normal) else null;
+        const continue_target = update_block orelse condition;
+        try self.loops.append(self.allocator, .{ .continue_target = continue_target });
+        defer _ = self.loops.pop();
+        try self.break_targets.append(self.allocator, after);
+        defer _ = self.break_targets.pop();
 
         const body_fallthrough = try self.buildStatement(body, for_statement.body);
         if (body_fallthrough) |block| {
-            if (for_statement.update) |update| {
-                const update_block = try self.createBlock(.normal);
-                try self.addEdge(block, update_block);
-                try self.addStatement(update_block, update);
-                try self.addEdge(update_block, condition);
+            if (for_statement.update != null) {
+                try self.addEdge(block, update_block.?);
             } else {
                 try self.addEdge(block, condition);
             }
         }
 
+        if (for_statement.update) |update| {
+            try self.addStatement(update_block.?, update);
+            try self.addEdge(update_block.?, condition);
+        }
+
         return after;
+    }
+
+    fn buildSwitchStatement(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, switch_statement: ast_mod.SwitchStatement) anyerror!?BasicBlockId {
+        const condition = try self.beginConditionBlock(current);
+        try self.addStatement(condition, statement);
+        const after = try self.createBlock(.normal);
+
+        const case_blocks = try self.allocator.alloc(BasicBlockId, switch_statement.cases.len);
+        for (case_blocks) |*case_block| case_block.* = try self.createBlock(.normal);
+
+        var has_default = false;
+        for (switch_statement.cases, case_blocks) |case_node, case_block| {
+            try self.addEdge(condition, case_block);
+            const switch_case = self.tree.node(case_node).data.SwitchCase;
+            if (switch_case.condition == null) has_default = true;
+        }
+        if (!has_default or switch_statement.cases.len == 0) try self.addEdge(condition, after);
+
+        try self.break_targets.append(self.allocator, after);
+        defer _ = self.break_targets.pop();
+        for (switch_statement.cases, case_blocks, 0..) |case_node, case_block, index| {
+            const switch_case = self.tree.node(case_node).data.SwitchCase;
+            const fallthrough = try self.buildStatementList(case_block, switch_case.consequent);
+            if (fallthrough) |block| {
+                const target = if (index + 1 < case_blocks.len) case_blocks[index + 1] else after;
+                try self.addEdge(block, target);
+            }
+        }
+        return after;
+    }
+
+    fn currentLoop(self: *GraphBuilder) ?LoopContext {
+        if (self.loops.items.len == 0) return null;
+        return self.loops.items[self.loops.items.len - 1];
+    }
+
+    fn currentBreakTarget(self: *GraphBuilder) ?BasicBlockId {
+        if (self.break_targets.items.len == 0) return null;
+        return self.break_targets.items[self.break_targets.items.len - 1];
     }
 
     fn finish(self: *GraphBuilder) ![]const BasicBlock {
@@ -292,4 +433,137 @@ test "cfg creates a graph for exported function" {
     try std.testing.expectEqual(@as(usize, 2), cfgs[0].graph.blocks[2].statements.len);
     try std.testing.expectEqual(@as(usize, 1), cfgs[0].graph.blocks[2].successors.len);
     try std.testing.expectEqual(cfgs[0].graph.exit, cfgs[0].graph.blocks[2].successors[0]);
+}
+
+test "cfg enters do while body before condition" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator,
+        \\function f(x: number) {
+        \\    do { x = x - 1; } while (x > 0);
+        \\    return x;
+        \\}
+    , true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    const graph = (try build(allocator, parsed.ast))[0].graph;
+
+    try std.testing.expectEqual(@as(usize, 6), graph.blocks.len);
+    try std.testing.expect(containsBlockId(graph.blocks[graph.entry].successors, 2));
+    try std.testing.expect(containsBlockId(graph.blocks[2].successors, 3));
+    try std.testing.expect(!containsBlockId(graph.blocks[2].successors, 4));
+    try std.testing.expectEqual(BasicBlockKind.normal, graph.blocks[3].kind);
+    try std.testing.expect(containsBlockId(graph.blocks[3].successors, 4));
+    try std.testing.expectEqual(BasicBlockKind.condition, graph.blocks[4].kind);
+    try std.testing.expect(containsBlockId(graph.blocks[4].successors, 3));
+    try std.testing.expect(containsBlockId(graph.blocks[4].successors, 5));
+    try std.testing.expect(containsBlockId(graph.blocks[5].successors, graph.exit));
+}
+
+test "cfg gives for of loops body exit and back edges" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator,
+        \\function visit(iterable) {
+        \\    for (const value of iterable) { value; }
+        \\    return iterable;
+        \\}
+    , true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    const graph = (try build(allocator, parsed.ast))[0].graph;
+
+    var condition_id: ?BasicBlockId = null;
+    for (graph.blocks) |block| {
+        if (block.kind == .condition) condition_id = block.id;
+    }
+    const condition = graph.blocks[@intCast(condition_id.?)];
+    try std.testing.expectEqual(@as(usize, 2), condition.successors.len);
+    const body = condition.successors[0];
+    const after = condition.successors[1];
+    try std.testing.expect(containsBlockId(graph.blocks[@intCast(body)].successors, condition.id));
+    try std.testing.expect(containsBlockId(graph.blocks[@intCast(after)].successors, graph.exit));
+}
+
+test "cfg preserves switch fallthrough and break exits" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator,
+        \\function classify(value) {
+        \\    switch (value) {
+        \\        case 1: first();
+        \\        case 2: second(); break;
+        \\        default: fallback();
+        \\    }
+        \\    return value;
+        \\}
+    , true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const graph = (try build(allocator, parsed.ast))[0].graph;
+
+    var dispatch: ?BasicBlock = null;
+    for (graph.blocks) |block| {
+        if (block.kind == .condition) dispatch = block;
+    }
+    try std.testing.expect(dispatch != null);
+    try std.testing.expectEqual(@as(usize, 3), dispatch.?.successors.len);
+    const first_case = dispatch.?.successors[0];
+    const second_case = dispatch.?.successors[1];
+    const default_case = dispatch.?.successors[2];
+    try std.testing.expect(containsBlockId(graph.blocks[@intCast(first_case)].successors, second_case));
+    const second_target = graph.blocks[@intCast(second_case)].successors[0];
+    try std.testing.expect(containsBlockId(graph.blocks[@intCast(default_case)].successors, second_target));
+    try std.testing.expect(!containsBlockId(graph.blocks[@intCast(second_case)].successors, default_case));
+}
+
+test "cfg routes try and catch fallthrough through finally" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\function f(value) {
+        \\    try { value; } catch (error) { error; } finally { value; }
+        \\    return value;
+        \\}
+    , true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const graph = (try build(allocator, parsed.ast))[0].graph;
+
+    var dispatch: ?BasicBlock = null;
+    var catch_block: ?BasicBlock = null;
+    var finally_block: ?BasicBlock = null;
+    for (graph.blocks) |block| {
+        for (block.statements) |statement| switch (parsed.ast.node(statement).data) {
+            .TryStatement => dispatch = block,
+            .CatchClause => catch_block = block,
+            .FinallyClause => finally_block = block,
+            else => {},
+        };
+    }
+    try std.testing.expect(dispatch != null);
+    try std.testing.expect(catch_block != null);
+    try std.testing.expect(finally_block != null);
+    try std.testing.expectEqual(@as(usize, 2), dispatch.?.successors.len);
+    try std.testing.expect(containsBlockId(dispatch.?.successors, catch_block.?.id));
+    const try_body = if (dispatch.?.successors[0] == catch_block.?.id)
+        dispatch.?.successors[1]
+    else
+        dispatch.?.successors[0];
+    try std.testing.expect(containsBlockId(graph.blocks[@intCast(try_body)].successors, finally_block.?.id));
+    try std.testing.expect(containsBlockId(catch_block.?.successors, finally_block.?.id));
 }

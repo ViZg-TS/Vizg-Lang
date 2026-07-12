@@ -107,6 +107,7 @@ pub fn inferLiteralNodeTypes(
                     });
                 }
             },
+            .ThisExpression, .SuperExpression => {},
             // Tree-shaped nodes: push children for further descent.
             .Program => |prog| for (prog.statements) |s| try stack.append(allocator, s),
             .BlockStatement => |block| for (block.statements) |s| try stack.append(allocator, s),
@@ -114,13 +115,29 @@ pub fn inferLiteralNodeTypes(
             .VariableDeclaration => |decl| for (decl.declarations) |d| try stack.append(allocator, d),
             .VariableDeclarator => |vd| if (vd.init) |i| try stack.append(allocator, i),
             .FunctionDeclaration => |fn_decl| try stack.append(allocator, fn_decl.body),
+            .FunctionExpression => |fn_expr| try stack.append(allocator, fn_expr.body),
+            .ArrowFunctionExpression => |arrow| try stack.append(allocator, arrow.body),
             .Parameter => {},
+            .SpreadElement => |spread| try stack.append(allocator, spread.argument),
             .ReturnStatement => |ret| {
                 if (ret.argument) |a| _ = try stack.append(allocator, a);
             },
+            .ThrowStatement => |throw_stmt| _ = try stack.append(allocator, throw_stmt.argument),
+            .TryStatement => |try_stmt| {
+                try stack.append(allocator, try_stmt.block);
+                if (try_stmt.handler) |handler| try stack.append(allocator, handler);
+                if (try_stmt.finalizer) |finalizer| try stack.append(allocator, finalizer);
+            },
+            .CatchClause => |catch_clause| try stack.append(allocator, catch_clause.body),
+            .FinallyClause => |finally_clause| try stack.append(allocator, finally_clause.body),
+            .BreakStatement, .ContinueStatement => {},
             .CallExpression => |call| {
                 try stack.append(allocator, call.callee);
                 for (call.arguments) |arg| try stack.append(allocator, arg);
+            },
+            .NewExpression => |new_expr| {
+                try stack.append(allocator, new_expr.callee);
+                for (new_expr.arguments) |arg| try stack.append(allocator, arg);
             },
             .ElementAccessExpression => |elem_access| {
                 _ = try stack.append(allocator, elem_access.object);
@@ -169,11 +186,24 @@ pub fn inferLiteralNodeTypes(
                 _ = while_stmt.condition;
                 try stack.append(allocator, while_stmt.body);
             },
+            .DoWhileStatement => |do_while_stmt| {
+                _ = do_while_stmt.condition;
+                try stack.append(allocator, do_while_stmt.body);
+            },
             .ForStatement => |for_stmt| {
                 if (for_stmt.init) |i| _ = try stack.append(allocator, i);
                 if (for_stmt.condition) |c| _ = try stack.append(allocator, c);
                 if (for_stmt.update) |u| _ = try stack.append(allocator, u);
+                if (for_stmt.right) |r| _ = try stack.append(allocator, r);
                 _ = try stack.append(allocator, for_stmt.body);
+            },
+            .SwitchStatement => |switch_stmt| {
+                try stack.append(allocator, switch_stmt.discriminant);
+                for (switch_stmt.cases) |case| try stack.append(allocator, case);
+            },
+            .SwitchCase => |switch_case| {
+                if (switch_case.condition) |condition| try stack.append(allocator, condition);
+                for (switch_case.consequent) |statement| try stack.append(allocator, statement);
             },
             .ImportDeclaration => {},
             // Descend into the wrapped declaration (function, variable, or

@@ -84,14 +84,58 @@ pub const FunctionDeclaration = struct {
     return_type: ?TypeAnnotation = null,
 };
 
+pub const FunctionExpression = struct {
+    name: ?[]const u8 = null,
+    params: []const NodeId,
+    body: NodeId,
+    is_async: bool = false,
+    return_type: ?TypeAnnotation = null,
+};
+
+pub const ArrowFunctionExpression = struct {
+    params: []const NodeId,
+    body: NodeId,
+    is_async: bool = false,
+    expression_body: bool,
+    return_type: ?TypeAnnotation = null,
+};
+
 pub const Parameter = struct {
     name: []const u8,
     type_annotation: ?TypeAnnotation = null,
+    rest: bool = false,
+};
+
+pub const SpreadElement = struct {
+    argument: NodeId,
 };
 
 pub const ReturnStatement = struct {
     argument: ?NodeId,
 };
+
+pub const ThrowStatement = struct {
+    argument: NodeId,
+};
+
+pub const TryStatement = struct {
+    block: NodeId,
+    handler: ?NodeId,
+    finalizer: ?NodeId,
+};
+
+pub const CatchClause = struct {
+    parameter: ?NodeId,
+    body: NodeId,
+};
+
+pub const FinallyClause = struct {
+    body: NodeId,
+};
+
+pub const BreakStatement = struct {};
+
+pub const ContinueStatement = struct {};
 
 pub const ExpressionStatement = struct {
     expression: NodeId,
@@ -100,16 +144,28 @@ pub const ExpressionStatement = struct {
 pub const CallExpression = struct {
     callee: NodeId,
     arguments: []const NodeId,
+    optional: bool = false,
+};
+
+pub const ThisExpression = struct {};
+
+pub const SuperExpression = struct {};
+
+pub const NewExpression = struct {
+    callee: NodeId,
+    arguments: []const NodeId,
 };
 
 pub const MemberExpression = struct {
     object: NodeId,
     property: []const u8,
+    optional: bool = false,
 };
 
 pub const ElementAccessExpression = struct {
     object: NodeId,
     index: NodeId,
+    optional: bool = false,
 };
 
 pub const AsExpression = struct {
@@ -161,17 +217,42 @@ pub const WhileStatement = struct {
     body: NodeId,
 };
 
+pub const DoWhileStatement = struct {
+    body: NodeId,
+    condition: NodeId,
+};
+
+pub const ForStatementKind = enum {
+    classic,
+    in,
+    of,
+};
+
 pub const ForStatement = struct {
+    kind: ForStatementKind = .classic,
+    await: bool = false,
     init: ?NodeId,
     condition: ?NodeId,
     update: ?NodeId,
+    right: ?NodeId = null,
     body: NodeId,
+};
+
+pub const SwitchStatement = struct {
+    discriminant: NodeId,
+    cases: []const NodeId,
+};
+
+pub const SwitchCase = struct {
+    condition: ?NodeId,
+    consequent: []const NodeId,
 };
 
 pub const ObjectProperty = struct {
     key: []const u8,
     key_span: tokens.Span,
     value: NodeId,
+    spread: bool = false,
 };
 
 pub const ObjectExpression = struct {
@@ -193,8 +274,20 @@ pub const NodeData = union(enum) {
     VariableDeclaration: VariableDeclaration,
     VariableDeclarator: VariableDeclarator,
     FunctionDeclaration: FunctionDeclaration,
+    FunctionExpression: FunctionExpression,
+    ArrowFunctionExpression: ArrowFunctionExpression,
     Parameter: Parameter,
+    SpreadElement: SpreadElement,
     ReturnStatement: ReturnStatement,
+    ThrowStatement: ThrowStatement,
+    TryStatement: TryStatement,
+    CatchClause: CatchClause,
+    FinallyClause: FinallyClause,
+    BreakStatement: BreakStatement,
+    ContinueStatement: ContinueStatement,
+    ThisExpression: ThisExpression,
+    SuperExpression: SuperExpression,
+    NewExpression: NewExpression,
     CallExpression: CallExpression,
     MemberExpression: MemberExpression,
     ElementAccessExpression: ElementAccessExpression,
@@ -207,7 +300,10 @@ pub const NodeData = union(enum) {
     AssignmentExpression: AssignmentExpression,
     IfStatement: IfStatement,
     WhileStatement: WhileStatement,
+    DoWhileStatement: DoWhileStatement,
     ForStatement: ForStatement,
+    SwitchStatement: SwitchStatement,
+    SwitchCase: SwitchCase,
     ImportDeclaration: ImportDeclaration,
     ExportDeclaration: ExportDeclaration,
     ObjectExpression: ObjectExpression,

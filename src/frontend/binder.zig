@@ -156,6 +156,32 @@ const Binder = struct {
                 }
                 try self.bindNode(function_decl.body, function_scope);
             },
+            .FunctionExpression => |function_expr| {
+                const function_scope = try self.addScope(.function, scope);
+                if (function_expr.name) |name| {
+                    const symbol_id = try self.declare(function_scope, name, .function, node_id, node.span);
+                    try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                }
+                for (function_expr.params) |param_id| {
+                    const param_node = self.ast.node(param_id);
+                    switch (param_node.data) {
+                        .Parameter => |param| _ = try self.declare(function_scope, param.name, .parameter, param_id, param_node.span),
+                        else => {},
+                    }
+                }
+                try self.bindNode(function_expr.body, function_scope);
+            },
+            .ArrowFunctionExpression => |arrow| {
+                const function_scope = try self.addScope(.function, scope);
+                for (arrow.params) |param_id| {
+                    const param_node = self.ast.node(param_id);
+                    switch (param_node.data) {
+                        .Parameter => |param| _ = try self.declare(function_scope, param.name, .parameter, param_id, param_node.span),
+                        else => {},
+                    }
+                }
+                try self.bindNode(arrow.body, function_scope);
+            },
             .BlockStatement => |block| {
                 const block_scope = try self.addScope(.block, scope);
                 for (block.statements) |statement| try self.bindNode(statement, block_scope);
@@ -171,14 +197,39 @@ const Binder = struct {
             .ReturnStatement => |return_stmt| {
                 if (return_stmt.argument) |expression| try self.bindNode(expression, scope);
             },
+            .ThrowStatement => |throw_stmt| try self.bindNode(throw_stmt.argument, scope),
+            .TryStatement => |try_stmt| {
+                try self.bindNode(try_stmt.block, scope);
+                if (try_stmt.handler) |handler| try self.bindNode(handler, scope);
+                if (try_stmt.finalizer) |finalizer| try self.bindNode(finalizer, scope);
+            },
+            .CatchClause => |catch_clause| {
+                const catch_scope = try self.addScope(.block, scope);
+                if (catch_clause.parameter) |parameter_id| {
+                    const parameter_node = self.ast.node(parameter_id);
+                    switch (parameter_node.data) {
+                        .Parameter => |parameter| _ = try self.declare(catch_scope, parameter.name, .variable, parameter_id, parameter_node.span),
+                        else => {},
+                    }
+                }
+                try self.bindNode(catch_clause.body, catch_scope);
+            },
+            .FinallyClause => |finally_clause| try self.bindNode(finally_clause.body, scope),
+            .BreakStatement, .ContinueStatement => {},
             .ExpressionStatement => |statement| try self.bindNode(statement.expression, scope),
             .TemplateExpression => |template| {
                 for (template.parts) |part| if (part.expression) |expression| try self.bindNode(expression, scope);
             },
             .RegExpLiteral => {},
+            .SpreadElement => |spread| try self.bindNode(spread.argument, scope),
+            .ThisExpression, .SuperExpression => {},
             .CallExpression => |call| {
                 try self.bindNode(call.callee, scope);
                 for (call.arguments) |arg| try self.bindNode(arg, scope);
+            },
+            .NewExpression => |new_expr| {
+                try self.bindNode(new_expr.callee, scope);
+                for (new_expr.arguments) |arg| try self.bindNode(arg, scope);
             },
             .ElementAccessExpression => |elem_access| {
                 try self.bindNode(elem_access.object, scope);
@@ -209,11 +260,26 @@ const Binder = struct {
                 try self.bindNode(while_stmt.condition, scope);
                 try self.bindNode(while_stmt.body, scope);
             },
+            .DoWhileStatement => |do_while_stmt| {
+                try self.bindNode(do_while_stmt.body, scope);
+                try self.bindNode(do_while_stmt.condition, scope);
+            },
             .ForStatement => |for_stmt| {
-                if (for_stmt.init) |init| try self.bindNode(init, scope);
-                if (for_stmt.condition) |condition| try self.bindNode(condition, scope);
-                if (for_stmt.update) |update| try self.bindNode(update, scope);
-                try self.bindNode(for_stmt.body, scope);
+                const loop_scope = try self.addScope(.block, scope);
+                if (for_stmt.init) |init| try self.bindNode(init, loop_scope);
+                if (for_stmt.condition) |condition| try self.bindNode(condition, loop_scope);
+                if (for_stmt.update) |update| try self.bindNode(update, loop_scope);
+                if (for_stmt.right) |right| try self.bindNode(right, loop_scope);
+                try self.bindNode(for_stmt.body, loop_scope);
+            },
+            .SwitchStatement => |switch_stmt| {
+                try self.bindNode(switch_stmt.discriminant, scope);
+                const switch_scope = try self.addScope(.block, scope);
+                for (switch_stmt.cases) |case| try self.bindNode(case, switch_scope);
+            },
+            .SwitchCase => |switch_case| {
+                if (switch_case.condition) |condition| try self.bindNode(condition, scope);
+                for (switch_case.consequent) |statement| try self.bindNode(statement, scope);
             },
             .ObjectExpression => |obj_expr| {
                 for (obj_expr.properties) |prop| try self.bindNode(prop.value, scope);
@@ -335,4 +401,33 @@ test "binder records imports exports scopes and declarations" {
     try std.testing.expect(hasSymbol(bound, "main"));
     try std.testing.expect(hasSymbol(bound, "name"));
     try std.testing.expect(hasSymbol(bound, "message"));
+}
+
+test "binder binds iteration variables in loop header scopes" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator,
+        \\function visit(object, iterable, stream) {
+        \\    for (const key in object) { key; }
+        \\    for (const value of iterable) { value; }
+        \\    for await (const item of stream) { item; }
+        \\}
+    , true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    const bound = try bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
+
+    for ([_][]const u8{ "key", "value", "item" }) |name| {
+        var found = false;
+        for (bound.symbols) |symbol| if (std.mem.eql(u8, symbol.name, name)) {
+            found = true;
+            try std.testing.expectEqual(ScopeKind.block, bound.scopes[@intCast(symbol.scope)].kind);
+        };
+        try std.testing.expect(found);
+    }
 }
