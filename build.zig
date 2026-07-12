@@ -89,9 +89,17 @@ pub fn build(b: *std.Build) void {
 
     // 4c. Final test step: run lint-silent first (structural), then tests (unit + ABI + silent runtime).
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = lib_mod }));
+    const android_helper_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("android.build.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    }));
     const test_step = b.step("test", "Compile & run all unit tests");
     test_step.dependOn(lint_silent_step);
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&android_helper_tests.step);
     test_step.dependOn(&run_silent_c.step);
 
 }

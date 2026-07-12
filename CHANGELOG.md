@@ -32,6 +32,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Fixed
 
+- Made Android NDK discovery deterministic and corrected target mappings for aarch64, arm, x86, and x86_64; Android API levels now reach Zig's target query.
 - Propagated recoverable allocation failures through frontend diagnostics, external-module registration, CLI commands, and the C ABI instead of panicking or silently continuing.
 - Corrected the C/Zig `Vizg_Token` layout mismatch that caused invalid token strides and crashes after the first token.
 - Preserved the ABI invariant that an absent diagnostic path has both a null pointer and zero length.
