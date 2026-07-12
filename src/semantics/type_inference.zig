@@ -145,6 +145,11 @@ pub fn inferLiteralNodeTypes(
                 _ = try stack.append(allocator, bin.left);
                 _ = try stack.append(allocator, bin.right);
             },
+            .ConditionalExpression => |conditional| {
+                _ = try stack.append(allocator, conditional.condition);
+                _ = try stack.append(allocator, conditional.consequent);
+                _ = try stack.append(allocator, conditional.alternate);
+            },
             .UpdateExpression => |update_expr| {
                 _ = update_expr.operator;
                 _ = update_expr.prefix;
