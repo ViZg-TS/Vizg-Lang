@@ -15,11 +15,12 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - Exported C ABI entry points for file analysis, in-memory source analysis, and result cleanup: `vizg_analyze_file`, `vizg_analyze_source`, and `vizg_free_result`.
 - Memory-first analysis accepts source bytes and an optional diagnostic path without reading the filesystem.
 - C and Zig ABI examples for interop, diagnostic formatting, null-result handling, span validation, and token iteration under `example/`.
-- Runtime C smoke test and `lint-silent` structural check integrated into `zig build test`.
+- Portable `lint-silent` structural check integrated into `zig build test`, with runnable C consumer checks retained under `example/`.
+- Portable `zig build validate` step that installs artifacts, runs tests, and exercises the CLI without shell or `/tmp` dependencies.
 - Scanner validation for string and template escape sequences, including `\\xNN`, `\\uNNNN`, and trailing backslashes, with diagnostic `VZG1005 invalid_escape_sequence`.
 - Forward type-inference groundwork with bounded fixpoint iteration in `src/semantics/inference.zig`; this remains experimental and is not yet wired into the public semantics pipeline.
 - Development roadmap in `VIZG_PLAN.md` covering planned post-frontend phases.
-- `zig build android` target for aarch64, armv7, and x86_64 Android static libraries.
+- Android target-query and NDK-discovery helper coverage in `android.build.zig`.
 
 ### Changed
 
@@ -28,6 +29,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - Result lifecycle coverage now includes repeated allocation/free cycles, reverse-order cleanup, empty files, missing files, long paths, and in-memory sources.
 - The library is silent by default; tests reject unconditional `std.debug.print` calls in `Lib/`.
 - `zig build run -- <args>` forwards arguments to the development CLI.
+- The default build now installs `vizg`, `libvizg.a`, and `vizg.h`; shell validation and lint scripts are wrappers around Zig build steps.
 - Zig cache and generated example artifacts have broader `.gitignore` coverage.
 
 ### Fixed

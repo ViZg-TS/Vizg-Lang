@@ -32,9 +32,8 @@ The default build installs:
 ```txt
 zig-out/bin/vizg       development CLI
 zig-out/lib/libvizg.a  static library
+zig-out/include/vizg.h public C header
 ```
-
-The public header is installed by the test dependency chain at `zig-out/include/vizg.h`. Consumers may also include the source header directly from `Lib/vizg.h`.
 
 ## Test
 
@@ -42,7 +41,7 @@ The public header is installed by the test dependency chain at `zig-out/include/
 zig build test
 ```
 
-The test step runs the frontend, module graph, semantic, and ABI unit-test tree. It also rejects unconditional debug output in `Lib/`, compiles a C consumer against the installed header/archive, and runs that consumer as a smoke test.
+The test step runs the frontend, module graph, semantic, ABI, Android-helper, and portable structural checks. C and Zig consumer contract tests remain available under `example/`.
 
 ## Static Library And C ABI
 
@@ -77,26 +76,15 @@ cc -I Lib consumer.c -L zig-out/lib -lvizg -o consumer
 
 See `example/c/hello/` and `example/zig/consumer/` for complete consumers. The ABI exposes the current single-file frontend result; it does not expose the module graph, linker, or a runtime.
 
-## Android
-
-```sh
-zig build android
-```
-
-This cross-compiles the C ABI static library for Android `aarch64`, `armv7`,
-and `x86_64`, installing the archives under `zig-out/android/<abi>/libvizg.a`.
-
 ## Validation
 
-A repeatable validation script builds, runs tests, and exercises the CLI on a handful of fixtures. All output goes to `logs/validate-YYYYMMDD-HHMMSS.log`.
+A portable build step installs all public artifacts, runs the registered tests, and exercises the CLI:
 
 ```sh
-sh tools/validate.sh
-ls -lh logs/
-tail -n 80 logs/validate-*.log
+zig build validate
 ```
 
-The script exits non-zero if the build or tests fail.
+`tools/validate.sh` remains a convenience wrapper around that build step.
 
 ## CLI Examples
 

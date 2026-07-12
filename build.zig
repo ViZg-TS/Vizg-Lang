@@ -31,12 +31,14 @@ pub fn build(b: *std.Build) void {
     //       zig-out/lib/libvizg.a     ← library archive
     // -------------------------------------------------------------------
     const install_lib = b.addInstallArtifact(vizg_lib, .{});
+    const install_headers = b.addInstallHeaderFile(b.path("Lib/vizg.h"), "vizg.h");
 
     const lib_step = b.step("lib", "Build & install: zig-out/lib/libvizg.a");
     lib_step.dependOn(&install_lib.step);
 
     // Make `zig build` (default step) also produce the static archive.
     b.getInstallStep().dependOn(&install_lib.step);
+    b.getInstallStep().dependOn(&install_headers.step);
 
     // -------------------------------------------------------------------
     // 3. Run step — main executable (dev/testing only).
@@ -67,27 +69,18 @@ pub fn build(b: *std.Build) void {
     //    Unit tests are compiled with src/root.zig as root so all internal
     //    tests within `modules/`, `semantics/`, etc. get wired in.
     // -------------------------------------------------------------------
-    // 4a. Lint-silent: assert no unconditional std.debug.print in Lib/ (Goal-041).
-    const lint_silent = b.addSystemCommand(&[_][]const u8{ "bash", "-c", "./lint-silent.sh" });
+    // 4a. Portable structural checks implemented as Zig tests.
+    const lint_silent = b.addRunArtifact(b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("build_checks.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    }));
     const lint_silent_step = b.step("lint-silent", "Assert public library is silent by default (Goal-041)");
     lint_silent_step.dependOn(&lint_silent.step);
 
-    // 4b. C runtime smoke test: compile and run example/silent_test.c against libvizg.a;
-    //     asserts zero bytes land on stderr during a real API call.
-    const install_headers = b.addInstallHeaderFile(b.path("Lib/vizg.h"), "vizg.h");
-    install_headers.step.dependOn(&install_lib.step);
-
-    const cc_compile = b.addSystemCommand(&[_][]const u8{
-        "cc", "-Wall", "-Wextra", "-O2",
-        "-Izig-out/include", "example/silent_test.c",
-        "-Lzig-out/lib", "-lvizg", "-Wl,-z,noexecstack",
-        "-o", "/tmp/vizg-silent-test-exe",
-    });
-    cc_compile.step.dependOn(&install_headers.step);
-    const run_silent_c = b.addSystemCommand(&[_][]const u8{ "/tmp/vizg-silent-test-exe" });
-    run_silent_c.step.dependOn(&cc_compile.step);
-
-    // 4c. Final test step: run lint-silent first (structural), then tests (unit + ABI + silent runtime).
+    // 4b. Final test step: portable structural, unit, ABI, and helper tests.
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = lib_mod }));
     const android_helper_tests = b.addRunArtifact(b.addTest(.{
         .root_module = b.createModule(.{
@@ -100,6 +93,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(lint_silent_step);
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&android_helper_tests.step);
-    test_step.dependOn(&run_silent_c.step);
 
+    // 5. Portable validation: install public artifacts, run all tests, and
+    //    exercise argument forwarding through the CLI without shell helpers.
+    const validate_cli = b.addRunArtifact(main_exe);
+    validate_cli.addArgs(&.{ "check", "test/frontend/vizg_capabilities_test.ts" });
+
+    const validate_step = b.step("validate", "Install artifacts and run portable project checks");
+    validate_step.dependOn(b.getInstallStep());
+    validate_step.dependOn(test_step);
+    validate_step.dependOn(&validate_cli.step);
 }
