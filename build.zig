@@ -82,6 +82,16 @@ pub fn build(b: *std.Build) void {
 
     // 4b. Final test step: portable structural, unit, ABI, and helper tests.
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = lib_mod }));
+    const abi_lifecycle_mod = b.createModule(.{
+        .root_source_file = b.path("test/abi_lifecycle.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    abi_lifecycle_mod.linkLibrary(vizg_lib);
+    const abi_lifecycle_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = abi_lifecycle_mod,
+    }));
     const android_helper_tests = b.addRunArtifact(b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("android.build.zig"),
@@ -92,6 +102,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Compile & run all unit tests");
     test_step.dependOn(lint_silent_step);
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&abi_lifecycle_tests.step);
     test_step.dependOn(&android_helper_tests.step);
 
     // 5. Portable validation: install public artifacts, run all tests, and

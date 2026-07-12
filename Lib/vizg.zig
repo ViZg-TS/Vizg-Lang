@@ -371,20 +371,10 @@ pub const Vizg_Result = extern struct {
     diagnostics_ptr: [*c]Vizg_Diagnostic,
 };
 
-/// Per-result arena lookup: address of the Vizg_Result struct -> owning ArenaAllocator.
-const ResultArenaMap = std.AutoHashMap(usize, *std.heap.ArenaAllocator);
-var resultArenas: ?*ResultArenaMap = null;
-
-fn getOrCreateArenaMap() !*ResultArenaMap {
-    if (resultArenas == null) {
-        const m = try std.heap.page_allocator.create(ResultArenaMap);
-        m.* = ResultArenaMap.init(std.heap.page_allocator);
-        resultArenas = @ptrCast(m);
-    }
-    return resultArenas.?;
-}
-
-// Per-result ArenaAllocator handle (not part of the C ABI - see vizg.h).
+const OwnedResult = struct {
+    arena: *std.heap.ArenaAllocator,
+    result: Vizg_Result,
+};
 
 // ---------------------------------------------------------------------------
 // Internal helpers (Zig-ergonomics).  Called only from C ABI entry points.
@@ -450,7 +440,7 @@ fn readFileBytes(a_alloc: std.mem.Allocator, path: []const u8) ![]u8 {
 // empty values are permissible (caller contract).
 fn validateAbiPointerLen(
     _: [:0]const u8,
-    ptr: ?[*c]const u8,
+    ptr: [*c]const u8,
     len: usize,
 ) bool {
     return !(ptr == null and len > 0);
@@ -681,20 +671,13 @@ fn doAnalyze(
         owned_diags = darr;
     }
 
-    const result_uninit: [*]u8 = std.heap.page_allocator.rawAlloc(
-        @sizeOf(Vizg_Result),
-        std.mem.Alignment.fromByteUnits(@alignOf(Vizg_Result)),
-        @returnAddress(),
-    ) orelse return error.OutOfMemory;
-    errdefer std.heap.page_allocator.rawFree(
-        result_uninit[0..@sizeOf(Vizg_Result)],
-        std.mem.Alignment.fromByteUnits(@alignOf(Vizg_Result)),
-        @returnAddress(),
-    );
-    const result_ptr: *Vizg_Result = @ptrCast(@alignCast(result_uninit));
-    // Zero out all bytes of the extern struct — required so field pointers start as null.
-    for (std.mem.asBytes(result_ptr)) |*b| b.* = 0;
-    const result: *Vizg_Result = result_ptr;
+    const owned = try std.heap.page_allocator.create(OwnedResult);
+    errdefer std.heap.page_allocator.destroy(owned);
+    owned.* = .{
+        .arena = arena_owner,
+        .result = std.mem.zeroes(Vizg_Result),
+    };
+    const result = &owned.result;
     result.token_count = @intCast(fr.tokens.len);
     result.diagnostic_count = @intCast(fr.diagnostics.len);
     if (fr.tokens.len > 0) {
@@ -703,13 +686,6 @@ fn doAnalyze(
     if (fr.diagnostics.len > 0) {
         result.diagnostics_ptr = owned_diags.ptr;
     }
-
-    // Register: address of result struct -> owning ArenaAllocator.  Lookup
-    // happens in Vizg_freeResult, so the map must persist for the lifetime
-    // of any result still alive to free(). If map growth fails, roll back —
-    // the arena is leaked otherwise since Vizg_freeResult can't find it.
-    const m = try getOrCreateArenaMap();
-    try m.put(@intFromPtr(result), arena_owner);
 
     return result;
 }
@@ -816,22 +792,10 @@ pub fn Vizg_analyzeSourceEx(
 
 pub fn Vizg_freeResult(result: ?*Vizg_Result) callconv(.c) void {
     if (result == null) return;
-    const r = result.?;
-    // Look up the arena that owns all allocations backing this result and
-    // deinit it — releases tokens, diagnostics, lexeme/path strings.
-    if (resultArenas) |m| {
-        const arena_ptr = m.get(@intFromPtr(r));
-        if (arena_ptr) |ap| {
-            ap.deinit();
-            std.heap.page_allocator.destroy(ap);
-        }
-        _ = m.remove(@intFromPtr(r));
-    }
-    // Free the result struct memory itself — matched to rawAlloc above so we
-    // release back into page_allocator's heap arena correctly.
-    const pa = std.heap.page_allocator;
-    const mem: []u8 = @ptrCast(@alignCast(std.mem.asBytes(r)));
-    pa.rawFree(mem, std.mem.Alignment.fromByteUnits(@alignOf(Vizg_Result)), @returnAddress());
+    const owned: *OwnedResult = @fieldParentPtr("result", result.?);
+    owned.arena.deinit();
+    std.heap.page_allocator.destroy(owned.arena);
+    std.heap.page_allocator.destroy(owned);
 }
 
 // ---------------------------------------------------------------------------

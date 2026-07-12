@@ -21,6 +21,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - Forward type-inference groundwork with bounded fixpoint iteration in `src/semantics/inference.zig`; this remains experimental and is not yet wired into the public semantics pipeline.
 - Development roadmap in `VIZG_PLAN.md` covering planned post-frontend phases.
 - Android target-query and NDK-discovery helper coverage in `android.build.zig`.
+- Foreign-caller C ABI tests covering source analysis, invalid arguments, result lifecycles, and parallel use.
 
 ### Changed
 
@@ -31,6 +32,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - `zig build run -- <args>` forwards arguments to the development CLI.
 - The default build now installs `vizg`, `libvizg.a`, and `vizg.h`; shell validation and lint scripts are wrappers around Zig build steps.
 - Zig cache and generated example artifacts have broader `.gitignore` coverage.
+- C ABI results now carry independent ownership metadata without shared global lifecycle state.
 
 ### Fixed
 
