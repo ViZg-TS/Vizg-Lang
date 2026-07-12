@@ -172,6 +172,10 @@ const Binder = struct {
                 if (return_stmt.argument) |expression| try self.bindNode(expression, scope);
             },
             .ExpressionStatement => |statement| try self.bindNode(statement.expression, scope),
+            .TemplateExpression => |template| {
+                for (template.parts) |part| if (part.expression) |expression| try self.bindNode(expression, scope);
+            },
+            .RegExpLiteral => {},
             .CallExpression => |call| {
                 try self.bindNode(call.callee, scope);
                 for (call.arguments) |arg| try self.bindNode(arg, scope);
@@ -181,6 +185,7 @@ const Binder = struct {
                 try self.bindNode(elem_access.index, scope);
             },
             .NonNullExpression => |nonnull| try self.bindNode(nonnull.expression, scope),
+            .UnaryExpression => |unary| try self.bindNode(unary.argument, scope),
             .MemberExpression => |member| try self.bindNode(member.object, scope),
             .BinaryExpression => |binary| {
                 try self.bindNode(binary.left, scope);
