@@ -174,6 +174,8 @@ pub const Vizg_DiagnosticCode = enum(c_int) {
     TypeMismatch,
     ParseRecursionLimitReached,
     InvalidEscapeSequence = 15,
+    UnterminatedRegExp,
+    InvalidRegExp,
 };
 
 pub const Vizg_DiagnosticPhase = enum(c_int) {
@@ -279,6 +281,8 @@ fn toVizgDiagnosticCode(v: diagnostics_mod.DiagnosticCode) Vizg_DiagnosticCode {
         .type_mismatch => .TypeMismatch,
         .parse_recursion_limit_reached => .ParseRecursionLimitReached,
         .invalid_escape_sequence => .InvalidEscapeSequence,
+        .unterminated_regexp => .UnterminatedRegExp,
+        .invalid_regexp => .InvalidRegExp,
     };
 }
 
