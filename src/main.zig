@@ -348,6 +348,12 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, expr.left, depth + 1);
             try printAstNode(writer, tree, expr.right, depth + 1);
         },
+        .ConditionalExpression => |expr| {
+            try writer.print("ConditionalExpression #{} condition=#{} consequent=#{} alternate=#{} {}..{}\n", .{ node_id, expr.condition, expr.consequent, expr.alternate, node.span.start, node.span.end });
+            try printAstNode(writer, tree, expr.condition, depth + 1);
+            try printAstNode(writer, tree, expr.consequent, depth + 1);
+            try printAstNode(writer, tree, expr.alternate, depth + 1);
+        },
         .UpdateExpression => |expr| {
             const prefix_tag: []const u8 = if (expr.prefix) "Prefix" else "Postfix";
             try writer.print("UpdateExpression #{} {s} operator={s} argument=#{} {}..{}\n", .{ node_id, prefix_tag, @tagName(expr.operator), expr.argument, node.span.start, node.span.end });
@@ -1040,6 +1046,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .AsExpression => return "AsExpression",
         .MemberExpression => return "MemberExpression",
         .BinaryExpression => return "BinaryExpression",
+        .ConditionalExpression => return "ConditionalExpression",
         .UpdateExpression => return "UpdateExpression",
         .AssignmentExpression => return "AssignmentExpression",
         .IfStatement => return "IfStatement",
