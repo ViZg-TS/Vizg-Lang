@@ -11,16 +11,13 @@ pub const TypeId = u32;
 pub const invalid_type: TypeId = std.math.maxInt(TypeId);
 
 /// Reserved numeric ranges across every TypeId space:
-///   - 0..99       reserved (unallocated as of now; kept for future builtins)
-///   - 100..199    builtin primitives via `builtin_kind.builtinKindTypeId`
-///                 (`base=100 + @intFromEnum(kind)` in builtin.zig:37).
+///   - 0..99       reserved
+///   - 100..199    builtin types allocated by one `Builtins` registry
 ///   - 200..999    reserved for future builtins or extensions (no consumer yet)
 ///   - >= 1000     user-defined function signatures via `FunctionSignatureStore`
 ///                 (`next_user_type_id + index`, see model.zig:110).
-
 /// Builtins and user signatures must never overlap — the lookup at line 137 relies
 ///   on `sig_id < next_user_type_id` to distinguish the two kinds cheaply.
-
 /// Start of reserved TypeId range for FunctionSignatureStore (user-defined function signatures).
 pub const next_user_type_id: TypeId = 1000;
 
@@ -36,6 +33,57 @@ const invalid_function_signature: FunctionSignatureId = std.math.maxInt(Function
 pub const ParameterType = struct {
     name: []const u8,
     type_id: TypeId,
+    optional: bool = false,
+    has_default: bool = false,
+    rest: bool = false,
+};
+
+pub const FunctionFlags = packed struct {
+    is_async: bool = false,
+    is_generator: bool = false,
+    is_constructor: bool = false,
+};
+
+pub const LiteralValue = union(enum) {
+    boolean: bool,
+    number: f64,
+    bigint: []const u8,
+    string: []const u8,
+};
+
+pub const ObjectProperty = struct {
+    name: []const u8,
+    type_id: TypeId,
+    optional: bool = false,
+    readonly: bool = false,
+};
+
+pub const ArrayType = struct {
+    element_type: TypeId,
+    readonly: bool = false,
+};
+
+pub const TupleElement = struct {
+    type_id: TypeId,
+    optional: bool = false,
+    hole: bool = false,
+};
+
+pub const TupleType = struct {
+    elements: []const TupleElement,
+    readonly: bool = false,
+};
+
+pub const NominalType = struct {
+    declaration_id: u32,
+    name: []const u8,
+};
+
+pub const TypeParameterType = struct {
+    declaration_id: u32,
+    name: []const u8,
+    constraint: ?TypeId = null,
+    default: ?TypeId = null,
 };
 
 /// Complete signature of a typed function. Stored as an opaque blob; the caller
@@ -44,10 +92,27 @@ pub const FunctionSignature = struct {
     id: FunctionSignatureId,
     parameters: []const ParameterType,
     return_type: TypeId,
+    type_parameter_count: u32 = 0,
+    flags: FunctionFlags = .{},
 
     /// Number of declared parameters.
     pub fn parameterCount(self: FunctionSignature) usize {
         return self.parameters.len;
+    }
+
+    pub fn requiredParameterCount(self: FunctionSignature) usize {
+        var count: usize = 0;
+        for (self.parameters) |parameter| {
+            if (parameter.optional or parameter.has_default or parameter.rest) break;
+            count += 1;
+        }
+        return count;
+    }
+
+    pub fn acceptsArgumentCount(self: FunctionSignature, count: usize) bool {
+        if (count < self.requiredParameterCount()) return false;
+        const has_rest = self.parameters.len != 0 and self.parameters[self.parameters.len - 1].rest;
+        return has_rest or count <= self.parameters.len;
     }
 
     test "FunctionSignature.parameterCount returns correct count" {
@@ -71,6 +136,9 @@ pub const FunctionSignature = struct {
     }
 };
 
+pub const PromiseType = struct { value_type: TypeId };
+pub const GeneratorType = struct { yield_type: TypeId, return_type: TypeId };
+
 // ---------------------------------------------------------------------------
 // TypeKind — the discriminated union of every type in the model.
 // ---------------------------------------------------------------------------
@@ -81,8 +149,19 @@ pub const TypeKind = union(enum) {
 
     /// A function signature identified by its declared id.
     function: FunctionSignatureId,
+    promise: PromiseType,
+    generator: GeneratorType,
+    literal: LiteralValue,
+    union_type: []const TypeId,
+    intersection: []const TypeId,
+    array: ArrayType,
+    tuple: TupleType,
+    object: []const ObjectProperty,
+    class: NominalType,
+    interface: NominalType,
+    enum_type: NominalType,
+    type_parameter: TypeParameterType,
 };
-
 
 // ---------------------------------------------------------------------------
 // FunctionSignatureStore — arena-owned container for every function signature
@@ -167,13 +246,14 @@ test "FunctionSignatureStore.add allocates a fresh signature" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const x_param = ParameterType{ .name = "x", .type_id = builtin_instance.number };
-    const y_param = ParameterType{ .name = "y", .type_id = builtin_instance.string };
-    const params: []const ParameterType = &.{x_param, y_param};
+    const b = Builtins.init();
+    const x_param = ParameterType{ .name = "x", .type_id = b.number };
+    const y_param = ParameterType{ .name = "y", .type_id = b.string };
+    const params: []const ParameterType = &.{ x_param, y_param };
 
     var store = FunctionSignatureStore.init(arena.allocator());
 
-    const sig_id = try store.add(params, builtin_instance.boolean);
+    const sig_id = try store.add(params, b.boolean);
     try testing.expect(sig_id >= next_user_type_id);
 
     // The store should now report one entry and the lookup should return a matching signature.
@@ -182,9 +262,9 @@ test "FunctionSignatureStore.add allocates a fresh signature" {
     try testing.expect(std.mem.eql(u8, "x", found.parameters[0].name));
 
     // Verify the parameter types are also captured correctly.
-    try testing.expectEqual(builtin_instance.number, found.parameters[0].type_id);
+    try testing.expectEqual(b.number, found.parameters[0].type_id);
     try testing.expectEqualStrings("y", found.parameters[1].name);
-    try testing.expectEqual(builtin_instance.string, found.parameters[1].type_id);
+    try testing.expectEqual(b.string, found.parameters[1].type_id);
 
     // The arena is still alive through `arena` — signature data should not be dropped.
 }
@@ -196,7 +276,8 @@ test "FunctionSignatureStore.count reflects additions" {
     var store = FunctionSignatureStore.init(arena.allocator());
     try testing.expectEqual(@as(usize, 0), store.count());
 
-    _ = try store.add(&[_]ParameterType{}, builtin_kind.builtinKindTypeId(.number));
+    const b = Builtins.init();
+    _ = try store.add(&[_]ParameterType{}, b.number);
     try testing.expectEqual(@as(usize, 1), store.count());
 }
 
@@ -205,7 +286,8 @@ test "FunctionSignatureStore.lookup returns null for missing id" {
     defer arena.deinit();
 
     var store = FunctionSignatureStore.init(arena.allocator());
-    _ = try store.add(&[_]ParameterType{}, builtin_kind.builtinKindTypeId(.number));
+    const b = Builtins.init();
+    _ = try store.add(&[_]ParameterType{}, b.number);
 
     // Ids in the builtin range (100-199) must not collide with user signatures.
     try testing.expect(store.lookup(next_user_type_id - 1) == null);
@@ -230,7 +312,7 @@ pub const Type = struct {
     pub fn matchesPrimitive(self: Type, expected: builtin_kind.BuiltinKind) bool {
         return switch (self.kind) {
             .primitive => |b| b == expected,
-            .function => false,
+            else => false,
         };
     }
 
@@ -241,28 +323,42 @@ pub const Type = struct {
         return switch (self.kind) {
             .primitive => |k| builtin_kind.builtinKindName(k),
             .function => "function",
+            .promise => "Promise",
+            .generator => "Generator",
+            .literal => "literal",
+            .union_type => "union",
+            .intersection => "intersection",
+            .array => "array",
+            .tuple => "tuple",
+            .object => "object",
+            .class => "class",
+            .interface => "interface",
+            .enum_type => "enum",
+            .type_parameter => "type parameter",
         };
     }
 
     test "Type.isFunction distinguishes kinds" {
+        const b = Builtins.init();
         var t_fn: Type = undefined;
         t_fn.id = 500;
         t_fn.kind = .{ .function = @as(u32, 1) };
         try testing.expect(t_fn.isFunction());
 
         var t_prim: Type = undefined;
-        t_prim.id = builtin_kind.builtinKindTypeId(.number);
+        t_prim.id = b.number;
         t_prim.kind = .{ .primitive = .number };
         try testing.expect(!t_prim.isFunction());
     }
 
     test "Type.matchesPrimitive compares by kind" {
+        const b = Builtins.init();
         var t_num: Type = undefined;
-        t_num.id = builtin_kind.builtinKindTypeId(.number);
+        t_num.id = b.number;
         t_num.kind = .{ .primitive = .number };
 
         var t_str: Type = undefined;
-        t_str.id = builtin_kind.builtinKindTypeId(.string);
+        t_str.id = b.string;
         t_str.kind = .{ .primitive = .string };
 
         try testing.expect(t_num.matchesPrimitive(.number));
@@ -286,44 +382,76 @@ pub const Type = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Builtins — the "stable" helper that gives external callers a single entry
-// point for looking up built-in primitives by kind. Keeping this here rather
-// than in `builtins.builtin_kind.zig` makes it easy to later extend with user-
-// defined function lookups without moving the builtin kinds themselves.
+// Builtins — one canonical registry per semantic context.
 // ---------------------------------------------------------------------------
 
 pub const Builtins = struct {
-    number: TypeId,
-    string: TypeId,
-    boolean: TypeId,
-    null_: TypeId,
-    undefined: TypeId,
-    void: TypeId,
-    unknown: TypeId,
     any: TypeId,
-};
+    unknown: TypeId,
+    never: TypeId,
+    void: TypeId,
+    undefined: TypeId,
+    null_: TypeId,
+    boolean: TypeId,
+    number: TypeId,
+    bigint: TypeId,
+    string: TypeId,
+    symbol: TypeId,
+    object: TypeId,
+    records: [builtin_kind.builtinKinds.len]Type,
 
-/// Precomputed builtins instance — idempotent because builtin ids are stable.
-pub const builtin_instance = Builtins{
-    .number = builtin_kind.builtinKindTypeId(.number),
-    .string = builtin_kind.builtinKindTypeId(.string),
-    .boolean = builtin_kind.builtinKindTypeId(.boolean),
-    .null_ = builtin_kind.builtinKindTypeId(.null_),
-    .undefined = builtin_kind.builtinKindTypeId(.undefined),
-    .void = builtin_kind.builtinKindTypeId(.void),
-    .unknown = builtin_kind.builtinKindTypeId(.unknown),
-    .any = builtin_kind.builtinKindTypeId(.any),
-};
+    const first_id: TypeId = 100;
 
-/// Factory for a fresh Builtins instance. Always returns the same ids since the
-/// underlying mapping is deterministic by design; kept as a function so future
-/// work (e.g., per-file builtins) could parameterize it.
-pub fn builtins() Builtins {
-    return builtin_instance;
-}
+    pub fn init() Builtins {
+        var result: Builtins = undefined;
+        for (builtin_kind.builtinKinds, 0..) |kind, index| {
+            const type_id = first_id + @as(TypeId, @intCast(index));
+            result.records[index] = .{ .id = type_id, .kind = .{ .primitive = kind } };
+            switch (kind) {
+                .any => result.any = type_id,
+                .unknown => result.unknown = type_id,
+                .never => result.never = type_id,
+                .void => result.void = type_id,
+                .undefined => result.undefined = type_id,
+                .null_ => result.null_ = type_id,
+                .boolean => result.boolean = type_id,
+                .number => result.number = type_id,
+                .bigint => result.bigint = type_id,
+                .string => result.string = type_id,
+                .symbol => result.symbol = type_id,
+                .object => result.object = type_id,
+            }
+        }
+        return result;
+    }
+
+    /// Type equality inside one semantic context is constant-time TypeId equality.
+    pub fn id(self: *const Builtins, kind: builtin_kind.BuiltinKind) TypeId {
+        return self.records[@intFromEnum(kind)].id;
+    }
+
+    pub fn lookup(self: *const Builtins, type_id: TypeId) ?*const Type {
+        if (type_id < first_id) return null;
+        const index = @as(usize, @intCast(type_id - first_id));
+        if (index >= self.records.len) return null;
+        return &self.records[index];
+    }
+
+    pub fn kindFor(self: *const Builtins, type_id: TypeId) ?builtin_kind.BuiltinKind {
+        const ty = self.lookup(type_id) orelse return null;
+        return switch (ty.kind) {
+            .primitive => |kind| kind,
+            else => null,
+        };
+    }
+};
 
 test "builtins exist" {
-    const b = builtin_instance;
+    const b = Builtins.init();
+    _ = b.never;
+    _ = b.bigint;
+    _ = b.symbol;
+    _ = b.object;
     _ = b.number;
     _ = b.string;
     _ = b.boolean;
@@ -335,8 +463,8 @@ test "builtins exist" {
 }
 
 test "builtin ids are stable" {
-    const a = builtin_instance;
-    const b = builtins(); // factory call for comparison
+    const a = Builtins.init();
+    const b = Builtins.init();
 
     try testing.expectEqual(a.number, b.number);
     try testing.expectEqual(a.string, b.string);
@@ -349,53 +477,39 @@ test "builtin ids are stable" {
 }
 
 test "builtins ids are distinct" {
-    const b = builtin_instance;
+    const b = Builtins.init();
     // Every built-in must resolve to a different numeric id — otherwise lookup by
     // TypeId would be ambiguous.
-    inline for (builtin_kind.builtinKinds_static) |kind| {
-        const other_id = builtin_kind.builtinKindTypeId(kind);
-        var seen: u8 = 0;
-        inline for (.{b.number, b.string, b.boolean, b.null_,
-                     b.undefined, b.void, b.unknown, b.any}) |candidate| {
-            if (other_id == candidate) seen += 1;
+    for (builtin_kind.builtinKinds, 0..) |kind, index| {
+        try testing.expectEqual(b.id(kind), b.records[index].id);
+        for (b.records, 0..) |candidate, candidate_index| {
+            if (index != candidate_index) try testing.expect(b.id(kind) != candidate.id);
         }
-        try testing.expectEqual(@as(u8, 1), seen);
     }
 }
 
 test "primitive lookup by kind works" {
-    for (builtin_kind.builtinKinds_static) |kind| {
-        const id = builtin_kind.builtinKindTypeId(kind);
-        var t: Type = undefined;
-        t.id = id;
-        t.kind = .{ .primitive = kind };
-
-        // The displayName test covers one direction; here we confirm the reverse.
-        switch (kind) {
-            .number => try testing.expect(t.matchesPrimitive(.number)),
-            .string => try testing.expect(t.matchesPrimitive(.string)),
-            .boolean => try testing.expect(t.matchesPrimitive(.boolean)),
-            .null_ => try testing.expect(t.matchesPrimitive(.null_)),
-            .undefined => try testing.expect(t.matchesPrimitive(.undefined)),
-            .void => try testing.expect(t.matchesPrimitive(.void)),
-            .unknown => try testing.expect(t.matchesPrimitive(.unknown)),
-            .any => try testing.expect(t.matchesPrimitive(.any)),
-        }
+    const b = Builtins.init();
+    for (builtin_kind.builtinKinds) |kind| {
+        const t = b.lookup(b.id(kind)).?;
+        try testing.expect(t.matchesPrimitive(kind));
+        try testing.expectEqual(kind, b.kindFor(t.id).?);
     }
 }
 
 test "function signature can be constructed" {
-    const param_a = ParameterType{ .name = "x", .type_id = builtin_instance.number };
-    const param_b = ParameterType{ .name = "y", .type_id = builtin_instance.string };
-    const params: []const ParameterType = &.{param_a, param_b};
+    const b = Builtins.init();
+    const param_a = ParameterType{ .name = "x", .type_id = b.number };
+    const param_b = ParameterType{ .name = "y", .type_id = b.string };
+    const params: []const ParameterType = &.{ param_a, param_b };
 
     var sig: FunctionSignature = undefined;
     sig.id = next_user_type_id; // reserved range, no collision with builtins
     sig.parameters = params;
-    sig.return_type = builtin_instance.boolean;
+    sig.return_type = b.boolean;
 
     try testing.expectEqual(@as(usize, 2), sig.parameterCount());
-    try testing.expectEqual(builtin_instance.number, param_a.type_id);
+    try testing.expectEqual(b.number, param_a.type_id);
     try testing.expectEqualStrings("x", param_a.name);
 
     const fn_type = Type{ .id = sig.id, .kind = .{ .function = sig.id } };
