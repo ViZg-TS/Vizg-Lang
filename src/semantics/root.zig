@@ -210,7 +210,7 @@ pub fn analyzeSource(
     };
     const fe = try frontend.analyze(allocator, owned_source, options);
     var type_store = types.TypeStore.init(allocator);
-    const info = try buildTypeInfo(allocator, fe, &type_store, true);
+    const info = try buildTypeInfo(allocator, @as(modules_mod.ModuleId, 0), fe, &type_store, true);
 
     const syntax_diags = try selectDiagnostics(allocator, fe.diagnostics, true, owned_source.path);
     const frontend_semantic_diags = try selectDiagnostics(allocator, fe.diagnostics, false, owned_source.path);
@@ -275,7 +275,7 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
         try project_modules.append(allocator, .{
             .id = module.id,
             .path = module.display_path,
-            .type_info = try buildTypeInfo(allocator, module.result, &type_store, false),
+            .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false),
         });
     }
 
@@ -593,7 +593,7 @@ fn hasUnresolvedLinks(imports: []const SemanticImport) bool {
     return false;
 }
 
-fn buildTypeInfo(allocator: std.mem.Allocator, result: frontend.FrontendResult, type_store: *types.TypeStore, run_checker: bool) !TypeInfo {
+fn buildTypeInfo(allocator: std.mem.Allocator, module_id: modules_mod.ModuleId, result: frontend.FrontendResult, type_store: *types.TypeStore, run_checker: bool) !TypeInfo {
     const builtins = &type_store.builtins;
     var symbol_types: std.ArrayList(SymbolTypeInfo) = .empty;
     var node_types: std.ArrayList(NodeTypeInfo) = .empty;
@@ -642,9 +642,9 @@ fn buildTypeInfo(allocator: std.mem.Allocator, result: frontend.FrontendResult, 
                     symbol_types.items,
                     symbol.declaration,
                 ) orelse try type_store.intern(switch (symbol.kind) {
-                    .class => .{ .class = .{ .declaration_id = symbol.declaration, .name = symbol.name } },
-                    .interface => .{ .interface = .{ .declaration_id = symbol.declaration, .name = symbol.name } },
-                    .enum_ => .{ .enum_type = .{ .declaration_id = symbol.declaration, .name = symbol.name } },
+                    .class => .{ .class = .{ .module_id = module_id, .declaration_id = symbol.declaration, .name = symbol.name } },
+                    .interface => .{ .interface = .{ .module_id = module_id, .declaration_id = symbol.declaration, .name = symbol.name } },
+                    .enum_ => .{ .enum_type = .{ .module_id = module_id, .declaration_id = symbol.declaration, .name = symbol.name } },
                     else => unreachable,
                 });
             },

@@ -9,7 +9,15 @@ pub const TypeStore = struct {
     
     /// Maps declaration_id (== NominalType.declaration_id) to ClassSemanticModel.
     /// Populated during class analysis; used by member access lookup and constructor typing.
-    class_models: std.AutoHashMap(u32, model.ClassSemanticModel),
+    /// Identity key used to lookup ClassSemanticModel entries. Includes both module_id (graph module source)
+    /// and the local declaration NodeId so two declarations with the same name/NodeId in different modules
+    /// never collide inside one TypeStore.
+    class_models: std.AutoHashMap(SemanticDeclKey, model.ClassSemanticModel),
+
+    const SemanticDeclKey = struct {
+        module_id: ?u32,
+        declaration_id: u32,
+    };
 
     const StoredType = struct {
         id: model.TypeId,
@@ -22,7 +30,7 @@ pub const TypeStore = struct {
             .builtins = model.Builtins.init(),
             .records = .empty,
             .signatures = .empty,
-            .class_models = std.AutoHashMap(u32, model.ClassSemanticModel).init(allocator),
+            .class_models = std.AutoHashMap(SemanticDeclKey, model.ClassSemanticModel).init(allocator),
         };
     }
 
@@ -45,8 +53,7 @@ pub const TypeStore = struct {
     /// Store semantic model for a class declaration. Called during class analysis 
     /// to populate field and method information for later member access lookups.
     pub fn storeClassSemanticModel(self: *TypeStore, model_: model.ClassSemanticModel) !void {
-        const decl_id = model_.declaration_id;
-        try self.class_models.put(decl_id, model_);
+        try self.class_models.put(TypeStore.SemanticDeclKey{ .module_id = model_.module_id, .declaration_id = model_.declaration_id }, model_);
     }
 
     /// Store semantic model for an interface declaration. Called during interface analysis.
@@ -71,7 +78,7 @@ pub const TypeStore = struct {
             .methods = &.{},  // interfaces don't have implementations
             .constructor_signature = null,
         };
-        try self.class_models.put(decl_id, synthesized);
+        try self.class_models.put(TypeStore.SemanticDeclKey{ .module_id = synthesized.module_id, .declaration_id = synthesized.declaration_id }, synthesized);
     }
 
     /// Look up a field type from a class instance by name. Returns null if not found.
@@ -85,7 +92,7 @@ pub const TypeStore = struct {
         };
         
         // Look up stored class model by declaration_id
-        if (self.class_models.get(nominal.declaration_id)) |model_| {
+        if (self.class_models.get(TypeStore.SemanticDeclKey{ .module_id = nominal.module_id, .declaration_id = nominal.declaration_id })) |model_| {
             for (model_.fields) |field| {
                 if (std.mem.eql(u8, field.name, field_name)) return field.type_id;
             }
@@ -102,7 +109,7 @@ pub const TypeStore = struct {
             else => return null,
         };
         
-        if (self.class_models.get(nominal.declaration_id)) |model_| {
+        if (self.class_models.get(TypeStore.SemanticDeclKey{ .module_id = nominal.module_id, .declaration_id = nominal.declaration_id })) |model_| {
             for (model_.methods) |method| {
                 if (std.mem.eql(u8, method.name, method_name)) return method.signature_id;
             }
@@ -313,7 +320,7 @@ pub const TypeStore = struct {
     }
 
     fn cloneNominal(self: *TypeStore, nominal: model.NominalType) !model.NominalType {
-        return .{ .declaration_id = nominal.declaration_id, .name = try self.allocator.dupe(u8, nominal.name) };
+        return .{ .module_id = nominal.module_id, .declaration_id = nominal.declaration_id, .name = try self.allocator.dupe(u8, nominal.name) };
     }
 };
 
@@ -373,9 +380,9 @@ fn kindsEqual(left: model.TypeKind, right: model.TypeKind) bool {
         .generator => |value| value.yield_type == right.generator.yield_type and value.return_type == right.generator.return_type,
         .tuple => |value| tupleEqual(value, right.tuple),
         .object => |value| propertiesEqual(value, right.object),
-        .class => |value| value.declaration_id == right.class.declaration_id,
-        .interface => |value| value.declaration_id == right.interface.declaration_id,
-        .enum_type => |value| value.declaration_id == right.enum_type.declaration_id,
+        .class => |value| value.module_id == right.class.module_id and value.declaration_id == right.class.declaration_id,
+        .interface => |value| value.module_id == right.interface.module_id and value.declaration_id == right.interface.declaration_id,
+        .enum_type => |value| value.module_id == right.enum_type.module_id and value.declaration_id == right.enum_type.declaration_id,
         .type_parameter => |value| value.declaration_id == right.type_parameter.declaration_id,
     };
 }
@@ -433,6 +440,47 @@ test "TypeStore owns every required shape and interns structural types" {
     try std.testing.expectEqual(array, try store.intern(.{ .array = .{ .element_type = b.number } }));
     try std.testing.expect(store.lookupFunction(function) != null);
 }
+
+test "Cross-module NominalType with same local NodeId but different module_id is not interned to same TypeId" {
+    // Goal 136 regression: two declarations sharing a local declaration_id in 
+    // distinct graph modules must NOT collapse into one nominal identity. The 
+    // equality code compares both module_id and declaration_id (kindsEqual branch);
+    // the map key for class_models is now SemanticDeclKey (module_id + declaration_id).
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+
+    const a_decl = try store.intern(.{ .class = .{ .module_id = 1, .declaration_id = 42, .name = "Node" } });
+    const b_decl = try store.intern(.{ .class = .{ .module_id = 2, .declaration_id = 42, .name = "Node" } });
+
+    // Same local NodeId (42) but different graph modules -> distinct TypeIds.
+    try std.testing.expect(a_decl != b_decl);
+
+    // kindsEqual must distinguish by module_id+declaration_id — the actual 
+    // cross-module isolation guarantee (intern skips nominal dedup so we 
+    // assert on equality directly, not on intern identity).
+    const a_key: model.TypeKind = .{ .class = .{ .module_id = 1, .declaration_id = 42, .name = "Node" } };
+    const b_key: model.TypeKind = .{ .class = .{ .module_id = 2, .declaration_id = 42, .name = "Node" } };
+    try std.testing.expect(kindsEqual(a_key, a_key));           // same -> equal
+    try std.testing.expect(!kindsEqual(a_key, b_key));          // diff module -> not equal
+
+    // Cross-module lookup: ClassSemanticModel stored under key (1, 42) must NOT 
+    // shadow or be reachable via key (2, 42). The class_models map is keyed by 
+    // SemanticDeclKey { module_id, declaration_id }, so two modules can coexist.
+    try store.storeClassSemanticModel(.{ .declaration_id = 42, .module_id = 1, .name = "Node", .fields = &.{}, .methods = &.{} });
+    const got_a = store.class_models.get(TypeStore.SemanticDeclKey{ .module_id = 1, .declaration_id = 42 }) orelse unreachable;
+    try std.testing.expect(std.mem.eql(u8, got_a.name, "Node"));
+
+    // Same local NodeId in module 2 is a separate entry.
+    const got_b = store.class_models.get(TypeStore.SemanticDeclKey{ .module_id = 2, .declaration_id = 42 }) orelse null;
+    try std.testing.expect(got_b == null); // not yet stored under key (2, 42)
+
+    try store.storeClassSemanticModel(.{ .declaration_id = 42, .module_id = 2, .name = "Node", .fields = &.{}, .methods = &.{} });
+    const got_b_now = store.class_models.get(TypeStore.SemanticDeclKey{ .module_id = 2, .declaration_id = 42 }) orelse unreachable;
+    try std.testing.expect(std.mem.eql(u8, got_b_now.name, "Node"));
+}
+
+
 
 test "TypeStore normalization and propagation rules are deterministic" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
