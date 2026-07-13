@@ -35,8 +35,13 @@ Across the C ABI, diagnostic messages and paths are pointer/length pairs. Consum
 | `VZG1005` | `invalid_escape_sequence` | scanner | Invalid or incomplete string/template escape sequence. |
 | `VZG1006` | `unterminated_regexp` | scanner | RegExp literal did not terminate. |
 | `VZG1007` | `invalid_regexp` | scanner | RegExp literal contains invalid or duplicate flags. |
+| `VZG1008` | `invalid_utf8` | scanner | Source text is not valid UTF-8. |
 | `VZG2001` | `unexpected_token` | parser | Token was not valid in the current parse position. |
 | `VZG2002` | `expected_token` | parser | Parser expected a specific token. |
+| `VZG2003` | `parse_recursion_limit_reached` | parser | Configured parser recursion limit was reached. |
+| `VZG2004` | `unsupported_syntax` | parser | Recognized JavaScript syntax is intentionally unsupported. |
+| `VZG2005` | `unsupported_ts_syntax` | parser | Recognized TypeScript syntax is intentionally unsupported. |
+| `VZG2006` | `unsupported_jsx` | parser | Recognized JSX or TSX syntax is intentionally unsupported. |
 | `VZG3001` | `duplicate_declaration` | binder | Scope already contains a declaration with that name. |
 | `VZG3002` | `duplicate_export` | binder | Module already exports that name. |
 | `VZG4001` | `cannot_find_name` | resolver | Identifier reference did not resolve to a symbol. |
@@ -75,6 +80,11 @@ The diagnostic phase enum includes:
 - `internal`
 
 Scanner, parser, binder, resolver, and module graph currently produce normal diagnostics. Other phase names are reserved so stable diagnostic shape can survive new layers.
+
+Unsupported-syntax diagnostics point at the construct that selected the
+unsupported grammar path. The parser skips to that construct's statement,
+member, or type boundary so later statements can still be analyzed without a
+cascade of generic token errors.
 
 ## Labels, Notes, And Hints
 
