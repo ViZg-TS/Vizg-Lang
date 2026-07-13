@@ -1,0 +1,10 @@
+import "polyfill";
+import primary, { named as local, type Shape } from "pkg";
+import * as namespace from "pkg";
+import type { Model } from "types";
+export const value = local;
+export default primary;
+export { local as renamed };
+export { remote as forwarded } from "other";
+export * from "all";
+export type { Model };

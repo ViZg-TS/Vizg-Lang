@@ -56,6 +56,10 @@ extern fn vizg_c_alignof_Vizg_Status() usize;
 
 extern fn vizg_c_value_severity_hint() c_int;
 extern fn vizg_c_value_diag_invalid_escape() c_int;
+extern fn vizg_c_value_diag_invalid_utf8() c_int;
+extern fn vizg_c_value_diag_unsupported_syntax() c_int;
+extern fn vizg_c_value_diag_unsupported_ts_syntax() c_int;
+extern fn vizg_c_value_diag_unsupported_jsx() c_int;
 extern fn vizg_c_value_phase_internal() c_int;
 extern fn vizg_c_value_token_invalid() c_int;
 extern fn vizg_c_value_token_identifier() c_int;
@@ -119,6 +123,10 @@ test "C and Zig public enum representations and values match" {
 
     try std.testing.expectEqual(@intFromEnum(abi.Vizg_Severity.Hint), vizg_c_value_severity_hint());
     try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.InvalidEscapeSequence), vizg_c_value_diag_invalid_escape());
+    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.InvalidUtf8), vizg_c_value_diag_invalid_utf8());
+    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.UnsupportedSyntax), vizg_c_value_diag_unsupported_syntax());
+    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.UnsupportedTsSyntax), vizg_c_value_diag_unsupported_ts_syntax());
+    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.UnsupportedJsx), vizg_c_value_diag_unsupported_jsx());
     try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticPhase.Internal), vizg_c_value_phase_internal());
     try std.testing.expectEqual(@intFromEnum(abi.Vizg_TokenType.Invalid), vizg_c_value_token_invalid());
     try std.testing.expectEqual(@intFromEnum(abi.Vizg_TokenType.Identifier), vizg_c_value_token_identifier());

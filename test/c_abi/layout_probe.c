@@ -53,6 +53,10 @@ VIZG_LAYOUT_TYPE(Vizg_Status)
 
 int vizg_c_value_severity_hint(void) { return VIZG_SEVERITY_HINT; }
 int vizg_c_value_diag_invalid_escape(void) { return VIZG_DIAG_INVALID_ESCAPE_SEQUENCE; }
+int vizg_c_value_diag_invalid_utf8(void) { return VIZG_DIAG_INVALID_UTF8; }
+int vizg_c_value_diag_unsupported_syntax(void) { return VIZG_DIAG_UNSUPPORTED_SYNTAX; }
+int vizg_c_value_diag_unsupported_ts_syntax(void) { return VIZG_DIAG_UNSUPPORTED_TS_SYNTAX; }
+int vizg_c_value_diag_unsupported_jsx(void) { return VIZG_DIAG_UNSUPPORTED_JSX; }
 int vizg_c_value_phase_internal(void) { return VIZG_PHASE_INTERNAL; }
 int vizg_c_value_token_invalid(void) { return VIZG_TOKEN_INVALID; }
 int vizg_c_value_token_identifier(void) { return VIZG_TOKEN_IDENTIFIER; }
