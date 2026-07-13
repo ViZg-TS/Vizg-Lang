@@ -763,34 +763,52 @@ fn applyAggregateContexts(
                 .ArrayExpression => |array| {
                     if (store.lookup(declared_contextual)) |ty| switch (ty.kind) {
                         .tuple => |declared_tuple| {
-                            // For tuple annotations with holes in the source array, fill those
-                            // hole positions using the declared element type so downstream accesses
-                            // have a concrete shape to work from. Store only the merged contextual
-                            // — never overwrite `type_id` which holds actual inferred types.
-                            var merged = try store.allocator.alloc(types.TupleElement, declared_tuple.elements.len);
-                            for (declared_tuple.elements, 0..) |declared_elem, index| {
-                                merged[index] = .{
-                                    .type_id = declared_elem.type_id,
-                                    .hole = declared_elem.hole,
-                                    .optional = declared_elem.optional,
-                                };
-                            }
-                            for (array.elements, 0..) |element, index| {
-                                if (index >= merged.len) break;
-                                if (element == null and !merged[index].hole) {
-                                    merged[index].hole = true;
-                                    merged[index].optional = true;
+                            // For tuple annotations with an array initializer: build a real tuple from the
+                            // actual inferred element types (using declared element types for source-side holes).
+                            // This keeps type_id as a concrete .tuple so downstream code can read
+                            // `kind.tuple.*` while preserving the true inferred element shapes for per-position
+                            // checker comparison against the declared shape.
+                            var actual = try store.allocator.alloc(types.TupleElement, declared_tuple.elements.len);
+                            @memset(actual, .{ .type_id = types.invalid_type, .hole = true });
+                            for (array.elements, 0..) |maybe_elem, index| {
+                                if (index >= actual.len) break;
+                                if (maybe_elem == null) continue;
+                                const inferred = findType(entries.items, maybe_elem.?);
+                                if (inferred != null and inferred != store.builtins.unknown) {
+                                    actual[index] = .{
+                                        .type_id = inferred.?,
+                                        .hole = false,
+                                        .optional = false,
+                                    };
+                                } else {
+                                    // Fall back to the declared element type for holes / unknowns.
+                                    const decl_elem = declared_tuple.elements[index];
+                                    actual[index] = .{
+                                        .type_id = decl_elem.type_id,
+                                        .hole = decl_elem.hole,
+                                        .optional = decl_elem.optional,
+                                    };
                                 }
                             }
-                            const contextual_id = try store.intern(.{ .tuple = .{
-                                .elements = merged,
+                            // Propagate any declared holes the source didn't fill.
+                            for (declared_tuple.elements, 0..) |decl_elem, index| {
+                                if (index >= actual.len) break;
+                                if (!actual[index].hole and decl_elem.hole) {
+                                    actual[index] = .{
+                                        .type_id = decl_elem.type_id,
+                                        .hole = true,
+                                        .optional = true,
+                                    };
+                                }
+                            }
+                            const inferred_tuple_id = try store.intern(.{ .tuple = .{
+                                .elements = actual,
                                 .readonly = declared_tuple.readonly,
                             } });
-                            if (!updateContextualTypeOnly(entries, initializer, contextual_id)) {
-                                changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, contextual_id) or changed;
-                            } else {
-                                changed = true;
-                            }
+                            // Always override both slots for tuple annotations: type_id must
+                            // become a concrete `.tuple` so downstream code can read
+                            // `kind.tuple.*`, and contextual_type mirrors the same shape.
+                            changed = putTypeWithContextual(entries, initializer, inferred_tuple_id, true, .none, null, inferred_tuple_id) or changed;
                         },
                         .array => {
                             // For a declared array shape store the annotation as the contextual hint only.
