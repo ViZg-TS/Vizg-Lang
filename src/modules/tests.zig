@@ -373,6 +373,88 @@ test "module graph resolves relative imports inside a standard temporary directo
     try std.testing.expect(graph.linked_imports[0].target_symbol != null);
 }
 
+test "module graph records complete import forms" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\import foo from "./default";
+        \\import * as ns from "./namespace";
+        \\import "./side-effect";
+        \\import type { Foo } from "./types";
+        \\import main, { bar } from "./mixed";
+    });
+    inline for (.{ "default.ts", "namespace.ts", "side-effect.ts", "types.ts", "mixed.ts" }) |name| {
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "export default function value() {} export const Foo = 1; export const bar = 2;\n" });
+    }
+
+    const entry_path = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
+    defer std.testing.allocator.free(entry_path);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const graph = try modules_mod.build(arena.allocator(), io, entry_path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null);
+
+    try std.testing.expectEqual(@as(usize, 5), graph.imports.len);
+    try std.testing.expectEqual(.default, graph.imports[0].kind);
+    try std.testing.expectEqual(.namespace, graph.imports[1].kind);
+    try std.testing.expectEqual(.side_effect, graph.imports[2].kind);
+    try std.testing.expectEqual(.named, graph.imports[3].kind);
+    try std.testing.expect(graph.imports[3].type_only);
+    try std.testing.expectEqual(.mixed, graph.imports[4].kind);
+    for (graph.imports) |edge| {
+        try std.testing.expect(edge.specifier.len > 0);
+        try std.testing.expectEqual(modules_mod.ImportStatus.local, edge.status);
+    }
+    try std.testing.expectEqual(@as(usize, 0), graph.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 5), graph.linked_imports.len);
+    try std.testing.expectEqual(modules_mod.LinkedImportKind.default, graph.linked_imports[0].kind);
+    try std.testing.expectEqual(modules_mod.LinkedImportKind.namespace, graph.linked_imports[1].kind);
+    try std.testing.expectEqual(modules_mod.LinkedImportKind.named, graph.linked_imports[2].kind);
+    try std.testing.expectEqual(modules_mod.LinkedImportKind.default, graph.linked_imports[3].kind);
+    try std.testing.expectEqual(modules_mod.LinkedImportKind.named, graph.linked_imports[4].kind);
+}
+
+test "module graph records re-export sources" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\export * from "./all";
+        \\export { value as renamed } from "./named";
+        \\export type { Foo } from "./types";
+    });
+    inline for (.{ "all.ts", "named.ts", "types.ts" }) |name| {
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "export const value = 1; export const Foo = 2;\n" });
+    }
+
+    const entry_path = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
+    defer std.testing.allocator.free(entry_path);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const graph = try modules_mod.build(arena.allocator(), io, entry_path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null);
+
+    try std.testing.expectEqual(@as(usize, 3), graph.imports.len);
+    try std.testing.expectEqual(@as(usize, 4), graph.modules.len);
+    try std.testing.expectEqualStrings("./all", graph.imports[0].specifier);
+    try std.testing.expectEqualStrings("./named", graph.imports[1].specifier);
+    try std.testing.expectEqualStrings("./types", graph.imports[2].specifier);
+    try std.testing.expect(graph.imports[0].re_export);
+    try std.testing.expect(graph.imports[1].re_export);
+    try std.testing.expect(graph.imports[2].re_export);
+    try std.testing.expect(graph.imports[2].type_only);
+    try std.testing.expectEqual(@as(usize, 0), graph.diagnostics.len);
+}
+
 test {
     _ = @import("graph.zig");
     _ = @import("linker.zig");

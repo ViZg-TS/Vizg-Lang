@@ -685,6 +685,56 @@ test "frontend suite: parser represents export declaration forms consistently" {
     try std.testing.expectEqualStrings("y", aliased_export.specifiers[0].exported_name);
 }
 
+test "frontend suite: parser and binder preserve complete export forms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const x = 1;
+        \\export default x + 1;
+        \\export * from "./all";
+        \\export { x } from "./named";
+        \\export { x as y } from "./alias";
+        \\export type { Foo };
+        \\export type { Bar as Baz } from "./types";
+    );
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    try std.testing.expectEqual(@as(usize, 7), program.statements.len);
+
+    const default_export = parsed.ast.node(program.statements[1]).data.ExportDeclaration;
+    try std.testing.expectEqual(ast_mod.ExportKind.default_expression, default_export.kind);
+    try std.testing.expect(default_export.expression != ast_mod.invalid_node);
+
+    const all_export = parsed.ast.node(program.statements[2]).data.ExportDeclaration;
+    try std.testing.expectEqual(ast_mod.ExportKind.export_all, all_export.kind);
+    try std.testing.expectEqualStrings("./all", all_export.source);
+
+    const named_export = parsed.ast.node(program.statements[3]).data.ExportDeclaration;
+    try std.testing.expectEqual(ast_mod.ExportKind.re_export, named_export.kind);
+    try std.testing.expectEqualStrings("./named", named_export.source);
+
+    const alias_export = parsed.ast.node(program.statements[4]).data.ExportDeclaration;
+    try std.testing.expectEqualStrings("y", alias_export.specifiers[0].exported_name);
+    try std.testing.expectEqualStrings("./alias", alias_export.source);
+
+    const local_type = parsed.ast.node(program.statements[5]).data.ExportDeclaration;
+    try std.testing.expectEqual(ast_mod.ExportKind.local, local_type.kind);
+    try std.testing.expect(local_type.type_only);
+
+    const reexport_type = parsed.ast.node(program.statements[6]).data.ExportDeclaration;
+    try std.testing.expectEqual(ast_mod.ExportKind.re_export, reexport_type.kind);
+    try std.testing.expect(reexport_type.type_only);
+    try std.testing.expectEqualStrings("./types", reexport_type.source);
+
+    const bound = try binder.bind(allocator, parsed.ast);
+    try std.testing.expectEqual(ast_mod.ExportKind.default_expression, exportByName(bound, "default").?.kind);
+    try std.testing.expectEqualStrings("./named", exportByName(bound, "x").?.source);
+    try std.testing.expectEqualStrings("./alias", exportByName(bound, "y").?.source);
+    try std.testing.expect(exportByName(bound, "Foo").?.type_only);
+    try std.testing.expect(exportByName(bound, "Baz").?.type_only);
+}
+
 test "frontend suite: parser reports syntax errors without aborting" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1541,6 +1591,48 @@ test "frontend suite: parser preserves import specifier span" {
     try std.testing.expectEqualStrings("\"./a\"", lexeme);
 }
 
+test "frontend suite: complete import forms preserve kind and type-only metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try frontend.analyze(allocator, .{ .path = "imports.ts", .text =
+        \\import foo from "./default";
+        \\import * as ns from "./namespace";
+        \\import "./side-effect";
+        \\import type { Foo } from "./types";
+        \\import main, { bar as localBar } from "./mixed";
+    }, .{});
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+
+    const statements = result.ast.node(result.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 5), statements.len);
+    const default_import = result.ast.node(statements[0]).data.ImportDeclaration;
+    const namespace_import = result.ast.node(statements[1]).data.ImportDeclaration;
+    const side_effect_import = result.ast.node(statements[2]).data.ImportDeclaration;
+    const type_import = result.ast.node(statements[3]).data.ImportDeclaration;
+    const mixed_import = result.ast.node(statements[4]).data.ImportDeclaration;
+
+    try std.testing.expectEqual(ast_mod.ImportKind.default, default_import.kind);
+    try std.testing.expectEqual(ast_mod.ImportSpecifierKind.default, default_import.specifiers[0].kind);
+    try std.testing.expectEqualStrings("default", default_import.specifiers[0].imported_name);
+    try std.testing.expectEqual(ast_mod.ImportKind.namespace, namespace_import.kind);
+    try std.testing.expectEqual(ast_mod.ImportSpecifierKind.namespace, namespace_import.specifiers[0].kind);
+    try std.testing.expectEqualStrings("*", namespace_import.specifiers[0].imported_name);
+    try std.testing.expectEqual(ast_mod.ImportKind.side_effect, side_effect_import.kind);
+    try std.testing.expectEqual(@as(usize, 0), side_effect_import.specifiers.len);
+    try std.testing.expect(type_import.type_only);
+    try std.testing.expectEqual(ast_mod.ImportKind.named, type_import.kind);
+    try std.testing.expectEqual(ast_mod.ImportKind.mixed, mixed_import.kind);
+    try std.testing.expectEqual(ast_mod.ImportSpecifierKind.default, mixed_import.specifiers[0].kind);
+    try std.testing.expectEqual(ast_mod.ImportSpecifierKind.named, mixed_import.specifiers[1].kind);
+
+    try std.testing.expectEqual(@as(usize, 5), result.bind.module.imports.len);
+    try std.testing.expect(result.bind.module.imports[2].type_only);
+    try std.testing.expectEqual(ast_mod.ImportSpecifierKind.default, result.bind.module.imports[3].kind);
+    try std.testing.expectEqual(ast_mod.ImportSpecifierKind.named, result.bind.module.imports[4].kind);
+}
+
 test "frontend suite: parameter annotation captured" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1562,7 +1654,7 @@ test "frontend suite: parameter annotation captured" {
     try expectNodeTag(parsed.ast, params[0], .Parameter);
     try std.testing.expect(param_node.data.Parameter.type_annotation != null);
     const ann = param_node.data.Parameter.type_annotation.?;
-    try std.testing.expectEqualStrings("string", ann.name);
+    try std.testing.expectEqualStrings("string", parsed.ast.annotationName(ann).?);
 }
 
 test "frontend suite: variable annotation captured" {
@@ -1586,7 +1678,7 @@ test "frontend suite: variable annotation captured" {
     try expectNodeTag(parsed.ast, vd_id, .VariableDeclarator);
     try std.testing.expect(vd_node.data.VariableDeclarator.type_annotation != null);
     const ann = vd_node.data.VariableDeclarator.type_annotation.?;
-    try std.testing.expectEqualStrings("string", ann.name);
+    try std.testing.expectEqualStrings("string", parsed.ast.annotationName(ann).?);
 }
 
 test "frontend suite: function return annotation captured" {
@@ -1605,7 +1697,7 @@ test "frontend suite: function return annotation captured" {
     const func_node = parsed.ast.node(func_id);
     try std.testing.expect(func_node.data.FunctionDeclaration.return_type != null);
     const ret_ann = func_node.data.FunctionDeclaration.return_type.?;
-    try std.testing.expectEqualStrings("boolean", ret_ann.name);
+    try std.testing.expectEqualStrings("boolean", parsed.ast.annotationName(ret_ann).?);
 }
 
 test "frontend suite: untyped function has no return_type annotation" {
@@ -1653,8 +1745,8 @@ test "frontend suite: arrow functions preserve forms annotations nesting and pre
 
     try std.testing.expectEqual(@as(usize, 1), arrows[0].params.len);
     try std.testing.expectEqual(@as(usize, 2), arrows[1].params.len);
-    try std.testing.expectEqualStrings("number", parsed.ast.node(arrows[2].params[0]).data.Parameter.type_annotation.?.name);
-    try std.testing.expectEqualStrings("number", arrows[2].return_type.?.name);
+    try std.testing.expectEqualStrings("number", parsed.ast.annotationName(parsed.ast.node(arrows[2].params[0]).data.Parameter.type_annotation.?).?);
+    try std.testing.expectEqualStrings("number", parsed.ast.annotationName(arrows[2].return_type.?).?);
     try std.testing.expect(!arrows[3].expression_body);
     try expectNodeTag(parsed.ast, arrows[3].body, .BlockStatement);
     try std.testing.expect(arrows[4].is_async);
@@ -1715,8 +1807,8 @@ test "frontend suite: function expressions preserve anonymous named async and ne
     const nested_arg = parsed.ast.node(nested_call_id).data.CallExpression.arguments[0];
     try std.testing.expectEqual(@as(?[]const u8, null), anonymous.name);
     try std.testing.expectEqualStrings("inner", named.name.?);
-    try std.testing.expectEqualStrings("number", parsed.ast.node(named.params[0]).data.Parameter.type_annotation.?.name);
-    try std.testing.expectEqualStrings("number", named.return_type.?.name);
+    try std.testing.expectEqualStrings("number", parsed.ast.annotationName(parsed.ast.node(named.params[0]).data.Parameter.type_annotation.?).?);
+    try std.testing.expectEqualStrings("number", parsed.ast.annotationName(named.return_type.?).?);
     try std.testing.expect(asynchronous.is_async);
     try expectNodeTag(parsed.ast, nested_arg, .FunctionExpression);
 }
@@ -1834,20 +1926,139 @@ test "frontend suite: simple type annotation fixture" {
     const vd_id = parsed.ast.node(var_decl_id).data.VariableDeclaration.declarations[0];
     const vd_node = parsed.ast.node(vd_id);
     try std.testing.expect(vd_node.data.VariableDeclarator.type_annotation != null);
-    try std.testing.expectEqualStrings("number", vd_node.data.VariableDeclarator.type_annotation.?.name);
+    try std.testing.expectEqualStrings("number", parsed.ast.annotationName(vd_node.data.VariableDeclarator.type_annotation.?).?);
 
     // Parameter annotation captured (f's `name` parameter).
     const func_id = root.statements[1];
     const param_id = parsed.ast.node(func_id).data.FunctionDeclaration.params[0];
     const param_node = parsed.ast.node(param_id);
     try std.testing.expect(param_node.data.Parameter.type_annotation != null);
-    try std.testing.expectEqualStrings("string", param_node.data.Parameter.type_annotation.?.name);
+    try std.testing.expectEqualStrings("string", parsed.ast.annotationName(param_node.data.Parameter.type_annotation.?).?);
 
     // Return type annotation captured.
     const ret_ann = parsed.ast.node(func_id).data.FunctionDeclaration.return_type;
     try std.testing.expect(ret_ann != null);
-    try std.testing.expectEqualStrings("boolean", ret_ann.?.name);
+    try std.testing.expectEqualStrings("boolean", parsed.ast.annotationName(ret_ann.?).?);
 }
+test "frontend suite: structured type grammar preserves precedence and spans" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\let arrays: string[];
+        \\let generic: Array<string>;
+        \\let combined: string | number & boolean;
+        \\let object: { name: string; age?: number };
+        \\let callback: (a: number) => string;
+        \\let tuple: [number, string];
+        \\let immutable: readonly string[];
+        \\let grouped: (string | number);
+    );
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 8), statements.len);
+
+    var roots: [8]ast_mod.TypeNodeId = undefined;
+    for (statements, 0..) |statement, index| {
+        const declarator = parsed.ast.node(statement).data.VariableDeclaration.declarations[0];
+        roots[index] = parsed.ast.node(declarator).data.VariableDeclarator.type_annotation.?.root;
+        const span = parsed.ast.typeNode(roots[index]).span;
+        try std.testing.expect(span.end > span.start);
+    }
+
+    try std.testing.expect(parsed.ast.typeNode(roots[0]).data == .Array);
+    const generic = parsed.ast.typeNode(roots[1]).data.Named;
+    try std.testing.expectEqualStrings("Array", generic.name);
+    try std.testing.expectEqual(@as(usize, 1), generic.type_arguments.len);
+
+    const union_members = parsed.ast.typeNode(roots[2]).data.Union;
+    try std.testing.expectEqual(@as(usize, 2), union_members.len);
+    try std.testing.expect(parsed.ast.typeNode(union_members[1]).data == .Intersection);
+
+    const object_members = parsed.ast.typeNode(roots[3]).data.Object;
+    try std.testing.expectEqual(@as(usize, 2), object_members.len);
+    try std.testing.expect(!object_members[0].optional);
+    try std.testing.expect(object_members[1].optional);
+    try std.testing.expect(object_members[0].span.end > object_members[0].span.start);
+
+    const function = parsed.ast.typeNode(roots[4]).data.Function;
+    try std.testing.expectEqual(@as(usize, 1), function.parameters.len);
+    try std.testing.expectEqualStrings("a", function.parameters[0].name);
+    try std.testing.expect(function.parameters[0].span.end > function.parameters[0].span.start);
+    try std.testing.expect(parsed.ast.typeNode(function.return_type).data == .Named);
+
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.typeNode(roots[5]).data.Tuple.len);
+    const readonly_inner = parsed.ast.typeNode(roots[6]).data.Readonly;
+    try std.testing.expect(parsed.ast.typeNode(readonly_inner).data == .Array);
+    const grouped_inner = parsed.ast.typeNode(roots[7]).data.Parenthesized;
+    try std.testing.expect(parsed.ast.typeNode(grouped_inner).data == .Union);
+}
+
+test "frontend suite: malformed structured type recovers at member boundary" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, "let bad: { name: ; age?: number }; let good: string = \"ok\";", false);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
+    try std.testing.expect(parsed.diagnostics.len > 0);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 2), statements.len);
+    const good_declarator = parsed.ast.node(statements[1]).data.VariableDeclaration.declarations[0];
+    const annotation = parsed.ast.node(good_declarator).data.VariableDeclarator.type_annotation.?;
+    try std.testing.expectEqualStrings("string", parsed.ast.annotationName(annotation).?);
+}
+
+test "frontend suite: type aliases and interfaces preserve type grammar and namespaces" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\export type User = { name: string };
+        \\interface Profile { name: string; age?: number; }
+        \\export interface Admin extends User, Profile {}
+        \\const User = "value";
+    );
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 4), statements.len);
+
+    const alias_id = parsed.ast.node(statements[0]).data.ExportDeclaration.declaration;
+    const alias = parsed.ast.node(alias_id).data.TypeAliasDeclaration;
+    try std.testing.expectEqualStrings("User", alias.name);
+    const alias_members = parsed.ast.typeNode(alias.type_annotation.root).data.Object;
+    try std.testing.expectEqual(@as(usize, 1), alias_members.len);
+    try std.testing.expectEqualStrings("name", alias_members[0].name);
+    try std.testing.expectEqualStrings("string", parsed.ast.typeNode(alias_members[0].type_node).data.Named.name);
+
+    const profile = parsed.ast.node(statements[1]).data.InterfaceDeclaration;
+    const profile_members = parsed.ast.typeNode(profile.body).data.Object;
+    try std.testing.expectEqual(@as(usize, 2), profile_members.len);
+    try std.testing.expect(profile_members[1].optional);
+    try std.testing.expectEqualStrings("number", parsed.ast.typeNode(profile_members[1].type_node).data.Named.name);
+
+    const admin_id = parsed.ast.node(statements[2]).data.ExportDeclaration.declaration;
+    const admin = parsed.ast.node(admin_id).data.InterfaceDeclaration;
+    try std.testing.expectEqual(@as(usize, 2), admin.extends.len);
+    try std.testing.expectEqualStrings("User", parsed.ast.typeNode(admin.extends[0]).data.Named.name);
+    try std.testing.expectEqualStrings("Profile", parsed.ast.typeNode(admin.extends[1]).data.Named.name);
+
+    const bound = try binder.bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
+    try std.testing.expectEqual(binder.SymbolKind.type_alias, symbolByNameKindScope(bound, "User", .type_alias, 0).?.kind);
+    try std.testing.expectEqual(binder.SymbolNamespace.type, symbolByNameKindScope(bound, "User", .type_alias, 0).?.namespace);
+    try std.testing.expectEqual(binder.SymbolNamespace.value, symbolByNameKindScope(bound, "User", .variable, 0).?.namespace);
+    try std.testing.expectEqual(binder.SymbolKind.interface, symbolByNameKindScope(bound, "Admin", .interface, 0).?.kind);
+    try std.testing.expectEqual(@as(usize, 2), bound.module.exports.len);
+    try std.testing.expect(exportByName(bound, "User").?.type_only);
+    try std.testing.expect(exportByName(bound, "Admin").?.type_only);
+
+    const duplicate = try parseOk(allocator, "type Same = string; interface Same {}");
+    const duplicate_bound = try binder.bind(allocator, duplicate.ast);
+    try std.testing.expectEqual(@as(usize, 1), duplicate_bound.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.duplicate_declaration, duplicate_bound.diagnostics[0].code);
+}
+
 test "frontend suite: export default function creates named symbol and declaration wrapper" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2076,6 +2287,75 @@ test "frontend suite: binder does not bind object literal property keys as symbo
     }
 }
 
+test "frontend suite: extended object properties preserve kinds and traversal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const value = 1;
+        \\const key = "name";
+        \\const other = {};
+        \\const outer = 2;
+        \\const object = {
+        \\    plain: value,
+        \\    value,
+        \\    [key]: outer,
+        \\    ...other,
+        \\    method(arg) { return arg + outer; },
+        \\    async load() { return outer; },
+        \\    get current() { return outer; },
+        \\    set current(next) { outer = next; },
+        \\};
+    );
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const declaration = parsed.ast.node(statements[4]).data.VariableDeclaration;
+    const init = parsed.ast.node(declaration.declarations[0]).data.VariableDeclarator.init.?;
+    const object = parsed.ast.node(init).data.ObjectExpression;
+    try std.testing.expectEqual(@as(usize, 8), object.properties.len);
+
+    const expected_kinds = [_]ast_mod.ObjectPropertyKind{
+        .key_value,
+        .shorthand,
+        .computed,
+        .spread,
+        .method,
+        .async_method,
+        .getter,
+        .setter,
+    };
+    for (object.properties, expected_kinds) |property, expected| {
+        try std.testing.expectEqual(expected, property.kind);
+    }
+
+    const shorthand = parsed.ast.node(object.properties[1].value).data.Identifier;
+    try std.testing.expectEqualStrings("value", shorthand.name);
+    const computed_key = object.properties[2].computed_key.?;
+    try std.testing.expectEqualStrings("key", parsed.ast.node(computed_key).data.Identifier.name);
+    try expectNodeTag(parsed.ast, object.properties[3].value, .SpreadElement);
+
+    for (object.properties[4..]) |property| try expectNodeTag(parsed.ast, property.value, .FunctionExpression);
+    try std.testing.expect(!parsed.ast.node(object.properties[4].value).data.FunctionExpression.is_async);
+    try std.testing.expect(parsed.ast.node(object.properties[5].value).data.FunctionExpression.is_async);
+    try std.testing.expectEqual(@as(usize, 0), parsed.ast.node(object.properties[6].value).data.FunctionExpression.params.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.ast.node(object.properties[7].value).data.FunctionExpression.params.len);
+
+    const bound = try binder.bind(allocator, parsed.ast);
+    var function_scopes: usize = 0;
+    for (bound.scopes) |scope| if (scope.kind == .function) {
+        function_scopes += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 4), function_scopes);
+
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 2), countReferences(resolved, "value", .read));
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "key", .read));
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "other", .read));
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "arg", .read));
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "next", .read));
+}
+
 test "frontend suite: parser accepts array literal expressions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2102,7 +2382,8 @@ test "frontend suite: parser accepts array literal expressions" {
     try std.testing.expectEqual(@as(usize, 3), arr.elements.len);
 
     // Each element is an expression node with a known tag (Identifier or Literal).
-    for (arr.elements) |elem_id| {
+    for (arr.elements) |maybe_elem_id| {
+        const elem_id = maybe_elem_id.?;
         const elem = parsed.ast.node(elem_id);
         switch (std.meta.activeTag(elem.data)) {
             .Identifier, .Literal => {},
@@ -2194,7 +2475,53 @@ test "frontend suite: array literals work with mixed element expressions" {
     try std.testing.expectEqual(@as(usize, 3), arr.elements.len);
 
     // The first element is a BinaryExpression from `1 + 2`.
-    try expectNodeTag(parsed.ast, arr.elements[0], .BinaryExpression);
+    try expectNodeTag(parsed.ast, arr.elements[0].?, .BinaryExpression);
+}
+
+test "frontend suite: array holes preserve indexes without treating trailing commas as holes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const sparse = [1, , 3];
+        \\const leading = [,];
+        \\const trailing = [1, 2,];
+        \\const items = [];
+        \\const spread = [1, ...items];
+    );
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+
+    const sparse_decl = parsed.ast.node(statements[0]).data.VariableDeclaration;
+    const sparse_init = parsed.ast.node(sparse_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const sparse = parsed.ast.node(sparse_init).data.ArrayExpression;
+    try std.testing.expectEqual(@as(usize, 3), sparse.elements.len);
+    try std.testing.expect(sparse.elements[0] != null);
+    try std.testing.expect(sparse.elements[1] == null);
+    try std.testing.expect(sparse.elements[2] != null);
+
+    const leading_decl = parsed.ast.node(statements[1]).data.VariableDeclaration;
+    const leading_init = parsed.ast.node(leading_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const leading = parsed.ast.node(leading_init).data.ArrayExpression;
+    try std.testing.expectEqual(@as(usize, 1), leading.elements.len);
+    try std.testing.expect(leading.elements[0] == null);
+
+    const trailing_decl = parsed.ast.node(statements[2]).data.VariableDeclaration;
+    const trailing_init = parsed.ast.node(trailing_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const trailing = parsed.ast.node(trailing_init).data.ArrayExpression;
+    try std.testing.expectEqual(@as(usize, 2), trailing.elements.len);
+    try std.testing.expect(trailing.elements[0] != null);
+    try std.testing.expect(trailing.elements[1] != null);
+
+    const spread_decl = parsed.ast.node(statements[4]).data.VariableDeclaration;
+    const spread_init = parsed.ast.node(spread_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const spread = parsed.ast.node(spread_init).data.ArrayExpression;
+    try std.testing.expectEqual(@as(usize, 2), spread.elements.len);
+    try expectNodeTag(parsed.ast, spread.elements[1].?, .SpreadElement);
+
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "items", .read));
 }
 
 test "frontend suite: scanner emits template segments and handles escapes" {
@@ -2462,7 +2789,7 @@ test "frontend suite: spread elements and rest parameters preserve AST shape and
         },
         .ObjectExpression => |object| {
             try std.testing.expectEqual(@as(usize, 1), object.properties.len);
-            object_spread = object.properties[0].spread;
+            object_spread = object.properties[0].kind == .spread;
             try expectNodeTag(parsed.ast, object.properties[0].value, .SpreadElement);
         },
         else => {},
@@ -2516,9 +2843,4 @@ test "frontend suite: color_art.ts fixture — 0 diagnostics smoke test" {
     try std.testing.expectEqual(@as(usize, 0), result.resolve.diagnostics.len);
     // Fixture must produce a module AST with exports (exercise export default).
     try std.testing.expect(result.bind.module.exports.len > 0);
-}
-
-fn symbolByName(bind: binder.BindResult, name: []const u8) ?binder.Symbol {
-    for (bind.symbols) |sym| if (std.mem.eql(u8, sym.name, name)) return sym;
-    return null;
 }
