@@ -10,6 +10,8 @@ const NodeId = ast_mod.NodeId;
 pub const ParseResult = struct {
     ast: ast_mod.Ast,
     diagnostics: []const diagnostics.Diagnostic,
+    /// Number of non-EOF tokens consumed by top-level parsing.
+    consumed_tokens: usize,
 };
 
 const Parser = struct {
@@ -40,6 +42,7 @@ const Parser = struct {
                 .root = root,
             },
             .diagnostics = try self.diagnostics.toOwnedSlice(self.allocator),
+            .consumed_tokens = self.index,
         };
     }
 
@@ -63,6 +66,16 @@ const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) anyerror!?NodeId {
+        if (self.at(.At)) {
+            self.report("decorators are not supported", .unsupported_syntax);
+            self.recoverUnsupportedStatement();
+            return null;
+        }
+        if (self.atIdentifierText("namespace") or self.atIdentifierText("module")) {
+            self.report("TypeScript namespaces are not supported", .unsupported_ts_syntax);
+            self.recoverUnsupportedStatement();
+            return null;
+        }
         if (self.at(.Keyword_import)) return try self.parseImportDeclaration();
         if (self.at(.Keyword_export)) return try self.parseExportDeclaration();
         if (self.atTypeAliasDeclaration()) return try self.parseTypeAliasDeclaration();
@@ -102,7 +115,14 @@ const Parser = struct {
         const start = self.advance();
         const name = self.expect(.Identifier, "expected type alias name");
         _ = self.expect(.Equal, "expected '=' after type alias name");
-        const type_node = try self.parseType();
+        const type_node = if (self.findUnsupportedTypeSyntax()) |unsupported| blk: {
+            self.reportAt(unsupported.token, unsupported.message, .unsupported_ts_syntax);
+            self.recoverUnsupportedType();
+            break :blk try self.addTypeNode(.{
+                .span = unsupported.token.span,
+                .data = .{ .Named = .{ .name = "<unsupported>" } },
+            });
+        } else try self.parseType();
         _ = self.eat(.Semicolon);
         return self.addNode(.{
             .span = joinSpans(start.span, self.previousOrCurrent().span),
@@ -549,6 +569,15 @@ const Parser = struct {
         errdefer members.deinit(self.allocator);
         while (!self.at(.RBrace) and !self.at(.EOF)) {
             if (self.eat(.Semicolon)) continue;
+            if (self.at(.PrivateIdentifier) or self.at(.At)) {
+                const is_private = self.at(.PrivateIdentifier);
+                self.report(
+                    if (is_private) "private class fields and methods are not supported" else "decorators are not supported",
+                    .unsupported_syntax,
+                );
+                self.recoverUnsupportedClassMember();
+                continue;
+            }
             try members.append(self.allocator, try self.parseClassMember());
         }
         _ = self.expect(.RBrace, "expected }");
@@ -776,6 +805,76 @@ const Parser = struct {
     fn recoverTypeMember(self: *Parser) void {
         while (!self.at(.Semicolon) and !self.at(.Comma) and !self.at(.RBrace) and !self.at(.EOF)) _ = self.advance();
         if (self.at(.Semicolon) or self.at(.Comma)) _ = self.advance();
+    }
+
+    const UnsupportedTypeSyntax = struct {
+        token: Token,
+        message: []const u8,
+    };
+
+    fn findUnsupportedTypeSyntax(self: *const Parser) ?UnsupportedTypeSyntax {
+        var mapped: ?Token = null;
+        var conditional: ?Token = null;
+        var advanced: ?Token = null;
+        var bracket_depth: usize = 0;
+        var i = self.index;
+        while (i < self.tokens.len) : (i += 1) {
+            const token = self.tokens[i];
+            if (token.kind == .EOF or (token.kind == .Semicolon and bracket_depth == 0)) break;
+            if (token.kind == .LBrace or token.kind == .LParen or token.kind == .LBracket) bracket_depth += 1;
+            if ((token.kind == .RBrace or token.kind == .RParen or token.kind == .RBracket) and bracket_depth > 0) bracket_depth -= 1;
+
+            if (mapped == null and token.kind == .LBracket) {
+                var j = i + 1;
+                while (j < self.tokens.len and self.tokens[j].kind != .RBracket and self.tokens[j].kind != .EOF) : (j += 1) {
+                    if (self.tokens[j].kind == .Keyword_in) {
+                        mapped = token;
+                        break;
+                    }
+                }
+            }
+            if (conditional == null and token.kind == .Keyword_extends) conditional = token;
+            if (advanced == null and token.kind == .Identifier and
+                (std.mem.eql(u8, token.lexeme, "keyof") or std.mem.eql(u8, token.lexeme, "infer") or
+                    std.mem.eql(u8, token.lexeme, "unique") or std.mem.eql(u8, token.lexeme, "abstract")))
+            {
+                advanced = token;
+            }
+        }
+        if (mapped) |token| return .{ .token = token, .message = "mapped types are not supported" };
+        if (conditional) |token| return .{ .token = token, .message = "conditional types are not supported" };
+        if (advanced) |token| return .{ .token = token, .message = "advanced TypeScript types are not supported" };
+        return null;
+    }
+
+    fn recoverUnsupportedType(self: *Parser) void {
+        while (!self.at(.Semicolon) and !self.at(.EOF)) _ = self.advance();
+    }
+
+    fn recoverUnsupportedStatement(self: *Parser) void {
+        var brace_depth: usize = 0;
+        while (!self.at(.EOF)) {
+            const kind = self.advance().kind;
+            if (kind == .LBrace) brace_depth += 1;
+            if (kind == .RBrace) {
+                if (brace_depth > 0) brace_depth -= 1;
+                if (brace_depth == 0) return;
+            }
+            if (kind == .Semicolon and brace_depth == 0) return;
+        }
+    }
+
+    fn recoverUnsupportedClassMember(self: *Parser) void {
+        var brace_depth: usize = 0;
+        while (!self.at(.RBrace) and !self.at(.EOF)) {
+            const kind = self.advance().kind;
+            if (kind == .LBrace) brace_depth += 1;
+            if (kind == .RBrace and brace_depth > 0) {
+                brace_depth -= 1;
+                if (brace_depth == 0) return;
+            }
+            if (kind == .Semicolon and brace_depth == 0) return;
+        }
     }
 
     fn isTypeBoundary(self: *const Parser, kind: TokenType) bool {
@@ -1928,6 +2027,14 @@ const Parser = struct {
             },
             .LBracket => {
                 node = try self.parseArrayExpression();
+            },
+            .LessThan => {
+                self.reportAt(token, "JSX and TSX syntax is not supported", .unsupported_jsx);
+                while (!self.at(.Semicolon) and !self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) _ = self.advance();
+                node = try self.addNode(.{
+                    .span = token.span,
+                    .data = .{ .Identifier = .{ .name = "" } },
+                });
             },
             else => {
                 self.reportAt(token, "expected expression", .expected_token);

@@ -1,5 +1,6 @@
 const std = @import("std");
 const tokens = @import("tokens.zig");
+const unicode_identifiers = @import("unicode_identifiers.zig");
 
 const TokenType = tokens.TokenType;
 const Token = tokens.Token;
@@ -48,6 +49,7 @@ pub const Scanner = struct {
     allow_regexp: bool = true,
     template_depth: usize = 0,
     template_brace_depths: [64]usize = [_]usize{0} ** 64,
+    last_token_start: ?TokenStart = null,
 
     pub fn init(source: []const u8, config: ScannerConfig) Scanner {
         return .{
@@ -57,6 +59,7 @@ pub const Scanner = struct {
     }
 
     pub fn nextToken(self: *Scanner) LexicalError!Token {
+        self.last_token_start = null;
         while (true) {
             if (self.isAtEnd()) {
                 if (self.template_depth != 0) return LexicalError.UnterminatedTemplateString;
@@ -82,21 +85,34 @@ pub const Scanner = struct {
 
         const c = self.peek().?;
         const start = self.markStart();
+        self.last_token_start = start;
 
-        if (tokens.isAsciiIdentifierStart(c)) {
-            return self.scanIdentifier(start);
+        if (try self.isIdentifierStartAtCurrent()) {
+            return try self.scanIdentifier(start);
         }
 
         if (c == '#') {
             if (self.peekN(1)) |next| {
-                if (tokens.isAsciiIdentifierStart(next)) {
-                    return self.scanPrivateIdentifier(start);
+                if (next == '\\' or tokens.isAsciiIdentifierStart(next) or next >= 0x80) {
+                    _ = self.advance();
+                    if (try self.isIdentifierStartAtCurrent()) {
+                        self.index = start.index;
+                        self.line = start.line;
+                        self.column = start.column;
+                        return try self.scanPrivateIdentifier(start);
+                    }
+                    self.index = start.index;
+                    self.line = start.line;
+                    self.column = start.column;
                 }
             }
         }
 
         if (tokens.isDecimalDigit(c) or (c == '.' and self.peekN(1) != null and tokens.isDecimalDigit(self.peekN(1).?))) {
-            return try self.scanNumber(start);
+            return self.scanNumber(start) catch |err| {
+                self.consumeNumericErrorTail();
+                return err;
+            };
         }
 
         if (c == '`') {
@@ -372,30 +388,96 @@ pub const Scanner = struct {
 
     //#region Identifiers
 
-    fn scanIdentifier(self: *Scanner, start: TokenStart) Token {
+    const DecodedCodePoint = struct {
+        value: u21,
+        byte_len: usize,
+        escaped: bool = false,
+    };
+
+    fn decodeCodePointAt(self: *const Scanner, index: usize) LexicalError!DecodedCodePoint {
+        if (index >= self.source.len) return LexicalError.UnexpectedEndOfFile;
+        const byte_len = std.unicode.utf8ByteSequenceLength(self.source[index]) catch return LexicalError.InvalidUtf8;
+        if (byte_len > self.source.len - index) return LexicalError.InvalidUtf8;
+        const value = std.unicode.utf8Decode(self.source[index .. index + byte_len]) catch return LexicalError.InvalidUtf8;
+        return .{ .value = value, .byte_len = byte_len };
+    }
+
+    fn decodeIdentifierEscapeAt(self: *const Scanner, index: usize) LexicalError!DecodedCodePoint {
+        if (index + 2 > self.source.len or self.source[index] != '\\' or self.source[index + 1] != 'u') {
+            return LexicalError.InvalidEscapeSequence;
+        }
+
+        var cursor = index + 2;
+        var value: u32 = 0;
+        if (cursor < self.source.len and self.source[cursor] == '{') {
+            cursor += 1;
+            const digits_start = cursor;
+            while (cursor < self.source.len and self.source[cursor] != '}') : (cursor += 1) {
+                const digit: u32 = std.fmt.charToDigit(self.source[cursor], 16) catch return LexicalError.InvalidEscapeSequence;
+                if (value > (0x10FFFF - digit) / 16) return LexicalError.InvalidEscapeSequence;
+                value = value * 16 + digit;
+            }
+            if (cursor == digits_start or cursor >= self.source.len) return LexicalError.InvalidEscapeSequence;
+            cursor += 1;
+        } else {
+            if (cursor + 4 > self.source.len) return LexicalError.InvalidEscapeSequence;
+            for (self.source[cursor .. cursor + 4]) |byte| {
+                const digit: u32 = std.fmt.charToDigit(byte, 16) catch return LexicalError.InvalidEscapeSequence;
+                value = value * 16 + digit;
+            }
+            cursor += 4;
+        }
+
+        if (value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF)) return LexicalError.InvalidEscapeSequence;
+        return .{ .value = @intCast(value), .byte_len = cursor - index, .escaped = true };
+    }
+
+    fn identifierCodePointAtCurrent(self: *const Scanner) LexicalError!DecodedCodePoint {
+        if (self.peekIs('\\')) return self.decodeIdentifierEscapeAt(self.index);
+        return self.decodeCodePointAt(self.index);
+    }
+
+    fn isIdentifierStart(code_point: u21) bool {
+        return code_point == '$' or code_point == '_' or unicode_identifiers.isIdStart(code_point);
+    }
+
+    fn isIdentifierContinue(code_point: u21) bool {
+        return isIdentifierStart(code_point) or code_point == 0x200C or code_point == 0x200D or unicode_identifiers.isIdContinue(code_point);
+    }
+
+    fn isIdentifierStartAtCurrent(self: *const Scanner) LexicalError!bool {
+        const decoded = try self.identifierCodePointAtCurrent();
+        return isIdentifierStart(decoded.value);
+    }
+
+    fn scanIdentifier(self: *Scanner, start: TokenStart) LexicalError!Token {
+        var has_escape = false;
         while (!self.isAtEnd()) {
-            const c = self.peek().?;
-            if (!tokens.isAsciiIdentifierPart(c)) break;
-            _ = self.advance();
+            const decoded = try self.identifierCodePointAtCurrent();
+            if (!isIdentifierContinue(decoded.value)) break;
+            has_escape = has_escape or decoded.escaped;
+            self.advanceN(decoded.byte_len);
         }
 
         const lexeme = self.source[start.index..self.index];
-        const kind = tokens.classifyIdentifier(lexeme);
+        const kind = if (has_escape) TokenType.Identifier else tokens.classifyIdentifier(lexeme);
 
-        return self.makeToken(start, kind, .{});
+        return self.makeToken(start, kind, .{ .has_escape = has_escape });
     }
 
-    fn scanPrivateIdentifier(self: *Scanner, start: TokenStart) Token {
+    fn scanPrivateIdentifier(self: *Scanner, start: TokenStart) LexicalError!Token {
         // #
         _ = self.advance();
 
+        var has_escape = false;
         while (!self.isAtEnd()) {
-            const c = self.peek().?;
-            if (!tokens.isAsciiIdentifierPart(c)) break;
-            _ = self.advance();
+            const decoded = try self.identifierCodePointAtCurrent();
+            if (!isIdentifierContinue(decoded.value)) break;
+            has_escape = has_escape or decoded.escaped;
+            self.advanceN(decoded.byte_len);
         }
 
-        return self.makeToken(start, .PrivateIdentifier, .{});
+        return self.makeToken(start, .PrivateIdentifier, .{ .has_escape = has_escape });
     }
 
     //#endregion
@@ -421,6 +503,7 @@ pub const Scanner = struct {
                 }
             }
 
+            try self.requireNumericBoundary();
             return self.makeToken(start, .NumberLiteral, .{});
         }
 
@@ -438,6 +521,8 @@ pub const Scanner = struct {
                             _ = self.advance();
                         }
 
+                        try self.requireNumericBoundary();
+
                         return self.makeToken(start, if (is_bigint) .BigIntLiteral else .NumberLiteral, .{});
                     },
                     'b', 'B' => {
@@ -451,6 +536,8 @@ pub const Scanner = struct {
                             _ = self.advance();
                         }
 
+                        try self.requireNumericBoundary();
+
                         return self.makeToken(start, if (is_bigint) .BigIntLiteral else .NumberLiteral, .{});
                     },
                     'o', 'O' => {
@@ -463,6 +550,8 @@ pub const Scanner = struct {
                             is_bigint = true;
                             _ = self.advance();
                         }
+
+                        try self.requireNumericBoundary();
 
                         return self.makeToken(start, if (is_bigint) .BigIntLiteral else .NumberLiteral, .{});
                     },
@@ -495,7 +584,24 @@ pub const Scanner = struct {
             _ = self.advance();
         }
 
+        try self.requireNumericBoundary();
+
         return self.makeToken(start, if (is_bigint) .BigIntLiteral else .NumberLiteral, .{});
+    }
+
+    fn requireNumericBoundary(self: *Scanner) LexicalError!void {
+        const c = self.peek() orelse return;
+        if (tokens.isAsciiIdentifierPart(c) or c >= 0x80) {
+            self.consumeNumericErrorTail();
+            return LexicalError.InvalidNumberFormat;
+        }
+    }
+
+    fn consumeNumericErrorTail(self: *Scanner) void {
+        while (self.peek()) |c| {
+            if (!(tokens.isAsciiIdentifierPart(c) or c >= 0x80)) break;
+            _ = self.advance();
+        }
     }
 
     fn scanExponent(self: *Scanner) LexicalError!void {
@@ -767,10 +873,35 @@ pub fn scanAll(allocator: std.mem.Allocator, source: []const u8, collect_comment
     var diagnostic_list: std.ArrayList(diagnostics.Diagnostic) = .empty;
     errdefer diagnostic_list.deinit(allocator);
 
+    if (!std.unicode.utf8ValidateSlice(source)) {
+        while (!scanner.isAtEnd()) {
+            const decoded = scanner.decodeCodePointAt(scanner.index) catch {
+                const start = scanner.markStart();
+                _ = scanner.advance();
+                try diagnostic_list.append(allocator, .{
+                    .severity = .@"error",
+                    .code = .invalid_utf8,
+                    .phase = .scanner,
+                    .message = "invalid UTF-8 source text",
+                    .span = scanner.makeSpan(start),
+                });
+                const eof_start = scanner.markStart();
+                try token_list.append(allocator, scanner.makeToken(eof_start, .EOF, .{}));
+                return .{
+                    .tokens = try token_list.toOwnedSlice(allocator),
+                    .comments = try comment_list.toOwnedSlice(allocator),
+                    .diagnostics = try diagnostic_list.toOwnedSlice(allocator),
+                };
+            };
+            scanner.advanceN(decoded.byte_len);
+        }
+        unreachable;
+    }
+
     var saw_eof = false;
     while (true) {
         const token = scanner.nextToken() catch |err| {
-            const start = scanner.markStart();
+            const start = scanner.last_token_start orelse scanner.markStart();
             try diagnostic_list.append(allocator, .{
                 .severity = .@"error",
                 .code = diagnostics.lexicalErrorCode(err),
@@ -779,10 +910,12 @@ pub fn scanAll(allocator: std.mem.Allocator, source: []const u8, collect_comment
                 .span = scanner.makeSpan(start),
             });
 
-            if (!scanner.isAtEnd()) {
-                _ = scanner.advance();
-            } else {
-                break;
+            if (scanner.index == start.index) {
+                if (!scanner.isAtEnd()) {
+                    _ = scanner.advance();
+                } else {
+                    break;
+                }
             }
 
             continue;
@@ -845,6 +978,78 @@ test "scanner handles basic variable declaration" {
     );
 }
 
+test "scanner accepts ECMAScript Unicode identifiers" {
+    const sources = [_][]const u8{
+        "const café = 1;",
+        "const 名称 = 2;",
+        "const _value = 3;",
+        "const $value = 4;",
+    };
+    for (sources) |source| {
+        try expectKinds(source, &.{
+            .Keyword_const,
+            .Identifier,
+            .Equal,
+            .NumberLiteral,
+            .Semicolon,
+        });
+    }
+}
+
+test "scanner accepts escaped identifier code points" {
+    var scanner = Scanner.init("const \\u0061 = \\u{540D};", .{});
+    try std.testing.expectEqual(TokenType.Keyword_const, (try scanner.nextToken()).kind);
+    const ascii_escape = try scanner.nextToken();
+    try std.testing.expectEqual(TokenType.Identifier, ascii_escape.kind);
+    try std.testing.expect(ascii_escape.flags.has_escape);
+    _ = try scanner.nextToken();
+    const unicode_escape = try scanner.nextToken();
+    try std.testing.expectEqual(TokenType.Identifier, unicode_escape.kind);
+    try std.testing.expect(unicode_escape.flags.has_escape);
+}
+
+test "scanner applies Unicode continue rules without normalization" {
+    var scanner = Scanner.init("cafe\u{0301} café a\u{200C}b", .{});
+    const decomposed = try scanner.nextToken();
+    const composed = try scanner.nextToken();
+    const joiner = try scanner.nextToken();
+
+    try std.testing.expectEqual(TokenType.Identifier, decomposed.kind);
+    try std.testing.expectEqual(TokenType.Identifier, composed.kind);
+    try std.testing.expectEqual(TokenType.Identifier, joiner.kind);
+    try std.testing.expect(!std.mem.eql(u8, decomposed.lexeme, composed.lexeme));
+}
+
+test "scanner rejects invalid identifier starts and escapes" {
+    var combining_start = Scanner.init("\u{0301}name", .{});
+    try std.testing.expectError(LexicalError.UnknownCharacter, combining_start.nextToken());
+
+    var escaped_combining_start = Scanner.init("\\u{301}name", .{});
+    try std.testing.expectError(LexicalError.UnknownCharacter, escaped_combining_start.nextToken());
+
+    var invalid_scalar = Scanner.init("\\u{110000}", .{});
+    try std.testing.expectError(LexicalError.InvalidEscapeSequence, invalid_scalar.nextToken());
+}
+
+test "scanner rejects valid Unicode outside ID_Start" {
+    var scanner = Scanner.init("const 😀 = 1;", .{});
+    _ = try scanner.nextToken();
+    try std.testing.expectError(LexicalError.UnknownCharacter, scanner.nextToken());
+}
+
+test "scanAll diagnoses invalid UTF-8 without panic" {
+    const source = [_]u8{ 'c', 'o', 'n', 's', 't', ' ', 0xE2, 0x82 };
+    const result = try scanAll(std.testing.allocator, &source, false);
+    defer std.testing.allocator.free(result.tokens);
+    defer std.testing.allocator.free(result.comments);
+    defer std.testing.allocator.free(result.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.invalid_utf8, result.diagnostics[0].code);
+    try std.testing.expectEqual(@as(u32, 6), result.diagnostics[0].span.start);
+    try std.testing.expectEqual(TokenType.EOF, result.tokens[result.tokens.len - 1].kind);
+}
+
 test "scanner classifies literals and contextual words correctly" {
     try expectKinds(
         "true false null undefined async require",
@@ -886,20 +1091,71 @@ test "scanner handles strings" {
     );
 }
 
-test "scanner handles number forms" {
-    try expectKinds(
-        "1 1.5 .5 1e10 0xff 0b1010 0o755 123n",
-        &.{
-            .NumberLiteral,
-            .NumberLiteral,
-            .NumberLiteral,
-            .NumberLiteral,
-            .NumberLiteral,
-            .NumberLiteral,
-            .NumberLiteral,
-            .BigIntLiteral,
-        },
-    );
+test "scanner preserves valid numeric literal metadata" {
+    const source = "0xFF 0b1010 0o755 1_000_000 1.2e-3 123n 0xFFn";
+    const expected_lexemes = [_][]const u8{
+        "0xFF", "0b1010", "0o755", "1_000_000", "1.2e-3", "123n", "0xFFn",
+    };
+    const expected_kinds = [_]TokenType{
+        .NumberLiteral, .NumberLiteral, .NumberLiteral, .NumberLiteral,
+        .NumberLiteral, .BigIntLiteral, .BigIntLiteral,
+    };
+    var scanner = Scanner.init(source, .{});
+
+    var previous_end: u32 = 0;
+    for (expected_lexemes, expected_kinds) |lexeme, kind| {
+        const token = try scanner.nextToken();
+        try std.testing.expectEqual(kind, token.kind);
+        try std.testing.expectEqualStrings(lexeme, token.lexeme);
+        try std.testing.expectEqual(@as(u32, @intCast(lexeme.len)), token.span.end - token.span.start);
+        try std.testing.expect(token.span.start >= previous_end);
+        previous_end = token.span.end;
+    }
+    try std.testing.expectEqual(TokenType.EOF, (try scanner.nextToken()).kind);
+}
+
+test "scanAll reports stable diagnostics for malformed numeric literals" {
+    const invalid = [_][]const u8{ "1__0", "1_", "0x", "0b2", "1e", "1e+" };
+
+    for (invalid) |source| {
+        const result = try scanAll(std.testing.allocator, source, false);
+        defer std.testing.allocator.free(result.tokens);
+        defer std.testing.allocator.free(result.comments);
+        defer std.testing.allocator.free(result.diagnostics);
+
+        try std.testing.expectEqual(@as(usize, 1), result.diagnostics.len);
+        try std.testing.expectEqual(diagnostics.DiagnosticCode.invalid_number, result.diagnostics[0].code);
+        try std.testing.expectEqual(@as(u32, 0), result.diagnostics[0].span.start);
+        try std.testing.expectEqual(@as(u32, @intCast(source.len)), result.diagnostics[0].span.end);
+        try std.testing.expectEqual(@as(usize, 1), result.tokens.len);
+        try std.testing.expectEqual(TokenType.EOF, result.tokens[0].kind);
+    }
+}
+
+test "malformed numeric recovery preserves following tokens" {
+    const result = try scanAll(std.testing.allocator, "0b2; 7", false);
+    defer std.testing.allocator.free(result.tokens);
+    defer std.testing.allocator.free(result.comments);
+    defer std.testing.allocator.free(result.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.len);
+    try std.testing.expectEqual(@as(u32, 3), result.diagnostics[0].span.end);
+    try std.testing.expectEqualSlices(TokenType, &.{ .Semicolon, .NumberLiteral, .EOF }, &.{
+        result.tokens[0].kind, result.tokens[1].kind, result.tokens[2].kind,
+    });
+    try std.testing.expectEqualStrings("7", result.tokens[1].lexeme);
+}
+
+test "scanner tokenizes huge numeric literals without arithmetic overflow" {
+    const huge_decimal = "99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999";
+    var scanner = Scanner.init(huge_decimal ++ " " ++ huge_decimal ++ "n", .{});
+
+    const number = try scanner.nextToken();
+    const bigint = try scanner.nextToken();
+    try std.testing.expectEqual(TokenType.NumberLiteral, number.kind);
+    try std.testing.expectEqual(TokenType.BigIntLiteral, bigint.kind);
+    try std.testing.expectEqual(huge_decimal.len, number.lexeme.len);
+    try std.testing.expectEqual(huge_decimal.len + 1, bigint.lexeme.len);
 }
 
 test "scanner accepts valid escape sequences" {

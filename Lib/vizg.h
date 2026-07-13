@@ -49,6 +49,10 @@ typedef enum {
     VIZG_DIAG_INVALID_ESCAPE_SEQUENCE  = 15,
     VIZG_DIAG_UNTERMINATED_REGEXP      = 16,
     VIZG_DIAG_INVALID_REGEXP           = 17,
+    VIZG_DIAG_INVALID_UTF8             = 18,
+    VIZG_DIAG_UNSUPPORTED_SYNTAX       = 19,
+    VIZG_DIAG_UNSUPPORTED_TS_SYNTAX    = 20,
+    VIZG_DIAG_UNSUPPORTED_JSX          = 21,
 } Vizg_DiagnosticCode;
 
 typedef enum {

@@ -8,7 +8,6 @@ pub const type_inference = @import("type_inference.zig");
 
 pub const checker = @import("checker.zig");
 
-
 // Type compatibility rules (Goal 24).
 pub const type_compat = @import("type_compat.zig");
 
@@ -57,6 +56,15 @@ pub fn analyzeFrontendResult(
 
     var diag_list: std.ArrayList(diagnostics.Diagnostic) = .empty;
     errdefer diag_list.deinit(allocator);
+    for (result.diagnostics) |diagnostic| {
+        var stamped = diagnostic;
+        if ((stamped.path == null or std.mem.eql(u8, stamped.path.?, "")) and
+            !std.mem.eql(u8, result.source.path, ""))
+        {
+            stamped.path = result.source.path;
+        }
+        try diag_list.append(allocator, stamped);
+    }
     i = 0;
     while (i < collected.diagnostics.len) : (i += 1) {
         // Stamp diagnostics with the source path so downstream callers do not
@@ -102,8 +110,7 @@ pub fn analyzeFrontendResult(
     }
 
     // Merge collector diagnostics and stamped-checker diagnostics into one slice.
-    var all_diags = try std.ArrayList(diagnostics.Diagnostic).initCapacity(
-        allocator, diag_list.items.len + stamped_checker.items.len);
+    var all_diags = try std.ArrayList(diagnostics.Diagnostic).initCapacity(allocator, diag_list.items.len + stamped_checker.items.len);
     for (diag_list.items) |d| {
         try all_diags.append(allocator, d);
     }

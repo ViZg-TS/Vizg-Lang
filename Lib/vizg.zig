@@ -176,6 +176,10 @@ pub const Vizg_DiagnosticCode = enum(c_int) {
     InvalidEscapeSequence = 15,
     UnterminatedRegExp,
     InvalidRegExp,
+    InvalidUtf8,
+    UnsupportedSyntax,
+    UnsupportedTsSyntax,
+    UnsupportedJsx,
 };
 
 pub const Vizg_DiagnosticPhase = enum(c_int) {
@@ -283,6 +287,10 @@ fn toVizgDiagnosticCode(v: diagnostics_mod.DiagnosticCode) Vizg_DiagnosticCode {
         .invalid_escape_sequence => .InvalidEscapeSequence,
         .unterminated_regexp => .UnterminatedRegExp,
         .invalid_regexp => .InvalidRegExp,
+        .invalid_utf8 => .InvalidUtf8,
+        .unsupported_syntax => .UnsupportedSyntax,
+        .unsupported_ts_syntax => .UnsupportedTsSyntax,
+        .unsupported_jsx => .UnsupportedJsx,
     };
 }
 

@@ -203,6 +203,7 @@ pub const Token = struct {
 
 pub const LexicalError = error{
     UnknownCharacter,
+    InvalidUtf8,
     UnterminatedComment,
     UnterminatedString,
     UnterminatedTemplateString,
