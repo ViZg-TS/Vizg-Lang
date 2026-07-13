@@ -13,6 +13,7 @@ pub const type_collector = @import("type_collector.zig");
 pub const type_inference = @import("type_inference.zig");
 pub const checker = @import("checker.zig");
 pub const type_compat = @import("type_compat.zig");
+pub const dataflow = @import("dataflow.zig");
 pub const narrowing = @import("narrowing.zig");
 
 pub const SymbolTypeInfo = type_info.SymbolTypeInfo;
@@ -24,9 +25,8 @@ pub const ModuleId = u32;
 pub const ReferenceId = resolver.ReferenceId;
 
 pub const SemanticIdentity = struct {
-    module_id: ModuleId,
     symbol_id: ?binder.SymbolId,
-    declaration: ast.NodeId,
+    declaration: types.SemanticDeclId,
     type_id: types.TypeId,
     namespace: binder.SymbolNamespace,
 };
@@ -118,6 +118,8 @@ pub const SemanticModule = struct {
 /// types, and diagnostics are owned by `arena`. Call `deinit` exactly once and
 /// do not retain any returned slice after that call. Diagnostics never make a
 /// result unsafe to inspect: `metadata.is_partial` reports recovered output.
+/// TypeIds belong to this result's TypeStore and must not be compared with IDs
+/// from another SemanticResult.
 pub const SemanticResult = struct {
     arena: std.heap.ArenaAllocator,
     frontend: frontend.FrontendResult,
@@ -152,7 +154,7 @@ pub const SemanticResult = struct {
         return self.type_store.lookup(id);
     }
 
-    pub fn lookupFunctionType(self: *const SemanticResult, id: types.FunctionSignatureId) ?types.FunctionSignature {
+    pub fn lookupFunctionType(self: *const SemanticResult, id: types.TypeId) ?types.FunctionSignature {
         return self.type_store.lookupFunction(id);
     }
 
@@ -210,7 +212,7 @@ pub fn analyzeSource(
     };
     const fe = try frontend.analyze(allocator, owned_source, options);
     var type_store = types.TypeStore.init(allocator);
-    const info = try buildTypeInfo(allocator, @as(modules_mod.ModuleId, 0), fe, &type_store, true);
+    const info = try buildTypeInfo(allocator, @as(modules_mod.ModuleId, 0), fe, &type_store, true, &.{});
 
     const syntax_diags = try selectDiagnostics(allocator, fe.diagnostics, true, owned_source.path);
     const frontend_semantic_diags = try selectDiagnostics(allocator, fe.diagnostics, false, owned_source.path);
@@ -275,7 +277,7 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
         try project_modules.append(allocator, .{
             .id = module.id,
             .path = module.display_path,
-            .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false),
+            .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false, &.{}),
         });
     }
 
@@ -285,6 +287,23 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
 
     var import_list: std.ArrayList(SemanticImport) = .empty;
     try collectSemanticImports(allocator, &graph, &type_store, export_list.items, &import_list);
+
+    // The first pass establishes exported identities. Recollect declarations
+    // once imports are linked so annotations observe exact cross-module TypeIds.
+    // Missing/cyclic targets remain stable `unknown` placeholders.
+    _ = refreshImportTargets(&graph, export_list.items, import_list.items);
+    for (project_modules.items) |*module| {
+        const graph_module = graphModule(&graph, module.id) orelse continue;
+        const imported_types = try importedTypeBindings(allocator, module.id, import_list.items, &type_store);
+        module.type_info = try buildTypeInfo(
+            allocator,
+            module.id,
+            graph_module.result,
+            &type_store,
+            false,
+            imported_types,
+        );
+    }
 
     // Imported values may feed exported initializers. Iterate bounded propagation
     // over IDs; cycles settle as unknown or a stable canonical TypeId.
@@ -367,9 +386,8 @@ fn collectDirectExports(
                 .module_id = module.id,
                 .name = record.name,
                 .identity = .{
-                    .module_id = module.id,
                     .symbol_id = if (symbol) |item| item.id else null,
-                    .declaration = declaration,
+                    .declaration = types.SemanticDeclId.init(module.id, declaration),
                     .type_id = type_id,
                     .namespace = namespace,
                 },
@@ -400,7 +418,7 @@ fn exportIndex(exports: []const SemanticExport, module_id: ModuleId, name: []con
 
 fn appendReExport(allocator: std.mem.Allocator, exports: *std.ArrayList(SemanticExport), module_id: ModuleId, name: []const u8, target: SemanticExport, type_only: bool, span: @import("../frontend/tokens.zig").Span) !bool {
     if (exportIndex(exports.items, module_id, name, type_only)) |index| {
-        const changed = exports.items[index].identity.type_id != target.identity.type_id or exports.items[index].identity.module_id != target.identity.module_id;
+        const changed = exports.items[index].identity.type_id != target.identity.type_id or !exports.items[index].identity.declaration.eql(target.identity.declaration);
         exports.items[index].identity = target.identity;
         exports.items[index].type_only = type_only or target.type_only;
         exports.items[index].re_export = true;
@@ -492,9 +510,8 @@ fn collectSemanticImports(
                     try properties.append(allocator, .{ .name = item.name, .type_id = item.identity.type_id });
                 }
                 target = .{
-                    .module_id = target_module,
                     .symbol_id = null,
-                    .declaration = ast.invalid_node,
+                    .declaration = types.SemanticDeclId.init(target_module, ast.invalid_node),
                     .type_id = if (properties.items.len == 0) type_store.builtins.unknown else try type_store.intern(.{ .object = properties.items }),
                     .namespace = if (type_only) .type else .value,
                 };
@@ -527,7 +544,7 @@ fn refreshImportTargets(graph: *const modules_mod.ModuleGraph, exports: []const 
         const target_module = link.target_module orelse continue;
         const index = exportIndex(exports, target_module, item.imported_name, item.type_only) orelse continue;
         const target = exports[index].identity;
-        if (item.target == null or item.target.?.type_id != target.type_id or item.target.?.module_id != target.module_id) changed = true;
+        if (item.target == null or item.target.?.type_id != target.type_id or !item.target.?.declaration.eql(target.declaration)) changed = true;
         item.target = target;
         item.state = .resolved;
         item.runtime_binding = !item.type_only;
@@ -558,7 +575,7 @@ fn refreshProjectTypes(allocator: std.mem.Allocator, result: frontend.FrontendRe
     var nodes: std.ArrayList(NodeTypeInfo) = .{ .items = @constCast(info.nodes), .capacity = info.nodes.len };
     const symbols = @constCast(info.symbols);
     try refreshReferenceTypes(allocator, result, symbols, &nodes, &type_store.builtins);
-    try type_inference.inferPrimitiveExpressions(allocator, result.ast, &nodes, type_store);
+    _ = try type_inference.inferPrimitiveExpressionsWithCfgs(allocator, result.ast, &nodes, type_store, result.cfgs);
     var changed = refreshVariableTypes(result, symbols, nodes.items, &type_store.builtins);
     changed = (try refreshFunctionReturns(allocator, result, symbols, nodes.items, type_store)) or changed;
     info.nodes = try nodes.toOwnedSlice(allocator);
@@ -593,16 +610,45 @@ fn hasUnresolvedLinks(imports: []const SemanticImport) bool {
     return false;
 }
 
-fn buildTypeInfo(allocator: std.mem.Allocator, module_id: modules_mod.ModuleId, result: frontend.FrontendResult, type_store: *types.TypeStore, run_checker: bool) !TypeInfo {
+fn importedTypeBindings(
+    allocator: std.mem.Allocator,
+    module_id: ModuleId,
+    imports: []const SemanticImport,
+    type_store: *const types.TypeStore,
+) ![]const type_collector.ImportedTypeBinding {
+    var bindings: std.ArrayList(type_collector.ImportedTypeBinding) = .empty;
+    for (imports) |item| {
+        if (item.module_id != module_id or item.state == .namespace or item.state == .external) continue;
+        try bindings.append(allocator, .{
+            .local_name = item.local_name,
+            .symbol_id = item.import_symbol,
+            .type_id = if (item.target) |target| target.type_id else type_store.builtins.unknown,
+            .declaration = if (item.target) |target| target.declaration else null,
+            .placeholder = item.target == null,
+        });
+    }
+    return bindings.toOwnedSlice(allocator);
+}
+
+fn buildTypeInfo(
+    allocator: std.mem.Allocator,
+    module_id: modules_mod.ModuleId,
+    result: frontend.FrontendResult,
+    type_store: *types.TypeStore,
+    run_checker: bool,
+    imported_types: []const type_collector.ImportedTypeBinding,
+) !TypeInfo {
     const builtins = &type_store.builtins;
     var symbol_types: std.ArrayList(SymbolTypeInfo) = .empty;
     var node_types: std.ArrayList(NodeTypeInfo) = .empty;
-    const collected = try type_collector.collectDeclaredTypes(
+    const collected = try type_collector.collectDeclaredTypesInModuleWithImports(
         allocator,
         result.source,
         result.ast,
         result.bind,
+        module_id,
         type_store,
+        imported_types,
     );
 
     const inferred_nodes = try type_inference.inferLiteralNodeTypes(allocator, result.ast, builtins);
@@ -635,24 +681,31 @@ fn buildTypeInfo(allocator: std.mem.Allocator, module_id: modules_mod.ModuleId, 
             .parameter => if (entry.declared_type == null) {
                 entry.inferred_type = builtins.unknown;
             },
-            .function => entry.inferred_type = functionType(collected.function_signatures, symbol.id) orelse builtins.unknown,
+            .function => if (entry.declared_type == null) {
+                entry.inferred_type = functionType(collected.function_signatures, symbol.id) orelse builtins.unknown;
+            },
             .class, .interface, .enum_ => {
-                entry.inferred_type = priorDeclarationType(
+                // The collector predeclares one canonical nominal TypeId so
+                // annotations and the declaration symbol share identity.
+                entry.inferred_type = entry.declared_type orelse priorDeclarationType(
                     result.bind.symbols,
                     symbol_types.items,
                     symbol.declaration,
-                ) orelse try type_store.intern(switch (symbol.kind) {
-                    .class => .{ .class = .{ .module_id = module_id, .declaration_id = symbol.declaration, .name = symbol.name } },
-                    .interface => .{ .interface = .{ .module_id = module_id, .declaration_id = symbol.declaration, .name = symbol.name } },
-                    .enum_ => .{ .enum_type = .{ .module_id = module_id, .declaration_id = symbol.declaration, .name = symbol.name } },
-                    else => unreachable,
-                });
+                ) orelse builtins.unknown;
             },
             .type_alias => if (entry.declared_type == null) {
                 entry.inferred_type = builtins.unknown;
             },
             .import => entry.inferred_type = builtins.unknown,
             else => continue,
+        }
+        if (symbol.kind == .variable) {
+            if (entry.declared_type) |declared| switch (result.ast.node(symbol.declaration).data) {
+                .VariableDeclarator => |declarator| if (declarator.init) |initializer| {
+                    try putNodeContextualType(allocator, &node_types, initializer, declared, builtins.unknown);
+                },
+                else => {},
+            };
         }
         try symbol_types.append(allocator, entry);
     }
@@ -663,11 +716,12 @@ fn buildTypeInfo(allocator: std.mem.Allocator, module_id: modules_mod.ModuleId, 
     var round: usize = 0;
     while (round < symbol_types.items.len + 2) : (round += 1) {
         try refreshReferenceTypes(allocator, result, symbol_types.items, &node_types, builtins);
-        try type_inference.inferPrimitiveExpressions(
+        _ = try type_inference.inferPrimitiveExpressionsWithCfgs(
             allocator,
             result.ast,
             &node_types,
             type_store,
+            result.cfgs,
         );
         const variables_changed = refreshVariableTypes(result, symbol_types.items, node_types.items, builtins);
         const functions_changed = try refreshFunctionReturns(
@@ -810,25 +864,29 @@ fn refreshFunctionReturns(
             .FunctionDeclaration => |function| function,
             else => continue,
         };
-        if (declaration.return_type != null) continue;
-        const return_type = try type_inference.inferFunctionReturn(
+        const return_type = try type_inference.inferFunctionReturnWithCfgs(
             allocator,
+            symbol.declaration,
             declaration.body,
             false,
             declaration.flags,
             result.ast,
             node_types,
             type_store,
+            result.cfgs,
         );
 
         // Build parameters with resolved types.
         const new_sig_params = try collectFunctionParameters(
-            allocator, result.ast, declaration, type_store,
+            allocator,
+            result.ast,
+            declaration,
+            type_store,
         );
         const new_signature_id = try type_store.addFunctionDetailed(
             new_sig_params,
             return_type,
-            0,
+            @intCast(declaration.type_parameters.len),
             @import("../types/model.zig").FunctionFlags{
                 .is_async = declaration.flags.is_async,
                 .is_generator = declaration.flags.is_generator,
@@ -838,8 +896,8 @@ fn refreshFunctionReturns(
         // addFunctionDetailed clones parameters via cloneParameters; free our copy.
         allocator.free(new_sig_params);
 
-        // Write inferred signature to inferred_type for unannotated functions.
-        // Per Goal 134, declared_type stays null when no explicit annotation is present.
+        // Body inference is always separate from declaration evidence. For an
+        // annotated function effective() continues to prefer declared_type.
         const sym_info_ptr = symbolTypePtr(symbol_types, symbol.id) orelse continue;
         if (sym_info_ptr.inferred_type != null and
             sym_info_ptr.inferred_type.? == new_signature_id)
@@ -897,6 +955,25 @@ fn putNodeType(allocator: std.mem.Allocator, entries: *std.ArrayList(NodeTypeInf
         }
     }
     try entries.append(allocator, value);
+}
+
+fn putNodeContextualType(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(NodeTypeInfo),
+    node_id: ast.NodeId,
+    contextual_type: types.TypeId,
+    fallback_type: types.TypeId,
+) !void {
+    for (entries.items) |*entry| {
+        if (entry.node_id != node_id) continue;
+        entry.contextual_type = contextual_type;
+        return;
+    }
+    try entries.append(allocator, .{
+        .node_id = node_id,
+        .type_id = fallback_type,
+        .contextual_type = contextual_type,
+    });
 }
 
 fn selectDiagnostics(
@@ -1011,7 +1088,7 @@ test "SemanticResult keeps recovered partial output and split diagnostics" {
     try std.testing.expect(result.lookupNode(result.frontend.ast.root) != null);
 }
 
-test "SemanticResult repeated create query destroy" {
+test "Goal 133 semantic root repeated create query destroy" {
     var iteration: usize = 0;
     while (iteration < 32) : (iteration += 1) {
         var result = try analyze(std.testing.allocator, "let x: number = 1;");
@@ -1364,13 +1441,18 @@ test "Goal 137 annotated array mismatch reports per-element diagnostic" {
     }
     try std.testing.expect(found_element_mismatch);
 
-    // The declared type must still be an array of number — contextual typing
-    // does not destroy the initializer's inferred shape.
+    const init_info = result.lookupNodeTypeInfo(initializer_id).?;
+    const inferred = result.lookupType(init_info.type_id).?.kind.array;
+    const contextual = result.lookupType(init_info.contextual_type.?).?.kind.array;
+    try std.testing.expectEqual(result.type_store.builtins.string, inferred.element_type);
+    try std.testing.expectEqual(result.type_store.builtins.number, contextual.element_type);
+    try std.testing.expectEqual(init_info.type_id, init_info.effective().?);
+
+    // The declaration remains number[] while the expression remains string[].
     const symbol_id = goal137ValueSymbol(&result, "values").?;
     const sym_info = result.lookupSymbolType(symbol_id).?;
     const dt = sym_info.declared_type orelse return error.TestFailed;
     try std.testing.expect(dt != 0);
-
 }
 
 test "Goal 137 annotated object mismatch reports property diagnostic" {
@@ -1384,13 +1466,21 @@ test "Goal 137 annotated object mismatch reports property diagnostic" {
 
     var found_property_mismatch = false;
     for (result.semantic_diagnostics) |diagnostic| {
-        if (diagnostic.code == .type_mismatch and diagnostic.label != null) {
-            // The checker now emits a per-property label distinguishing the mismatch.
+        if (diagnostic.code == .type_mismatch and
+            std.mem.indexOf(u8, diagnostic.message, "object property") != null)
+        {
             found_property_mismatch = true;
             break;
         }
     }
     try std.testing.expect(found_property_mismatch);
+
+    const init_info = result.lookupNodeTypeInfo(initializer_id).?;
+    const inferred = result.lookupType(init_info.type_id).?.kind.object;
+    const contextual = result.lookupType(init_info.contextual_type.?).?.kind.object;
+    try std.testing.expectEqual(result.type_store.builtins.string, inferred[0].type_id);
+    try std.testing.expectEqual(result.type_store.builtins.number, contextual[0].type_id);
+    try std.testing.expectEqual(init_info.type_id, init_info.effective().?);
 
     const symbol_id = goal137ValueSymbol(&result, "object").?;
     const sym_info = result.lookupSymbolType(symbol_id).?;
@@ -1416,6 +1506,15 @@ test "Goal 137 annotated tuple mismatch reports both element diagnostics" {
     }
     try std.testing.expectEqual(@as(usize, 2), mismatch_count);
 
+    const init_info = result.lookupNodeTypeInfo(initializer_id).?;
+    const inferred = result.lookupType(init_info.type_id).?.kind.tuple;
+    const contextual = result.lookupType(init_info.contextual_type.?).?.kind.tuple;
+    try std.testing.expectEqual(result.type_store.builtins.string, inferred.elements[0].type_id);
+    try std.testing.expectEqual(result.type_store.builtins.number, inferred.elements[1].type_id);
+    try std.testing.expectEqual(result.type_store.builtins.number, contextual.elements[0].type_id);
+    try std.testing.expectEqual(result.type_store.builtins.string, contextual.elements[1].type_id);
+    try std.testing.expectEqual(init_info.type_id, init_info.effective().?);
+
     const symbol_id = goal137ValueSymbol(&result, "tuple").?;
     const sym_info = result.lookupSymbolType(symbol_id).?;
     // Declared tuple shape survives.
@@ -1440,7 +1539,6 @@ test "Goal 137 stable annotated aggregate converges without round exhaustion" {
     const node_id = init_node.?;
     const info = result.lookupNodeTypeInfo(node_id).?;
     try std.testing.expectEqual(@as(u8, @intFromEnum(type_info.TypeResolutionState.resolved)), @as(u8, @intFromEnum(info.state)));
-
 
     // Inferred type should match declared shape — stable convergence.
     const inferred_id = info.type_id;
@@ -1558,11 +1656,372 @@ test "Goal 119 access failures emit distinct diagnostics and recover" {
     try std.testing.expectEqual(TypeResolutionState.@"error", result.lookupNodeTypeInfo(testVariableInitializer(&result, "invalid").?).?.state);
 }
 
+test "Goal 143 class and interface members participate in access and calls" {
+    var result = try analyze(std.testing.allocator,
+        \\class Base {
+        \\  inherited: boolean;
+        \\  static root(): number { return 1; }
+        \\}
+        \\class User extends Base {
+        \\  name: string;
+        \\  constructor(name: string) {}
+        \\  greet(): number { return 1; }
+        \\  static create(): User { return new User("A"); }
+        \\}
+        \\interface NamedBase { id: number }
+        \\interface Named extends NamedBase {
+        \\  title: string;
+        \\  render(scale: number): boolean;
+        \\}
+        \\const user = new User("A");
+        \\const name = user.name;
+        \\const greeting = user.greet();
+        \\const made = User.create();
+        \\const inherited = user.inherited;
+        \\const staticInherited = User.root();
+        \\function inspect(value: Named) {
+        \\  const title = value.title;
+        \\  const rendered = value.render(1);
+        \\  const id = value.id;
+        \\}
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+    const user_type = result.lookupNodeType(testVariableInitializer(&result, "user").?).?;
+    try std.testing.expect(result.lookupType(user_type).?.kind == .class);
+    try std.testing.expectEqual(result.type_store.builtins.string, result.lookupNodeType(testVariableInitializer(&result, "name").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(testVariableInitializer(&result, "greeting").?).?);
+    try std.testing.expectEqual(user_type, result.lookupNodeType(testVariableInitializer(&result, "made").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.boolean, result.lookupNodeType(testVariableInitializer(&result, "inherited").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(testVariableInitializer(&result, "staticInherited").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.string, result.lookupNodeType(testVariableInitializer(&result, "title").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.boolean, result.lookupNodeType(testVariableInitializer(&result, "rendered").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(testVariableInitializer(&result, "id").?).?);
+
+    const greeting = result.frontend.ast.node(testVariableInitializer(&result, "greeting").?).data.CallExpression;
+    try std.testing.expectEqual(user_type, result.lookupNodeTypeInfo(greeting.callee).?.receiver_type.?);
+}
+
+test "Goal 143 rejects unknown members and invalid constructors through Checker v2" {
+    var result = try analyze(std.testing.allocator,
+        \\class User {
+        \\  constructor(name: string) {}
+        \\  static create(): User { return new User("A"); }
+        \\}
+        \\const user = new User("A");
+        \\const missing = user.absent;
+        \\const wrongCount = new User();
+        \\const wrongType = new User(1);
+        \\const invalid = new user();
+        \\const staticOnly = user.create;
+    );
+    defer result.deinit();
+
+    var unknown_members: usize = 0;
+    var invalid_counts: usize = 0;
+    var invalid_types: usize = 0;
+    var invalid_constructors: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        switch (diagnostic.code) {
+            .unknown_property => unknown_members += 1,
+            .invalid_argument_count => invalid_counts += 1,
+            .invalid_argument_type => invalid_types += 1,
+            .type_mismatch => if (diagnostic.label != null and std.mem.eql(u8, diagnostic.label.?, "invalid constructor")) {
+                invalid_constructors += 1;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), unknown_members);
+    try std.testing.expectEqual(@as(usize, 1), invalid_counts);
+    try std.testing.expectEqual(@as(usize, 1), invalid_types);
+    try std.testing.expectEqual(@as(usize, 1), invalid_constructors);
+}
+
+test "Goal 144 return inference includes reachable CFG fallthrough" {
+    var result = try analyze(std.testing.allocator,
+        \\function maybe(value: boolean) { if (value) return 1; }
+        \\function strict(value: boolean): number { if (value) return 1; }
+        \\function complete(value: boolean): number { if (value) return 1; else return 2; }
+        \\function forever(): number { for (;;) {} }
+        \\const inferred = maybe(true);
+    );
+    defer result.deinit();
+
+    const inferred_type = result.lookupType(result.lookupNodeType(testVariableInitializer(&result, "inferred").?).?).?;
+    try std.testing.expect(inferred_type.kind == .union_type);
+    try std.testing.expect(std.mem.indexOfScalar(types.TypeId, inferred_type.kind.union_type, result.type_store.builtins.number) != null);
+    try std.testing.expect(std.mem.indexOfScalar(types.TypeId, inferred_type.kind.union_type, result.type_store.builtins.undefined) != null);
+
+    var fallthrough_errors: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.label != null and std.mem.eql(u8, diagnostic.label.?, "incompatible fallthrough")) fallthrough_errors += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), fallthrough_errors);
+}
+
+test "Goal 144 optional method and callable union calls retain validation" {
+    var result = try analyze(std.testing.allocator,
+        \\const service = { read(value: number): string { return "ok"; } };
+        \\const good = service.read?.(1);
+        \\const bad = service.read?.("wrong");
+        \\let maybe: ((value: number) => string) | undefined;
+        \\const unionGood = maybe?.(1);
+        \\const unionBad = maybe?.("wrong");
+        \\let mixed: ((value: number) => string) | number;
+        \\const rejected = mixed(1);
+        \\let alternatives: ((value: number) => string) | ((value: string) => number);
+        \\const incompatibleUnion = alternatives(1);
+    );
+    defer result.deinit();
+
+    for ([_][]const u8{ "good", "unionGood" }) |name| {
+        const result_type = result.lookupType(result.lookupNodeType(testVariableInitializer(&result, name).?).?).?;
+        try std.testing.expect(result_type.kind == .union_type);
+        try std.testing.expect(std.mem.indexOfScalar(types.TypeId, result_type.kind.union_type, result.type_store.builtins.string) != null);
+        try std.testing.expect(std.mem.indexOfScalar(types.TypeId, result_type.kind.union_type, result.type_store.builtins.undefined) != null);
+    }
+
+    var argument_errors: usize = 0;
+    var callee_errors: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .invalid_argument_type) argument_errors += 1;
+        if (diagnostic.label != null and std.mem.eql(u8, diagnostic.label.?, "invalid call target")) callee_errors += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), argument_errors);
+    try std.testing.expectEqual(@as(usize, 1), callee_errors);
+}
+
+test "Goal 144 compound assignment checks call results and constructors remain stable" {
+    var result = try analyze(std.testing.allocator,
+        \\function text(): string { return "x"; }
+        \\let count: number = 1;
+        \\count += text();
+        \\class Box { constructor(value: number) {} }
+        \\const box = new Box(1);
+        \\function descend(value: number): number { return value ? descend(value - 1) : 0; }
+        \\const recursive = descend(2);
+    );
+    defer result.deinit();
+
+    try std.testing.expect(result.lookupType(result.lookupNodeType(testVariableInitializer(&result, "box").?).?).?.kind == .class);
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(testVariableInitializer(&result, "recursive").?).?);
+    var compound_errors: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (std.mem.eql(u8, diagnostic.message, "compound assignment result is not assignable to the target type")) compound_errors += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), compound_errors);
+}
+
+test "Goal 144 async and generator return categories are explicit" {
+    var result = try analyze(std.testing.allocator,
+        \\async function load(): number { return 1; }
+        \\function* values(): number { return 1; }
+        \\const pending = load();
+        \\const iterator = values();
+    );
+    defer result.deinit();
+
+    const pending = result.lookupType(result.lookupNodeType(testVariableInitializer(&result, "pending").?).?).?;
+    try std.testing.expect(pending.kind == .promise);
+    try std.testing.expectEqual(result.type_store.builtins.number, pending.kind.promise.value_type);
+    const iterator = result.lookupType(result.lookupNodeType(testVariableInitializer(&result, "iterator").?).?).?;
+    try std.testing.expect(iterator.kind == .generator);
+    try std.testing.expectEqual(result.type_store.builtins.unknown, iterator.kind.generator.yield_type);
+    try std.testing.expectEqual(result.type_store.builtins.number, iterator.kind.generator.return_type);
+}
+
 fn testReferenceTypeAt(result: *const SemanticResult, offset: usize) ?types.TypeId {
     for (result.frontend.resolve.references) |reference| {
         if (reference.span.start == offset) return result.lookupNodeType(reference.node);
     }
     return null;
+}
+
+fn testFlowEntryAt(result: *const SemanticResult, offset: usize) ?type_info.FlowTypeInfo {
+    for (result.frontend.resolve.references) |reference| {
+        if (reference.span.start != offset) continue;
+        for (result.type_info.flow_types) |entry| {
+            if (entry.reference_node == reference.node) return entry;
+        }
+    }
+    return null;
+}
+
+test "Goal 145 dataflow converges and preserves same-block program points" {
+    const source =
+        \\function flow(value: string | number, flag: boolean) {
+        \\  if (typeof value === "string") {
+        \\    const before = value;
+        \\    value = 1;
+        \\    const after = value;
+        \\  }
+        \\  if (flag) value = "left"; else value = 2;
+        \\  while (flag) {
+        \\    if (typeof value === "string") value = 3;
+        \\    break;
+        \\  }
+        \\  return value;
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+    const before_offset = (std.mem.indexOf(u8, source, "before = value") orelse unreachable) + "before = ".len;
+    const after_offset = (std.mem.indexOf(u8, source, "after = value") orelse unreachable) + "after = ".len;
+    const before = testFlowEntryAt(&result, before_offset).?;
+    const after = testFlowEntryAt(&result, after_offset).?;
+
+    try std.testing.expectEqual(before.function_node, after.function_node);
+    try std.testing.expectEqual(before.block_id, after.block_id);
+    try std.testing.expect(after.program_point > before.program_point);
+    try std.testing.expectEqual(result.type_store.builtins.string, before.type_id);
+    try std.testing.expectEqual(result.type_store.builtins.number, after.type_id);
+    try std.testing.expect(result.type_info.flow_types.len > 2);
+}
+
+test "Goal 146 typeof and instanceof narrow to the supported value types" {
+    const source =
+        \\class User { name: string; }
+        \\class Admin { level: number; }
+        \\function primitives(value: string | number) {
+        \\  if (typeof value === "string") { const text = value; }
+        \\  else { const numeric = value; }
+        \\}
+        \\function nominal(value: User | Admin) {
+        \\  if (value instanceof User) { const user = value; }
+        \\  else { const admin = value; }
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+
+    const text_offset = (std.mem.indexOf(u8, source, "text = value") orelse unreachable) + "text = ".len;
+    const numeric_offset = (std.mem.indexOf(u8, source, "numeric = value") orelse unreachable) + "numeric = ".len;
+    try std.testing.expectEqual(result.type_store.builtins.string, testReferenceTypeAt(&result, text_offset).?);
+    try std.testing.expectEqual(result.type_store.builtins.number, testReferenceTypeAt(&result, numeric_offset).?);
+
+    const user_offset = (std.mem.indexOf(u8, source, "user = value") orelse unreachable) + "user = ".len;
+    const admin_offset = (std.mem.indexOf(u8, source, "admin = value") orelse unreachable) + "admin = ".len;
+    const user = result.lookupType(testReferenceTypeAt(&result, user_offset).?).?;
+    const admin = result.lookupType(testReferenceTypeAt(&result, admin_offset).?).?;
+    try std.testing.expect(user.kind == .class);
+    try std.testing.expect(admin.kind == .class);
+    try std.testing.expectEqualStrings("User", user.kind.class.name);
+    try std.testing.expectEqualStrings("Admin", admin.kind.class.name);
+}
+
+test "Goal 146 in narrows object and interface unions" {
+    const source =
+        \\interface Named { name: string; }
+        \\interface Counted { count: number; }
+        \\function interfaces(value: Named | Counted) {
+        \\  if ("name" in value) { const named = value; }
+        \\}
+        \\function objects(value: { name: string } | { count: number }) {
+        \\  if ("count" in value) { const counted = value; }
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+
+    const named_offset = (std.mem.indexOf(u8, source, "named = value") orelse unreachable) + "named = ".len;
+    const named = result.lookupType(testReferenceTypeAt(&result, named_offset).?).?;
+    try std.testing.expect(named.kind == .interface);
+    try std.testing.expectEqualStrings("Named", named.kind.interface.name);
+
+    const counted_offset = (std.mem.indexOf(u8, source, "counted = value") orelse unreachable) + "counted = ".len;
+    const counted = result.lookupType(testReferenceTypeAt(&result, counted_offset).?).?;
+    try std.testing.expect(counted.kind == .object);
+    try std.testing.expectEqual(@as(usize, 1), counted.kind.object.len);
+    try std.testing.expectEqualStrings("count", counted.kind.object[0].name);
+}
+
+test "Goal 146 truthiness preserves explicit falsy literals" {
+    const source =
+        \\function literals(value: "" | 0 | false | "ok" | 1 | true | null | undefined) {
+        \\  if (value) { const truthy = value; }
+        \\  else { const falsy = value; }
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+    const truthy_offset = (std.mem.indexOf(u8, source, "truthy = value") orelse unreachable) + "truthy = ".len;
+    const falsy_offset = (std.mem.indexOf(u8, source, "falsy = value") orelse unreachable) + "falsy = ".len;
+    const truthy = result.lookupType(testReferenceTypeAt(&result, truthy_offset).?).?;
+    const falsy = result.lookupType(testReferenceTypeAt(&result, falsy_offset).?).?;
+    try std.testing.expect(truthy.kind == .union_type);
+    try std.testing.expectEqual(@as(usize, 3), truthy.kind.union_type.len);
+    try std.testing.expect(falsy.kind == .union_type);
+    try std.testing.expectEqual(@as(usize, 5), falsy.kind.union_type.len);
+
+    var has_empty = false;
+    var has_zero = false;
+    var has_false = false;
+    var has_null = false;
+    var has_undefined = false;
+    for (falsy.kind.union_type) |member| {
+        if (member == result.type_store.builtins.null_) has_null = true;
+        if (member == result.type_store.builtins.undefined) has_undefined = true;
+        const ty = result.lookupType(member).?;
+        if (ty.kind == .literal) switch (ty.kind.literal) {
+            .string => |value| has_empty = value.len == 0,
+            .number => |value| has_zero = value == 0,
+            .boolean => |value| has_false = !value,
+            .bigint => {},
+        };
+    }
+    try std.testing.expect(has_empty and has_zero and has_false and has_null and has_undefined);
+}
+
+test "Goal 146 joins facts and leaves unsupported guards conservative" {
+    const source =
+        \\function joined(value: string | number, flag: boolean, effect: any) {
+        \\  if (typeof value === "string") {
+        \\    if (flag) value = 1;
+        \\    const merged = value;
+        \\  }
+        \\  if (typeof value === "object") { const unsupported = value; }
+        \\  if (value) { effect(); const invalidated = value; }
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+    const merged_offset = (std.mem.indexOf(u8, source, "merged = value") orelse unreachable) + "merged = ".len;
+    const unsupported_offset = (std.mem.indexOf(u8, source, "unsupported = value") orelse unreachable) + "unsupported = ".len;
+    const invalidated_offset = (std.mem.indexOf(u8, source, "invalidated = value") orelse unreachable) + "invalidated = ".len;
+    try std.testing.expect(result.lookupType(testReferenceTypeAt(&result, merged_offset).?).?.kind == .union_type);
+    try std.testing.expect(result.lookupType(testReferenceTypeAt(&result, unsupported_offset).?).?.kind == .union_type);
+    try std.testing.expect(result.lookupType(testReferenceTypeAt(&result, invalidated_offset).?).?.kind == .union_type);
+}
+
+test "Goal 147 checker accepts structural interfaces and reports inherited property paths" {
+    var result = try analyze(std.testing.allocator,
+        \\interface Entity { id: number; }
+        \\interface View extends Entity { label: string; }
+        \\const good: View = { id: 1, label: "ok" };
+        \\const bad: View = { id: "wrong", label: "ok" };
+        \\let declared: View = good;
+        \\const projected: { id: number; label: string } = declared;
+    );
+    defer result.deinit();
+
+    var path_errors: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .type_mismatch and
+            std.mem.indexOf(u8, diagnostic.message, "property path 'id'") != null)
+        {
+            path_errors += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), path_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.semantic_diagnostics.len);
+
+    const good = result.lookupNodeTypeInfo(testVariableInitializer(&result, "good").?).?;
+    try std.testing.expect(result.lookupType(good.type_id).?.kind == .object);
+    try std.testing.expect(result.lookupType(good.contextual_type.?).?.kind == .interface);
+    try std.testing.expectEqual(good.type_id, good.effective().?);
+    try std.testing.expect(result.lookupType(result.lookupNodeType(testVariableInitializer(&result, "projected").?).?).?.kind == .interface);
 }
 
 test "Goal 121 typeof narrowing follows early exits" {
@@ -1712,6 +2171,14 @@ fn projectImportByLocal(project: *const ProjectSemanticResult, module_id: Module
     return null;
 }
 
+fn projectSymbolByName(project: *const ProjectSemanticResult, module_id: ModuleId, name: []const u8, kind: binder.SymbolKind) ?binder.SymbolId {
+    const module = graphModule(&project.graph, module_id) orelse return null;
+    for (module.result.bind.symbols) |symbol| {
+        if (symbol.kind == kind and std.mem.eql(u8, symbol.name, name)) return symbol.id;
+    }
+    return null;
+}
+
 fn analyzeTemporaryProject(tmp: *std.testing.TmpDir, entry: []const u8) !ProjectSemanticResult {
     const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
     const entry_path = try tmp.dir.realPathFileAlloc(io, entry, std.testing.allocator);
@@ -1837,6 +2304,133 @@ test "Goal 124 repeated project rebuilds do not retain stale semantic storage" {
     try std.testing.expectEqual(second_export.identity, second_import.target.?);
 }
 
+test "Goal 139 imported type aliases and reexports preserve declaration identity" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.ts", .data =
+        \\export interface User { name: string; }
+        \\export class Box { value: number; }
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "relay.ts", .data =
+        \\export type { User as Person } from "./dep";
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\import type { Person as LocalUser } from "./relay";
+        \\import { Box as LocalBox } from "./dep";
+        \\let value: LocalUser;
+        \\let box: LocalBox;
+    });
+
+    var project = try analyzeTemporaryProject(&tmp, "main.ts");
+    defer project.deinit();
+    const dep_id = projectModuleIdByBasename(&project, "dep.ts") orelse return error.TestExpectedEqual;
+    const relay_id = projectModuleIdByBasename(&project, "relay.ts") orelse return error.TestExpectedEqual;
+    const main_id = projectModuleIdByBasename(&project, "main.ts") orelse return error.TestExpectedEqual;
+    const user = project.lookupExport(dep_id, "User") orelse return error.TestExpectedEqual;
+    const person = project.lookupExport(relay_id, "Person") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(user.identity, person.identity);
+
+    const local_user = projectImportByLocal(&project, main_id, "LocalUser") orelse return error.TestExpectedEqual;
+    try std.testing.expect(local_user.type_only);
+    try std.testing.expect(!local_user.runtime_binding);
+    try std.testing.expectEqual(user.identity, local_user.target.?);
+    const user_shape = project.type_store.lookupInterfaceSemanticType(user.identity.declaration) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), user_shape.members.members.len);
+    try std.testing.expectEqualStrings("name", user_shape.members.members[0].name);
+    try std.testing.expectEqual(project.type_store.builtins.string, user_shape.members.members[0].type_id);
+    const main_module = project.lookupModule(main_id) orelse return error.TestExpectedEqual;
+    const value_symbol = projectSymbolByName(&project, main_id, "value", .variable) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(user.identity.type_id, main_module.type_info.lookupSymbol(value_symbol).?.declared_type.?);
+
+    const box_import = projectImportByLocal(&project, main_id, "LocalBox") orelse return error.TestExpectedEqual;
+    try std.testing.expect(!box_import.type_only);
+    try std.testing.expect(box_import.runtime_binding);
+    const box_target = box_import.target.?;
+    const box_shape = project.type_store.lookupClassSemanticType(box_target.declaration) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), box_shape.instance_members.members.len);
+    try std.testing.expectEqualStrings("value", box_shape.instance_members.members[0].name);
+    try std.testing.expectEqual(project.type_store.builtins.number, box_shape.instance_members.members[0].type_id);
+    const box_symbol = projectSymbolByName(&project, main_id, "box", .variable) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(box_import.target.?.type_id, main_module.type_info.lookupSymbol(box_symbol).?.declared_type.?);
+}
+
+test "Goal 139 cyclic imported annotations terminate with stable placeholders" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.ts", .data =
+        \\import type { B } from "./b";
+        \\export type A = B;
+        \\let localA: B;
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.ts", .data =
+        \\import type { A } from "./a";
+        \\export type B = A;
+        \\let localB: A;
+    });
+
+    var project = try analyzeTemporaryProject(&tmp, "a.ts");
+    defer project.deinit();
+    try std.testing.expect(project.is_partial);
+    const a_id = projectModuleIdByBasename(&project, "a.ts") orelse return error.TestExpectedEqual;
+    const b_id = projectModuleIdByBasename(&project, "b.ts") orelse return error.TestExpectedEqual;
+    const a_module = project.lookupModule(a_id) orelse return error.TestExpectedEqual;
+    const b_module = project.lookupModule(b_id) orelse return error.TestExpectedEqual;
+    const local_a = projectSymbolByName(&project, a_id, "localA", .variable) orelse return error.TestExpectedEqual;
+    const local_b = projectSymbolByName(&project, b_id, "localB", .variable) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(project.type_store.builtins.unknown, a_module.type_info.lookupSymbol(local_a).?.declared_type.?);
+    try std.testing.expectEqual(project.type_store.builtins.unknown, b_module.type_info.lookupSymbol(local_b).?.declared_type.?);
+}
+
+test "Goal 136 project nominal identities qualify equal local declaration ids" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const declarations =
+        \\export class Shared {}
+        \\export interface Shape {}
+        \\export enum Choice { A }
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.ts", .data = declarations });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.ts", .data = declarations });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\import { Shared as AShared, Shape as AShape, Choice as AChoice } from "./a";
+        \\import { Shared as BShared, Shape as BShape, Choice as BChoice } from "./b";
+    });
+
+    var project = try analyzeTemporaryProject(&tmp, "main.ts");
+    defer project.deinit();
+    const a_id = projectModuleIdByBasename(&project, "a.ts") orelse return error.TestExpectedEqual;
+    const b_id = projectModuleIdByBasename(&project, "b.ts") orelse return error.TestExpectedEqual;
+    const main_id = projectModuleIdByBasename(&project, "main.ts") orelse return error.TestExpectedEqual;
+
+    const pairs = [_][2][]const u8{
+        .{ "Shared", "AShared" },
+        .{ "Shape", "AShape" },
+        .{ "Choice", "AChoice" },
+    };
+    const b_locals = [_][]const u8{ "BShared", "BShape", "BChoice" };
+    for (pairs, b_locals) |names, b_local| {
+        const a_export = project.lookupExport(a_id, names[0]) orelse return error.TestExpectedEqual;
+        const b_export = project.lookupExport(b_id, names[0]) orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(
+            a_export.identity.declaration.declaration_id,
+            b_export.identity.declaration.declaration_id,
+        );
+        try std.testing.expect(!a_export.identity.declaration.eql(b_export.identity.declaration));
+        try std.testing.expect(a_export.identity.type_id != b_export.identity.type_id);
+        try std.testing.expectEqual(
+            a_export.identity,
+            projectImportByLocal(&project, main_id, names[1]).?.target.?,
+        );
+        try std.testing.expectEqual(
+            b_export.identity,
+            projectImportByLocal(&project, main_id, b_local).?.target.?,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Goal 134 regression tests — immutable function signatures.
 // ---------------------------------------------------------------------------
@@ -1894,12 +2488,8 @@ test "Goal 134 two unannotated functions with different inferred returns retain 
 }
 
 test "Goal 134 unannotated and annotated functions keep separate signature slots" {
-    // Even when both are analysed in the same pass, each symbol gets exactly one
-    // non-null slot: inferred_type for unannotated, either declared or inferred
-    // (depending on whether an annotation is present) for annotated. The two
-    // must never be co-mingled into declared_type for an unannotated function.
     var result = try analyze(std.testing.allocator,
-        \\function annotated(): number { return 1; }
+        \\function annotated(): number { return "body"; }
         \\function unannotated() { return "x"; }
     );
     defer result.deinit();
@@ -1907,19 +2497,24 @@ test "Goal 134 unannotated and annotated functions keep separate signature slots
     const ann = goal134FunctionSymbol(&result, "annotated").?;
     const unn = goal134FunctionSymbol(&result, "unannotated").?;
 
-    // Both must have an effective signature (declared or inferred).
-    try std.testing.expect(result.lookupSymbolType(ann).?.effective() != null);
+    const ann_info = result.lookupSymbolType(ann).?;
+    const ann_declared = ann_info.declared_type orelse return error.TestFailed;
+    const ann_inferred = ann_info.inferred_type orelse return error.TestFailed;
     try std.testing.expect(result.lookupSymbolType(unn).?.inferred_type != null);
 
-    const ann_sig_id = result.lookupSymbolType(ann).?.effective().?;
     const unn_sig_id = result.lookupSymbolType(unn).?.inferred_type.?;
-    try std.testing.expect(ann_sig_id != unn_sig_id);
+    try std.testing.expect(ann_declared != ann_inferred);
+    try std.testing.expectEqual(ann_declared, ann_info.effective().?);
 
-    // The annotated function returns number in its effective slot.
-    const ann_sig = result.lookupFunctionType(ann_sig_id).?;
-    try std.testing.expectEqual(result.type_store.builtins.number, ann_sig.return_type);
+    try std.testing.expectEqual(
+        result.type_store.builtins.number,
+        result.lookupFunctionType(ann_declared).?.return_type,
+    );
+    try std.testing.expectEqual(
+        result.type_store.builtins.string,
+        result.lookupFunctionType(ann_inferred).?.return_type,
+    );
 
-    // The unannotated one is inferred to return string.
     const unn_sig = result.lookupFunctionType(unn_sig_id).?;
     try std.testing.expectEqual(result.type_store.builtins.string, unn_sig.return_type);
 }
@@ -1944,7 +2539,6 @@ test "Goal 134 inference loop converges across repeated analysis rounds" {
         try std.testing.expectEqual(idA_b, r2.lookupSymbolType(fb2).?.inferred_type.?);
     }
 }
-
 
 // ---------------------------------------------------------------------------
 
@@ -1975,20 +2569,28 @@ test "Goal 135 primitives, objects and functions share one TypeId space" {
     try std.testing.expect(ts.builtins.number >= 100);
     try std.testing.expect(ts.builtins.number < 1000);
 
-    // The function signature TypeId for `bar` must live in user space (>= next_user_type_id).
+    const object_type = try ts.intern(.{ .object = &.{.{
+        .name = "value",
+        .type_id = ts.builtins.number,
+    }} });
+    try std.testing.expect(object_type >= types.next_user_type_id);
+
+    // The function signature TypeId for `bar` must live in user space.
     const bar_sym = goal134FunctionSymbol(&result, "bar").?;
     const bar_sig = result.lookupSymbolType(bar_sym).?.inferred_type orelse return error.TestFailed;
     try std.testing.expect(bar_sig >= 1000);
 
     // The builtin number TypeId must be findable via the store's lookup.
     const found_number = ts.lookup(ts.builtins.number) orelse return error.TestFailed;
-    _ = found_number;  // existence check passed
+    _ = found_number; // existence check passed
 
     // Sanity: no two of {number, string, bar_sig} may collide — they come from
     // different allocation sites but the same TypeStore.
     try std.testing.expect(ts.builtins.number != ts.builtins.string);
     try std.testing.expect(ts.builtins.number != bar_sig);
     try std.testing.expect(ts.builtins.string != bar_sig);
+    try std.testing.expect(object_type != bar_sig);
+    try std.testing.expect(ts.lookup(object_type) != null);
 
     // The TypeStore is the only allocator: every record, signature and builtin
     // TypeId lives within one struct with a single source of identity. Walk the
@@ -2001,7 +2603,5 @@ test "Goal 135 primitives, objects and functions share one TypeId space" {
         }
     }
 
-    // No other allocator can produce a conflicting TypeId: confirm the legacy 
-    // FunctionSignatureStore referenced in goal-135 spec no longer exists. The
-    // regression invariant — future regressions to Goal 134/135 will fail.
+    // Future independent allocators would violate these ownership assertions.
 }

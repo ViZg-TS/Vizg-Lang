@@ -5,9 +5,8 @@ const cfg = @import("../frontend/cfg.zig");
 const frontend = @import("../frontend/frontend.zig");
 const tokens = @import("../frontend/tokens.zig");
 const types = @import("../types/root.zig");
+const dataflow = @import("dataflow.zig");
 const type_info = @import("type_info.zig");
-
-const Fact = struct { symbol: binder.SymbolId, type_id: types.TypeId };
 
 pub const Result = struct { flow_types: []const type_info.FlowTypeInfo };
 
@@ -19,146 +18,162 @@ const Analyzer = struct {
     nodes: *std.ArrayList(type_info.NodeTypeInfo),
     flow: std.ArrayList(type_info.FlowTypeInfo) = .empty,
     function_node: ast.NodeId = ast.invalid_node,
-    function_cfg: ?cfg.FunctionCfg = null,
+    block_id: cfg.BasicBlockId = 0,
+    program_point: u32 = 0,
 
     fn run(self: *Analyzer) !Result {
         for (self.frontend_result.cfgs) |function_cfg| {
             self.function_node = function_cfg.function;
-            self.function_cfg = function_cfg;
-            var facts: std.ArrayList(Fact) = .empty;
-            try self.processFunction(function_cfg.function, &facts);
+            var solved = try dataflow.solve(self.allocator, function_cfg.graph, &.{}, self);
+            defer solved.deinit();
         }
         return .{ .flow_types = try self.flow.toOwnedSlice(self.allocator) };
     }
 
-    fn processFunction(self: *Analyzer, node_id: ast.NodeId, facts: *std.ArrayList(Fact)) !void {
-        switch (self.frontend_result.ast.node(node_id).data) {
-            .FunctionDeclaration => |value| try self.processStatement(value.body, facts),
-            .FunctionExpression => |value| try self.processStatement(value.body, facts),
-            .ArrowFunctionExpression => |value| if (value.expression_body)
-                try self.processExpr(value.body, facts, self.blockFor(value.body))
-            else
-                try self.processStatement(value.body, facts),
-            .ClassMethod => |value| try self.processStatement(value.body, facts),
+    pub fn transferBlock(self: *Analyzer, block: cfg.BasicBlock, facts: *dataflow.StateBuilder) !void {
+        self.block_id = block.id;
+        self.program_point = 0;
+        for (block.statements) |statement| try self.processStatement(statement, facts);
+    }
+
+    pub fn transferEdge(self: *Analyzer, predecessor: cfg.BasicBlock, successor: cfg.BasicBlock, facts: *dataflow.StateBuilder) !void {
+        if (predecessor.kind != .condition or predecessor.statements.len == 0) return;
+        var successor_index: ?usize = null;
+        for (predecessor.successors, 0..) |candidate, index| if (candidate == successor.id) {
+            successor_index = index;
+            break;
+        };
+        const truthy = (successor_index orelse return) == 0;
+        const statement = predecessor.statements[predecessor.statements.len - 1];
+        switch (self.frontend_result.ast.node(statement).data) {
+            .IfStatement => |value| try self.applyGuard(value.condition, truthy, facts),
+            .WhileStatement => |value| try self.applyGuard(value.condition, truthy, facts),
+            .DoWhileStatement => |value| try self.applyGuard(value.condition, truthy, facts),
+            .ForStatement => |value| if (value.condition) |condition| try self.applyGuard(condition, truthy, facts),
             else => {},
         }
     }
 
-    fn processStatement(self: *Analyzer, node_id: ast.NodeId, facts: *std.ArrayList(Fact)) anyerror!void {
+    pub fn mergeValues(self: *Analyzer, key: dataflow.FactKey, left: u32, right: u32) !?u32 {
+        if (left == right) return left;
+        const merged = try self.store.unionOf(&.{ left, right });
+        return if (merged == self.baseType(key.symbol)) null else merged;
+    }
+
+    fn processStatement(self: *Analyzer, node_id: ast.NodeId, facts: *dataflow.StateBuilder) anyerror!void {
         if (!self.valid(node_id)) return;
-        const block_id = self.blockFor(node_id);
         switch (self.frontend_result.ast.node(node_id).data) {
-            .BlockStatement => |value| for (value.statements) |statement| try self.processStatement(statement, facts),
-            .ExpressionStatement => |value| try self.processExpr(value.expression, facts, block_id),
+            .ExpressionStatement => |value| try self.processExpr(value.expression, facts),
             .VariableDeclaration => |value| for (value.declarations) |declaration| try self.processStatement(declaration, facts),
             .VariableDeclarator => |value| {
-                if (value.init) |initializer| try self.processExpr(initializer, facts, block_id);
+                if (value.init) |initializer| try self.processExpr(initializer, facts);
                 self.invalidateDeclaration(node_id, facts);
             },
-            .ReturnStatement => |value| if (value.argument) |argument| try self.processExpr(argument, facts, block_id),
-            .ThrowStatement => |value| try self.processExpr(value.argument, facts, block_id),
-            .IfStatement => |value| {
-                try self.processExpr(value.condition, facts, block_id);
-                var true_facts = try self.cloneFacts(facts.items);
-                try self.applyGuard(value.condition, true, &true_facts);
-                try self.processStatement(value.consequent, &true_facts);
-                var false_facts = try self.cloneFacts(facts.items);
-                try self.applyGuard(value.condition, false, &false_facts);
-                if (value.alternate) |alternate| {
-                    try self.processStatement(alternate, &false_facts);
-                }
-                const true_exits = self.statementTerminates(value.consequent);
-                const false_exits = if (value.alternate) |alternate| self.statementTerminates(alternate) else false;
-                if (true_exits and !false_exits) facts.* = false_facts else if (false_exits and !true_exits) facts.* = true_facts;
-            },
-            .WhileStatement => |value| {
-                try self.processExpr(value.condition, facts, block_id);
-                var body_facts = try self.cloneFacts(facts.items);
-                try self.applyGuard(value.condition, true, &body_facts);
-                try self.processStatement(value.body, &body_facts);
-            },
-            .DoWhileStatement => |value| {
-                var body_facts = try self.cloneFacts(facts.items);
-                try self.processStatement(value.body, &body_facts);
-                try self.processExpr(value.condition, &body_facts, block_id);
-            },
+            .ReturnStatement => |value| if (value.argument) |argument| try self.processExpr(argument, facts),
+            .ThrowStatement => |value| try self.processExpr(value.argument, facts),
+            .IfStatement => |value| try self.processExpr(value.condition, facts),
+            .WhileStatement => |value| try self.processExpr(value.condition, facts),
+            .DoWhileStatement => |value| try self.processExpr(value.condition, facts),
             .ForStatement => |value| {
-                if (value.init) |child| try self.processStatement(child, facts);
-                if (value.condition) |condition| try self.processExpr(condition, facts, block_id);
-                var body_facts = try self.cloneFacts(facts.items);
-                if (value.condition) |condition| try self.applyGuard(condition, true, &body_facts);
-                try self.processStatement(value.body, &body_facts);
-                if (value.update) |update| try self.processExpr(update, &body_facts, block_id);
+                if (value.condition) |condition| try self.processExpr(condition, facts);
             },
-            .LabeledStatement => |value| try self.processStatement(value.body, facts),
+            .SwitchStatement => |value| try self.processExpr(value.discriminant, facts),
+            .Identifier,
+            .UnaryExpression,
+            .BinaryExpression,
+            .AssignmentExpression,
+            .UpdateExpression,
+            .CallExpression,
+            .NewExpression,
+            .MemberExpression,
+            .ElementAccessExpression,
+            .AsExpression,
+            .SatisfiesExpression,
+            .NonNullExpression,
+            .ConditionalExpression,
+            .SequenceExpression,
+            .ArrayExpression,
+            .ObjectExpression,
+            .SpreadElement,
+            .YieldExpression,
+            => try self.processExpr(node_id, facts),
             else => {},
         }
     }
 
-    fn processExpr(self: *Analyzer, node_id: ast.NodeId, facts: *std.ArrayList(Fact), block_id: u32) anyerror!void {
+    fn processExpr(self: *Analyzer, node_id: ast.NodeId, facts: *dataflow.StateBuilder) anyerror!void {
         if (!self.valid(node_id)) return;
         switch (self.frontend_result.ast.node(node_id).data) {
             .Identifier => if (self.symbolForNode(node_id)) |symbol| {
-                const narrowed = self.factType(facts.items, symbol) orelse self.baseType(symbol);
+                const narrowed = self.factType(facts, symbol) orelse self.baseType(symbol);
                 try self.putNode(.{ .node_id = node_id, .type_id = narrowed });
-                try self.putFlow(.{ .function_node = self.function_node, .block_id = block_id, .symbol_id = symbol, .reference_node = node_id, .type_id = narrowed });
+                try self.putFlow(.{ .function_node = self.function_node, .block_id = self.block_id, .program_point = self.program_point, .symbol_id = symbol, .reference_node = node_id, .type_id = narrowed });
+                self.program_point += 1;
             },
-            .UnaryExpression => |value| try self.processExpr(value.argument, facts, block_id),
+            .UnaryExpression => |value| try self.processExpr(value.argument, facts),
             .BinaryExpression => |value| {
-                try self.processExpr(value.left, facts, block_id);
-                try self.processExpr(value.right, facts, block_id);
+                try self.processExpr(value.left, facts);
+                try self.processExpr(value.right, facts);
             },
             .AssignmentExpression => |value| {
-                try self.processExpr(value.right, facts, block_id);
-                try self.processExpr(value.left, facts, block_id);
-                if (self.symbolForNode(value.left)) |symbol| self.removeFact(facts, symbol);
+                try self.processExpr(value.right, facts);
+                try self.processExpr(value.left, facts);
+                if (self.symbolForNode(value.left)) |symbol| {
+                    const replacement = self.nodeType(node_id);
+                    if (replacement == self.store.builtins.unknown or replacement == self.store.builtins.any)
+                        self.removeFact(facts, symbol)
+                    else
+                        try self.setFact(facts, symbol, replacement);
+                }
             },
             .UpdateExpression => |value| {
-                try self.processExpr(value.argument, facts, block_id);
+                try self.processExpr(value.argument, facts);
                 if (self.symbolForNode(value.argument)) |symbol| self.removeFact(facts, symbol);
             },
             .CallExpression => |value| {
-                try self.processExpr(value.callee, facts, block_id);
-                for (value.arguments) |argument| try self.processExpr(argument, facts, block_id);
+                try self.processExpr(value.callee, facts);
+                for (value.arguments) |argument| try self.processExpr(argument, facts);
                 if (self.nodeType(value.callee) == self.store.builtins.unknown or self.nodeType(value.callee) == self.store.builtins.any)
-                    facts.clearRetainingCapacity();
+                    facts.clear();
             },
             .NewExpression => |value| {
-                try self.processExpr(value.callee, facts, block_id);
-                for (value.arguments) |argument| try self.processExpr(argument, facts, block_id);
+                try self.processExpr(value.callee, facts);
+                for (value.arguments) |argument| try self.processExpr(argument, facts);
             },
-            .MemberExpression => |value| try self.processExpr(value.object, facts, block_id),
+            .MemberExpression => |value| try self.processExpr(value.object, facts),
             .ElementAccessExpression => |value| {
-                try self.processExpr(value.object, facts, block_id);
-                try self.processExpr(value.index, facts, block_id);
+                try self.processExpr(value.object, facts);
+                try self.processExpr(value.index, facts);
             },
-            .AsExpression => |value| try self.processExpr(value.expression, facts, block_id),
-            .SatisfiesExpression => |value| try self.processExpr(value.expression, facts, block_id),
-            .NonNullExpression => |value| try self.processExpr(value.expression, facts, block_id),
+            .AsExpression => |value| try self.processExpr(value.expression, facts),
+            .SatisfiesExpression => |value| try self.processExpr(value.expression, facts),
+            .NonNullExpression => |value| try self.processExpr(value.expression, facts),
             .ConditionalExpression => |value| {
-                try self.processExpr(value.condition, facts, block_id);
-                var yes = try self.cloneFacts(facts.items);
+                try self.processExpr(value.condition, facts);
+                var yes = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                defer yes.deinit();
                 try self.applyGuard(value.condition, true, &yes);
-                try self.processExpr(value.consequent, &yes, block_id);
-                var no = try self.cloneFacts(facts.items);
+                try self.processExpr(value.consequent, &yes);
+                var no = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                defer no.deinit();
                 try self.applyGuard(value.condition, false, &no);
-                try self.processExpr(value.alternate, &no, block_id);
+                try self.processExpr(value.alternate, &no);
             },
-            .SequenceExpression => |value| for (value.expressions) |child| try self.processExpr(child, facts, block_id),
-            .ArrayExpression => |value| for (value.elements) |element| if (element) |child| try self.processExpr(child, facts, block_id),
-            .ObjectExpression => |value| for (value.properties) |property| try self.processExpr(property.value, facts, block_id),
-            .SpreadElement => |value| try self.processExpr(value.argument, facts, block_id),
-            .YieldExpression => |value| if (value.argument) |argument| try self.processExpr(argument, facts, block_id),
+            .SequenceExpression => |value| for (value.expressions) |child| try self.processExpr(child, facts),
+            .ArrayExpression => |value| for (value.elements) |element| if (element) |child| try self.processExpr(child, facts),
+            .ObjectExpression => |value| for (value.properties) |property| try self.processExpr(property.value, facts),
+            .SpreadElement => |value| try self.processExpr(value.argument, facts),
+            .YieldExpression => |value| if (value.argument) |argument| try self.processExpr(argument, facts),
             else => {},
         }
     }
 
-    fn applyGuard(self: *Analyzer, node_id: ast.NodeId, truthy: bool, facts: *std.ArrayList(Fact)) anyerror!void {
+    fn applyGuard(self: *Analyzer, node_id: ast.NodeId, truthy: bool, facts: *dataflow.StateBuilder) anyerror!void {
         const data = self.frontend_result.ast.node(node_id).data;
         if (data == .UnaryExpression and data.UnaryExpression.operator == .Exclamation)
             return self.applyGuard(data.UnaryExpression.argument, !truthy, facts);
         if (data == .Identifier) {
-            if (self.symbolForNode(node_id)) |symbol| try self.setFact(facts, symbol, try self.removeNullish(self.currentType(facts.items, symbol), truthy));
+            if (self.symbolForNode(node_id)) |symbol| try self.setFact(facts, symbol, try self.filterTruthiness(self.currentType(facts, symbol), truthy));
             return;
         }
         if (data != .BinaryExpression) return;
@@ -176,38 +191,82 @@ const Analyzer = struct {
             if (try self.applyNullishEquality(binary.left, binary.right, keep, loose, facts)) return;
             if (try self.applyNullishEquality(binary.right, binary.left, keep, loose, facts)) return;
         }
-        if (binary.operator == .Keyword_instanceof and truthy) {
-            if (self.symbolForNode(binary.left)) |symbol| try self.setFact(facts, symbol, self.nodeType(binary.right));
+        if (binary.operator == .Keyword_instanceof) {
+            const constructor = self.store.lookup(self.nodeType(binary.right)) orelse return;
+            if (constructor.kind != .class_constructor) return;
+            if (self.symbolForNode(binary.left)) |symbol| try self.setFact(
+                facts,
+                symbol,
+                try self.filterType(self.currentType(facts, symbol), constructor.kind.class_constructor.instance_type, truthy),
+            );
         } else if (binary.operator == .Keyword_in and truthy) {
             if (self.symbolForNode(binary.right)) |symbol| {
-                if (self.literalText(binary.left)) |name| try self.setFact(facts, symbol, try self.keepProperty(self.currentType(facts.items, symbol), name));
+                if (self.literalText(binary.left)) |name| try self.setFact(facts, symbol, try self.keepProperty(self.currentType(facts, symbol), name));
             }
         }
     }
 
-    fn applyTypeofEquality(self: *Analyzer, left: ast.NodeId, right: ast.NodeId, keep: bool, facts: *std.ArrayList(Fact)) !bool {
+    fn applyTypeofEquality(self: *Analyzer, left: ast.NodeId, right: ast.NodeId, keep: bool, facts: *dataflow.StateBuilder) !bool {
         const left_data = self.frontend_result.ast.node(left).data;
         if (left_data != .UnaryExpression or left_data.UnaryExpression.operator != .Keyword_typeof) return false;
         const name = self.literalText(right) orelse return false;
         const wanted = if (std.mem.eql(u8, name, "string")) self.store.builtins.string else if (std.mem.eql(u8, name, "number")) self.store.builtins.number else if (std.mem.eql(u8, name, "boolean")) self.store.builtins.boolean else if (std.mem.eql(u8, name, "bigint")) self.store.builtins.bigint else if (std.mem.eql(u8, name, "symbol")) self.store.builtins.symbol else if (std.mem.eql(u8, name, "undefined")) self.store.builtins.undefined else return false;
         const symbol = self.symbolForNode(left_data.UnaryExpression.argument) orelse return false;
-        try self.setFact(facts, symbol, try self.filterType(self.currentType(facts.items, symbol), wanted, keep));
+        try self.setFact(facts, symbol, try self.filterType(self.currentType(facts, symbol), wanted, keep));
         return true;
     }
 
-    fn applyNullishEquality(self: *Analyzer, left: ast.NodeId, right: ast.NodeId, keep: bool, loose: bool, facts: *std.ArrayList(Fact)) !bool {
+    fn applyNullishEquality(self: *Analyzer, left: ast.NodeId, right: ast.NodeId, keep: bool, loose: bool, facts: *dataflow.StateBuilder) !bool {
         const wanted = if (self.isNull(right)) self.store.builtins.null_ else if (self.isUndefined(right)) self.store.builtins.undefined else return false;
         const symbol = self.symbolForNode(left) orelse return false;
         const narrowed = if (loose)
-            try self.filterNullish(self.currentType(facts.items, symbol), keep)
+            try self.filterNullish(self.currentType(facts, symbol), keep)
         else
-            try self.filterType(self.currentType(facts.items, symbol), wanted, keep);
+            try self.filterType(self.currentType(facts, symbol), wanted, keep);
         try self.setFact(facts, symbol, narrowed);
         return true;
     }
 
-    fn removeNullish(self: *Analyzer, type_id: types.TypeId, truthy: bool) !types.TypeId {
-        return self.filterNullish(type_id, !truthy);
+    const Truthiness = enum { always_falsy, always_truthy, maybe };
+
+    fn filterTruthiness(self: *Analyzer, type_id: types.TypeId, truthy: bool) !types.TypeId {
+        const ty = self.store.lookup(type_id) orelse return type_id;
+        if (ty.kind == .union_type) {
+            var members: std.ArrayList(types.TypeId) = .empty;
+            defer members.deinit(self.allocator);
+            for (ty.kind.union_type) |member| {
+                const classification = self.classifyTruthiness(member);
+                if (classification == .maybe or (classification == .always_truthy) == truthy)
+                    try members.append(self.allocator, member);
+            }
+            return self.store.unionOf(members.items);
+        }
+        const classification = self.classifyTruthiness(type_id);
+        return if (classification == .maybe or (classification == .always_truthy) == truthy)
+            type_id
+        else
+            self.store.builtins.never;
+    }
+
+    fn classifyTruthiness(self: *Analyzer, type_id: types.TypeId) Truthiness {
+        const ty = self.store.lookup(type_id) orelse return .maybe;
+        return switch (ty.kind) {
+            .primitive => |primitive| switch (primitive) {
+                .never => .always_truthy,
+                .undefined, .null_, .void => .always_falsy,
+                .symbol, .object => .always_truthy,
+                .boolean, .number, .bigint, .string, .any, .unknown => .maybe,
+            },
+            .literal => |literal| switch (literal) {
+                .boolean => |value| if (value) .always_truthy else .always_falsy,
+                .number => |value| if (value == 0 or std.math.isNan(value)) .always_falsy else .always_truthy,
+                .bigint => |value| if (std.mem.eql(u8, value, "0") or std.mem.eql(u8, value, "0n")) .always_falsy else .always_truthy,
+                .string => |value| if (value.len == 0) .always_falsy else .always_truthy,
+            },
+            .union_type => .maybe,
+            .function, .promise, .generator, .array, .tuple, .object, .class, .class_constructor, .interface => .always_truthy,
+            .intersection, .enum_type, .type_parameter => .maybe,
+        };
     }
 
     fn filterNullish(self: *Analyzer, type_id: types.TypeId, keep: bool) !types.TypeId {
@@ -224,6 +283,7 @@ const Analyzer = struct {
         const ty = self.store.lookup(type_id) orelse return type_id;
         if (ty.kind == .union_type) {
             var members: std.ArrayList(types.TypeId) = .empty;
+            defer members.deinit(self.allocator);
             for (ty.kind.union_type) |member| if ((self.matches(member, wanted)) == keep) try members.append(self.allocator, member);
             return self.store.unionOf(members.items);
         }
@@ -246,6 +306,7 @@ const Analyzer = struct {
         const ty = self.store.lookup(type_id) orelse return type_id;
         if (ty.kind == .union_type) {
             var members: std.ArrayList(types.TypeId) = .empty;
+            defer members.deinit(self.allocator);
             for (ty.kind.union_type) |member| if (self.hasProperty(member, name)) try members.append(self.allocator, member);
             return self.store.unionOf(members.items);
         }
@@ -254,49 +315,99 @@ const Analyzer = struct {
 
     fn hasProperty(self: *Analyzer, type_id: types.TypeId, name: []const u8) bool {
         const ty = self.store.lookup(type_id) orelse return false;
-        if (ty.kind != .object) return false;
-        for (ty.kind.object) |property| if (std.mem.eql(u8, property.name, name)) return true;
+        return switch (ty.kind) {
+            .object => |properties| blk: {
+                for (properties) |property| if (std.mem.eql(u8, property.name, name)) break :blk true;
+                break :blk false;
+            },
+            .class => |instance| self.classHasProperty(instance.identity, name, self.store.count() + 1),
+            .interface => |interface| self.interfaceHasProperty(interface.identity, name, self.store.count() + 1),
+            else => false,
+        };
+    }
+
+    fn classHasProperty(self: *Analyzer, identity: types.SemanticDeclId, name: []const u8, remaining: usize) bool {
+        if (remaining == 0) return false;
+        const class = self.store.lookupClassSemanticType(identity) orelse return false;
+        for (class.instance_members.members) |member| if (std.mem.eql(u8, member.name, name)) return true;
+        const base_id = class.inheritance.extends orelse return false;
+        const base = self.store.lookup(base_id) orelse return false;
+        return base.kind == .class and self.classHasProperty(base.kind.class.identity, name, remaining - 1);
+    }
+
+    fn interfaceHasProperty(self: *Analyzer, identity: types.SemanticDeclId, name: []const u8, remaining: usize) bool {
+        if (remaining == 0) return false;
+        const interface = self.store.lookupInterfaceSemanticType(identity) orelse return false;
+        for (interface.members.members) |member| if (std.mem.eql(u8, member.name, name)) return true;
+        for (interface.inheritance.extends) |base_id| {
+            const base = self.store.lookup(base_id) orelse continue;
+            if (base.kind == .interface and self.interfaceHasProperty(base.kind.interface.identity, name, remaining - 1)) return true;
+        }
         return false;
     }
 
-    fn setFact(self: *Analyzer, facts: *std.ArrayList(Fact), symbol: binder.SymbolId, type_id: types.TypeId) !void {
-        for (facts.items) |*fact| if (fact.symbol == symbol) { fact.type_id = type_id; return; };
-        try facts.append(self.allocator, .{ .symbol = symbol, .type_id = type_id });
+    fn setFact(_: *Analyzer, facts: *dataflow.StateBuilder, symbol: binder.SymbolId, type_id: types.TypeId) !void {
+        try facts.set(.{ .symbol = symbol }, type_id);
     }
-    fn removeFact(_: *Analyzer, facts: *std.ArrayList(Fact), symbol: binder.SymbolId) void {
-        for (facts.items, 0..) |fact, index| if (fact.symbol == symbol) { _ = facts.swapRemove(index); return; };
+    fn removeFact(_: *Analyzer, facts: *dataflow.StateBuilder, symbol: binder.SymbolId) void {
+        facts.remove(.{ .symbol = symbol });
     }
-    fn invalidateDeclaration(self: *Analyzer, declaration: ast.NodeId, facts: *std.ArrayList(Fact)) void {
+    fn invalidateDeclaration(self: *Analyzer, declaration: ast.NodeId, facts: *dataflow.StateBuilder) void {
         for (self.frontend_result.bind.symbols) |symbol| if (symbol.declaration == declaration) self.removeFact(facts, symbol.id);
     }
-    fn cloneFacts(self: *Analyzer, source: []const Fact) !std.ArrayList(Fact) { var result: std.ArrayList(Fact) = .empty; try result.appendSlice(self.allocator, source); return result; }
-    fn factType(_: *Analyzer, facts: []const Fact, symbol: binder.SymbolId) ?types.TypeId { for (facts) |fact| if (fact.symbol == symbol) return fact.type_id; return null; }
-    fn currentType(self: *Analyzer, facts: []const Fact, symbol: binder.SymbolId) types.TypeId { return self.factType(facts, symbol) orelse self.baseType(symbol); }
-    fn baseType(self: *Analyzer, symbol: binder.SymbolId) types.TypeId { for (self.symbols) |entry| if (entry.symbol_id == symbol) return entry.effective() orelse self.store.builtins.unknown; return self.store.builtins.unknown; }
-    fn symbolForNode(self: *Analyzer, node: ast.NodeId) ?binder.SymbolId { for (self.frontend_result.resolve.references) |reference| if (reference.node == node) return reference.symbol; return null; }
-    fn nodeType(self: *Analyzer, node: ast.NodeId) types.TypeId { for (self.nodes.items) |entry| if (entry.node_id == node) return entry.type_id; return self.store.builtins.unknown; }
-    fn putNode(self: *Analyzer, value: type_info.NodeTypeInfo) !void { for (self.nodes.items) |*entry| if (entry.node_id == value.node_id) { entry.* = value; return; }; try self.nodes.append(self.allocator, value); }
-    fn putFlow(self: *Analyzer, value: type_info.FlowTypeInfo) !void { for (self.flow.items) |*entry| if (entry.function_node == value.function_node and entry.block_id == value.block_id and entry.reference_node == value.reference_node) { entry.* = value; return; }; try self.flow.append(self.allocator, value); }
+    fn factType(_: *Analyzer, facts: *const dataflow.StateBuilder, symbol: binder.SymbolId) ?types.TypeId {
+        return facts.get(.{ .symbol = symbol });
+    }
+    fn currentType(self: *Analyzer, facts: *const dataflow.StateBuilder, symbol: binder.SymbolId) types.TypeId {
+        return self.factType(facts, symbol) orelse self.baseType(symbol);
+    }
+    fn baseType(self: *Analyzer, symbol: binder.SymbolId) types.TypeId {
+        for (self.symbols) |entry| if (entry.symbol_id == symbol) return entry.effective() orelse self.store.builtins.unknown;
+        return self.store.builtins.unknown;
+    }
+    fn symbolForNode(self: *Analyzer, node: ast.NodeId) ?binder.SymbolId {
+        for (self.frontend_result.resolve.references) |reference| if (reference.node == node) return reference.symbol;
+        return null;
+    }
+    fn nodeType(self: *Analyzer, node: ast.NodeId) types.TypeId {
+        for (self.nodes.items) |entry| if (entry.node_id == node) return entry.type_id;
+        return self.store.builtins.unknown;
+    }
+    fn putNode(self: *Analyzer, value: type_info.NodeTypeInfo) !void {
+        for (self.nodes.items) |*entry| if (entry.node_id == value.node_id) {
+            entry.* = value;
+            return;
+        };
+        try self.nodes.append(self.allocator, value);
+    }
+    fn putFlow(self: *Analyzer, value: type_info.FlowTypeInfo) !void {
+        for (self.flow.items) |*entry| if (entry.function_node == value.function_node and entry.block_id == value.block_id and entry.reference_node == value.reference_node) {
+            entry.* = value;
+            return;
+        };
+        try self.flow.append(self.allocator, value);
+    }
     fn literalText(self: *Analyzer, node: ast.NodeId) ?[]const u8 {
-        const raw = switch (self.frontend_result.ast.node(node).data) { .Literal => |value| value.value, else => return null };
+        const raw = switch (self.frontend_result.ast.node(node).data) {
+            .Literal => |value| value.value,
+            else => return null,
+        };
         if (raw.len >= 2 and ((raw[0] == '"' and raw[raw.len - 1] == '"') or (raw[0] == '\'' and raw[raw.len - 1] == '\'')))
             return raw[1 .. raw.len - 1];
         return raw;
     }
-    fn isNull(self: *Analyzer, node: ast.NodeId) bool { return if (self.literalText(node)) |value| std.mem.eql(u8, value, "null") else false; }
-    fn isUndefined(self: *Analyzer, node: ast.NodeId) bool { return switch (self.frontend_result.ast.node(node).data) { .Identifier => |value| std.mem.eql(u8, value.name, "undefined"), else => false }; }
-    fn valid(self: *Analyzer, node: ast.NodeId) bool { return node != ast.invalid_node and @as(usize, @intCast(node)) < self.frontend_result.ast.nodes.len; }
-    fn statementTerminates(self: *Analyzer, node: ast.NodeId) bool {
-        if (!self.valid(node)) return false;
+    fn isNull(self: *Analyzer, node: ast.NodeId) bool {
+        return if (self.literalText(node)) |value| std.mem.eql(u8, value, "null") else false;
+    }
+    fn isUndefined(self: *Analyzer, node: ast.NodeId) bool {
         return switch (self.frontend_result.ast.node(node).data) {
-            .ReturnStatement, .ThrowStatement, .BreakStatement, .ContinueStatement => true,
-            .BlockStatement => |value| value.statements.len != 0 and self.statementTerminates(value.statements[value.statements.len - 1]),
-            .IfStatement => |value| if (value.alternate) |alternate| self.statementTerminates(value.consequent) and self.statementTerminates(alternate) else false,
-            .LabeledStatement => |value| self.statementTerminates(value.body),
+            .Identifier => |value| std.mem.eql(u8, value.name, "undefined"),
             else => false,
         };
     }
-    fn blockFor(self: *Analyzer, node: ast.NodeId) u32 { const function_cfg = self.function_cfg orelse return 0; for (function_cfg.graph.blocks) |block| for (block.statements) |statement| if (statement == node) return block.id; return function_cfg.graph.entry; }
+    fn valid(self: *Analyzer, node: ast.NodeId) bool {
+        return node != ast.invalid_node and @as(usize, @intCast(node)) < self.frontend_result.ast.nodes.len;
+    }
 };
 
 pub fn analyze(allocator: std.mem.Allocator, result: frontend.FrontendResult, store: *types.TypeStore, symbols: []const type_info.SymbolTypeInfo, nodes: *std.ArrayList(type_info.NodeTypeInfo)) !Result {

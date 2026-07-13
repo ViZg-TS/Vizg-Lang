@@ -3,7 +3,8 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const builtin_kind = @import("builtin.zig");
 // ---------------------------------------------------------------------------
-// TypeId — opaque numeric identifier for any type in the model.
+// TypeId — opaque identifier owned by one TypeStore. Numeric equality is
+// meaningful only inside that store's semantic context.
 // ---------------------------------------------------------------------------
 
 pub const TypeId = u32;
@@ -21,8 +22,6 @@ pub const next_user_type_id: TypeId = 1000;
 // FunctionSignature — captured at declaration, referenced by id from a TypeKind.
 // ---------------------------------------------------------------------------
 
-pub const FunctionSignatureId = u32;
-const invalid_function_signature: FunctionSignatureId = std.math.maxInt(FunctionSignatureId);
 /// A single parameter in a function signature. The name is for debugging /
 /// display purposes and does not participate in type identity.
 pub const ParameterType = struct {
@@ -86,73 +85,107 @@ pub const SemanticDeclId = struct {
         return .{ .module_id = module_id_, .declaration_id = decl_id_ };
     }
 
-    /// Returns the local (per-AST) component — useful for legacy paths that only
-    /// know how to key by a single declaration id within one module. Cross-module
-    /// callers MUST compare both components via SemanticDeclId equality.
-    pub fn local(self: SemanticDeclId) u32 {
-        return self.declaration_id;
+    pub fn eql(left: SemanticDeclId, right: SemanticDeclId) bool {
+        return left.module_id == right.module_id and left.declaration_id == right.declaration_id;
     }
 };
 
 pub const NominalType = struct {
-    /// Unique identifier per class/interface/enum declaration. Prevents structural 
-    /// interning from merging distinct declarations with same name across modules.
-    declaration_id: u32,
-    
-    /// Module where this type was declared - enables cross-module identity checking.
-    /// Two types are only equal if they have the same module_id AND declaration_id.
-    module_id: ?u32 = null,
-    
+    /// Qualified declaration identity. Raw AST NodeIds are never nominal keys.
+    identity: SemanticDeclId,
+
     name: []const u8,
-    
+
     // Semantic members stored separately in TypeStore for classes/interfaces
     // This is populated during class/interface analysis and used by member access lookup
 };
 
+pub const Visibility = enum {
+    none,
+    public,
+    protected,
+    private,
+};
+
+pub const SemanticMember = struct {
+    name: []const u8,
+    type_id: TypeId,
+    visibility: Visibility = .none,
+    readonly: bool = false,
+    optional: bool = false,
+};
+
+pub const MemberTable = struct {
+    members: []const SemanticMember = &.{},
+};
+
+/// Type of values produced by constructing a class.
+pub const ClassInstanceType = struct {
+    identity: SemanticDeclId,
+    name: []const u8,
+};
+
+/// Value-side type bound to the class declaration name.
+pub const ClassConstructorType = struct {
+    identity: SemanticDeclId,
+    name: []const u8,
+    instance_type: TypeId,
+};
+
+/// Structural interface shape. Identity records its declaration provenance;
+/// compatibility may inspect `members` without treating the declaration as a class.
+pub const InterfaceType = struct {
+    identity: SemanticDeclId,
+    name: []const u8,
+    members: MemberTable = .{},
+};
+
 pub const TypeParameterType = struct {
-    declaration_id: u32,
+    /// Module-qualified owner plus the binder symbol distinguish parameters
+    /// with the same spelling in different generic declarations.
+    identity: SemanticDeclId,
+    parameter_id: u32,
     name: []const u8,
     constraint: ?TypeId = null,
     default: ?TypeId = null,
 };
 
-/// Represents a field in a class or interface declaration.
-pub const ClassField = struct {
+pub const ClassInheritance = struct {
+    extends: ?TypeId = null,
+    implements: []const TypeId = &.{},
+};
+
+pub const InterfaceInheritance = struct {
+    extends: []const TypeId = &.{},
+};
+
+/// Authoritative class foundation. Member collection fills the two tables later.
+pub const ClassSemanticType = struct {
+    identity: SemanticDeclId,
+    name: []const u8,
+    constructor_type: TypeId,
+    instance_type: TypeId,
+    static_members: MemberTable = .{},
+    instance_members: MemberTable = .{},
+    constructor_signature: ?TypeId = null,
+    inheritance: ClassInheritance = .{},
+};
+
+/// Authoritative interface foundation. Its TypeId directly owns the structural table.
+pub const InterfaceSemanticType = struct {
+    identity: SemanticDeclId,
     name: []const u8,
     type_id: TypeId,
-    is_public: bool = true,
-    is_readonly: bool = false,
+    members: MemberTable = .{},
+    inheritance: InterfaceInheritance = .{},
 };
-/// Represents a method in a class declaration with its full signature.
-pub const ClassMethod = struct {
-    name: []const u8,
-    signature_id: FunctionSignatureId,
-    is_static: bool = false,
-};
-/// Complete semantic representation of a class - includes both identity and members.
-pub const ClassSemanticModel = struct {
-    declaration_id: u32,
-    module_id: ?u32,
-    name: []const u8,
-    fields: []const ClassField,
-    methods: []const ClassMethod,
-    constructor_signature: ?FunctionSignatureId = null,
-};
-/// Complete semantic representation of an interface - includes member signatures.
-pub const InterfaceSemanticModel = struct {
-    declaration_id: u32,
-    module_id: ?u32,
-    name: []const u8,
-    members: []const ClassField,  // Interfaces have fields/methods as properties
-};
-/// Complete signature of a typed function. Stored as an opaque blob; the caller
-/// (typically the binder or module graph) is responsible for its lifetime.
+/// Immutable function shape owned by TypeStore.
 pub const FunctionSignature = struct {
     /// Unique identifier per function declaration. Prevents structural interning
     /// from sharing TypeIds across different functions with identical initial shapes.
     declaration_id: ?u32 = null,
-    
-    id: FunctionSignatureId,
+
+    id: TypeId,
     parameters: []const ParameterType,
     return_type: TypeId,
     type_parameter_count: u32 = 0,
@@ -209,8 +242,8 @@ pub const TypeKind = union(enum) {
     /// A primitive builtin (number | string | boolean | null | undefined | void).
     primitive: builtin_kind.BuiltinKind,
 
-    /// A function signature identified by its declared id.
-    function: FunctionSignatureId,
+    /// A function signature identified in the owning TypeStore.
+    function: TypeId,
     promise: PromiseType,
     generator: GeneratorType,
     literal: LiteralValue,
@@ -219,8 +252,9 @@ pub const TypeKind = union(enum) {
     array: ArrayType,
     tuple: TupleType,
     object: []const ObjectProperty,
-    class: NominalType,
-    interface: NominalType,
+    class: ClassInstanceType,
+    class_constructor: ClassConstructorType,
+    interface: InterfaceType,
     enum_type: NominalType,
     type_parameter: TypeParameterType,
 };
@@ -262,6 +296,7 @@ pub const Type = struct {
             .tuple => "tuple",
             .object => "object",
             .class => "class",
+            .class_constructor => "class constructor",
             .interface => "interface",
             .enum_type => "enum",
             .type_parameter => "type parameter",

@@ -5,6 +5,20 @@ const type_collector = @import("type_collector.zig");
 const testing = std.testing;
 const test_builtins = types.Builtins.init();
 
+fn symbolByName(result: frontend.FrontendResult, name: []const u8, namespace: @import("../frontend/binder.zig").SymbolNamespace) ?@import("../frontend/binder.zig").Symbol {
+    for (result.bind.symbols) |symbol| {
+        if (symbol.namespace == namespace and std.mem.eql(u8, symbol.name, name)) return symbol;
+    }
+    return null;
+}
+
+fn collectedType(collected: type_collector.TypeInfoCollectResult, symbol_id: u32) ?types.TypeId {
+    for (collected.symbol_declared_types) |entry| {
+        if (entry.symbol_id == symbol_id) return entry.declared_type;
+    }
+    return null;
+}
+
 test "variable declared type is collected from source annotation" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -273,4 +287,313 @@ test "unknown parameter type name emits VZG6004 diagnostic" {
     // A signature entry must still be produced — the parameter was declared even if
     // its type is unknown.
     try testing.expect(collected.hasAny());
+}
+
+test "local interface and class names resolve through type-space symbols" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{
+        .text = "interface User {} class Account {} let user: User; let account: Account;",
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypesInModule(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        41,
+        &type_store,
+    );
+
+    try testing.expectEqual(@as(usize, 0), collected.diagnostics.len);
+    const user_type = collectedType(collected, symbolByName(result, "user", .value).?.id).?;
+    const account_type = collectedType(collected, symbolByName(result, "account", .value).?.id).?;
+    const account_value_type = collectedType(collected, symbolByName(result, "Account", .value).?.id).?;
+    const account_instance_type = collectedType(collected, symbolByName(result, "Account", .type).?.id).?;
+    const user_nominal = type_store.lookup(user_type).?.kind.interface;
+    const account_nominal = type_store.lookup(account_type).?.kind.class;
+    try testing.expectEqual(@as(u32, 41), user_nominal.identity.module_id);
+    try testing.expectEqual(symbolByName(result, "User", .type).?.declaration, user_nominal.identity.declaration_id);
+    try testing.expectEqual(@as(u32, 41), account_nominal.identity.module_id);
+    try testing.expect(account_value_type != account_instance_type);
+    try testing.expectEqual(account_instance_type, account_type);
+    const account_constructor = type_store.lookup(account_value_type).?.kind.class_constructor;
+    try testing.expectEqual(account_instance_type, account_constructor.instance_type);
+    try testing.expectEqual(account_nominal.identity, account_constructor.identity);
+    try testing.expectEqual(@as(usize, 0), user_nominal.members.members.len);
+    try testing.expect(type_store.lookupInterfaceSemanticType(user_nominal.identity) != null);
+    try testing.expect(type_store.lookupClassSemanticType(account_nominal.identity) != null);
+}
+
+test "local alias resolves and value-only names remain invalid in type space" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{
+        .text = "const ValueOnly = 1; type UserId = string; let id: UserId; let bad: ValueOnly;",
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+
+    try testing.expectEqual(test_builtins.string, collectedType(collected, symbolByName(result, "id", .value).?.id).?);
+    try testing.expectEqual(test_builtins.unknown, collectedType(collected, symbolByName(result, "bad", .value).?.id).?);
+    try testing.expectEqual(@as(usize, 1), collected.diagnostics.len);
+    try testing.expectEqualStrings("ValueOnly", collected.diagnostics[0].label.?);
+}
+
+test "unknown parameter emits one stable diagnostic at its annotation span" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{ .text = "function f(value: Missing) {}" }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+    const parameter_symbol = symbolByName(result, "value", .value).?;
+    const annotation = result.ast.node(parameter_symbol.declaration).data.Parameter.type_annotation.?;
+
+    try testing.expectEqual(@as(usize, 1), collected.diagnostics.len);
+    try testing.expectEqual(annotation.span.start, collected.diagnostics[0].span.start);
+    try testing.expectEqual(annotation.span.end, collected.diagnostics[0].span.end);
+}
+
+test "nearest local type alias shadows its parent scope" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{
+        .text = "type Choice = string; { type Choice = number; let selected: Choice; }",
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+
+    try testing.expectEqual(@as(usize, 0), collected.diagnostics.len);
+    try testing.expectEqual(test_builtins.number, collectedType(collected, symbolByName(result, "selected", .value).?.id).?);
+}
+
+test "duplicate type names diagnose once and resolve deterministically" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{
+        .text = "type Same = string; interface Same {} let value: Same;",
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+
+    try testing.expectEqual(@as(usize, 1), result.bind.diagnostics.len);
+    try testing.expectEqual(@as(usize, 0), collected.diagnostics.len);
+    try testing.expectEqual(test_builtins.string, collectedType(collected, symbolByName(result, "value", .value).?.id).?);
+}
+
+test "Goal 139 generic parameter environment shares identity across a signature" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{
+        .text = "function identity<T>(value: T): T { return value; }",
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+
+    try testing.expectEqual(@as(usize, 0), collected.diagnostics.len);
+    try testing.expectEqual(@as(usize, 1), collected.function_signatures.len);
+    const signature = type_store.lookupFunction(collected.function_signatures[0].signature_id).?;
+    try testing.expectEqual(@as(usize, 1), signature.parameters.len);
+    try testing.expectEqual(signature.parameters[0].type_id, signature.return_type);
+    switch (type_store.lookup(signature.return_type).?.kind) {
+        .type_parameter => |parameter| {
+            try testing.expectEqualStrings("T", parameter.name);
+            try testing.expectEqual(@as(u32, 0), parameter.identity.module_id);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Goal 140 exhaustively lowers supported type-node variants" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\interface User { name: string; age?: number }
+        \\type Mode = "dark";
+        \\type Name = User["name"];
+        \\type Keys = keyof User;
+        \\const value: string = "x";
+        \\type Query = typeof value;
+        \\type Box<T> = { value: T };
+        \\type Boxed = Box<number>;
+        \\type ArrayShape = string[];
+        \\type TupleShape = readonly [string, number];
+        \\type UnionShape = string | number;
+        \\type IntersectionShape = { a: string } & { b: number };
+        \\type ObjectShape = { value: string };
+        \\type FunctionShape = (value: string) => number;
+        \\type ParenthesizedShape = (string);
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+
+    try testing.expectEqual(@as(usize, 0), collected.diagnostics.len);
+    const mode = collectedType(collected, symbolByName(result, "Mode", .type).?.id).?;
+    try testing.expectEqualStrings("dark", type_store.lookup(mode).?.kind.literal.string);
+    try testing.expectEqual(
+        test_builtins.string,
+        collectedType(collected, symbolByName(result, "Name", .type).?.id).?,
+    );
+    try testing.expectEqual(
+        test_builtins.string,
+        collectedType(collected, symbolByName(result, "Query", .type).?.id).?,
+    );
+    const keys = type_store.lookup(collectedType(collected, symbolByName(result, "Keys", .type).?.id).?).?.kind.union_type;
+    try testing.expectEqual(@as(usize, 2), keys.len);
+    try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "Boxed", .type).?.id).?).?.kind == .object);
+    try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "ArrayShape", .type).?.id).?).?.kind == .array);
+    try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "TupleShape", .type).?.id).?).?.kind.tuple.readonly);
+    try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "UnionShape", .type).?.id).?).?.kind == .union_type);
+    try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "IntersectionShape", .type).?.id).?).?.kind == .intersection);
+    try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "ObjectShape", .type).?.id).?).?.kind == .object);
+    try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "FunctionShape", .type).?.id).?).?.kind == .function);
+    try testing.expectEqual(
+        test_builtins.string,
+        collectedType(collected, symbolByName(result, "ParenthesizedShape", .type).?.id).?,
+    );
+}
+
+test "Goal 140 invalid type operators diagnose instead of silently becoming unknown" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\interface User { name: string }
+        \\type Missing = User["missing"];
+        \\type PrimitiveKeys = keyof number;
+        \\const inferred = 1;
+        \\type UnsupportedQuery = typeof inferred;
+        \\type Box<T> = { value: T };
+        \\type MissingArgument = Box;
+        \\type ExtraArgument = number<string>;
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+
+    try testing.expectEqual(@as(usize, 5), collected.diagnostics.len);
+    for (collected.diagnostics) |diagnostic| {
+        try testing.expectEqual(@import("../diagnostics/root.zig").DiagnosticCode.type_mismatch, diagnostic.code);
+        try testing.expect(diagnostic.message.len != 0);
+    }
+    inline for (.{ "Missing", "PrimitiveKeys", "UnsupportedQuery", "MissingArgument", "ExtraArgument" }) |name| {
+        try testing.expectEqual(
+            test_builtins.unknown,
+            collectedType(collected, symbolByName(result, name, .type).?.id).?,
+        );
+    }
+}
+
+test "Goal 142 collects class and interface member foundations" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\interface Base { base: string }
+        \\interface Shape extends Base { readonly name?: string; render(scale: number): boolean }
+        \\class Service extends Parent {
+        \\  readonly id: string;
+        \\  inferred = 1;
+        \\  static count: number;
+        \\  constructor(public readonly token: string, protected age?: number) {}
+        \\  private run(value: number): string {}
+        \\  static make(): boolean {}
+        \\}
+        \\class Parent {}
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+
+    try testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try testing.expectEqual(@as(usize, 0), collected.diagnostics.len);
+
+    const service_symbol = symbolByName(result, "Service", .type).?;
+    const service = type_store.lookupClassSemanticType(.init(0, service_symbol.declaration)).?;
+    try testing.expectEqual(@as(usize, 5), service.instance_members.members.len);
+    try testing.expectEqual(@as(usize, 2), service.static_members.members.len);
+    try testing.expect(service.constructor_signature != null);
+    try testing.expect(type_store.lookupFunction(service.constructor_signature.?) != null);
+    try testing.expectEqual(
+        service.instance_type,
+        type_store.lookupFunction(service.constructor_signature.?).?.return_type,
+    );
+    try testing.expect(service.inheritance.extends != null);
+
+    const id = semanticMember(service.instance_members, "id").?;
+    try testing.expectEqual(test_builtins.string, id.type_id);
+    try testing.expect(id.readonly);
+    const inferred = semanticMember(service.instance_members, "inferred").?;
+    try testing.expectEqual(test_builtins.unknown, inferred.type_id);
+    const token = semanticMember(service.instance_members, "token").?;
+    try testing.expect(token.readonly);
+    try testing.expectEqual(types.Visibility.public, token.visibility);
+    const age = semanticMember(service.instance_members, "age").?;
+    try testing.expect(age.optional);
+    try testing.expectEqual(types.Visibility.protected, age.visibility);
+    const run = semanticMember(service.instance_members, "run").?;
+    try testing.expectEqual(types.Visibility.private, run.visibility);
+    try testing.expect(type_store.lookupFunction(run.type_id) != null);
+    try testing.expect(semanticMember(service.static_members, "count") != null);
+    const make = semanticMember(service.static_members, "make").?;
+    try testing.expect(type_store.lookupFunction(make.type_id) != null);
+
+    const shape_symbol = symbolByName(result, "Shape", .type).?;
+    const shape = type_store.lookupInterfaceSemanticType(.init(0, shape_symbol.declaration)).?;
+    try testing.expectEqual(@as(usize, 2), shape.members.members.len);
+    try testing.expectEqual(@as(usize, 1), shape.inheritance.extends.len);
+    const name = semanticMember(shape.members, "name").?;
+    try testing.expect(name.readonly);
+    try testing.expect(name.optional);
+    const render = semanticMember(shape.members, "render").?;
+    try testing.expect(type_store.lookupFunction(render.type_id) != null);
+}
+
+fn semanticMember(table: types.MemberTable, name: []const u8) ?types.SemanticMember {
+    for (table.members) |member| if (std.mem.eql(u8, member.name, name)) return member;
+    return null;
 }

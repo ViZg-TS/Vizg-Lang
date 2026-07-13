@@ -202,6 +202,16 @@ const Checker = struct {
             return if (literalPrimitive(source_type.kind.literal, b) == target) .compatible else self.fail(.literal_mismatch, source, target);
         }
         if (target_builtin == .object and isObjectLike(source_type.kind)) return .compatible;
+
+        // Interfaces are structural sinks. Anonymous object shapes, other
+        // interfaces, and class instances may satisfy their required members.
+        if (target_type.kind == .interface and isStructuralSource(source_type.kind))
+            return self.compareInterfaceTarget(source, target, target_type.kind.interface, 0);
+        // Anonymous object annotations are also structural when the source is
+        // a declared interface or class instance.
+        if (target_type.kind == .object and (source_type.kind == .interface or source_type.kind == .class))
+            return self.compareTargetProperties(source, target, target_type.kind.object);
+
         if (std.meta.activeTag(source_type.kind) != std.meta.activeTag(target_type.kind)) {
             if (source_type.kind == .tuple and target_type.kind == .array) return self.compareTupleToArray(source, target, source_type.kind.tuple, target_type.kind.array);
             return self.fail(.incompatible_kind, source, target);
@@ -220,7 +230,8 @@ const Checker = struct {
                 if (yielded != .compatible) break :blk yielded;
                 break :blk self.compareChild(source_type.kind.generator.return_type, target_type.kind.generator.return_type, .{ .generator_return = {} });
             },
-            .class, .interface, .enum_type, .type_parameter => if (self.store.structurallyEqual(source, target)) .compatible else self.fail(.incompatible_kind, source, target),
+            .class, .class_constructor, .enum_type, .type_parameter => if (self.store.structurallyEqual(source, target)) .compatible else self.fail(.incompatible_kind, source, target),
+            .interface => unreachable,
             .union_type, .intersection => unreachable,
         };
     }
@@ -257,8 +268,13 @@ const Checker = struct {
     }
 
     fn compareObjects(self: *Checker, source: types.TypeId, target: types.TypeId, from: []const types.ObjectProperty, to: []const types.ObjectProperty) CompatibilityResult {
+        _ = from;
+        return self.compareTargetProperties(source, target, to);
+    }
+
+    fn compareTargetProperties(self: *Checker, source: types.TypeId, target: types.TypeId, to: []const types.ObjectProperty) CompatibilityResult {
         for (to) |target_property| {
-            const source_property = findProperty(from, target_property.name) orelse {
+            const source_property = self.findStructuralMember(source, target_property.name, 0) orelse {
                 if (target_property.optional) continue;
                 self.push(.{ .property = target_property.name });
                 const result = self.fail(.missing_property, source, target);
@@ -281,6 +297,77 @@ const Checker = struct {
             if (result != .compatible) return result;
         }
         return .compatible;
+    }
+
+    fn compareInterfaceTarget(
+        self: *Checker,
+        source: types.TypeId,
+        target: types.TypeId,
+        interface: types.InterfaceType,
+        depth: usize,
+    ) CompatibilityResult {
+        if (depth == max_path_segments) return self.fail(.recursion_limit, source, target);
+        const semantic = self.store.lookupInterfaceSemanticType(interface.identity);
+        const members = if (semantic) |value| value.members.members else interface.members.members;
+        for (members) |target_member| {
+            const source_member = self.findStructuralMember(source, target_member.name, 0) orelse {
+                if (target_member.optional) continue;
+                self.push(.{ .property = target_member.name });
+                const result = self.fail(.missing_property, source, target);
+                self.pop();
+                return result;
+            };
+            self.push(.{ .property = target_member.name });
+            if (source_member.optional and !target_member.optional) {
+                const result = self.fail(.optional_mismatch, source_member.type_id, target_member.type_id);
+                self.pop();
+                return result;
+            }
+            if (source_member.readonly and !target_member.readonly) {
+                const result = self.fail(.readonly_mismatch, source_member.type_id, target_member.type_id);
+                self.pop();
+                return result;
+            }
+            const result = self.compare(source_member.type_id, target_member.type_id);
+            self.pop();
+            if (result != .compatible) return result;
+        }
+        if (semantic) |value| for (value.inheritance.extends) |base| {
+            const base_type = self.store.lookup(base) orelse return self.fail(.invalid_type, source, target);
+            if (base_type.kind != .interface) return self.fail(.incompatible_kind, source, target);
+            const result = self.compareInterfaceTarget(source, base, base_type.kind.interface, depth + 1);
+            if (result != .compatible) return result;
+        };
+        return .compatible;
+    }
+
+    fn findStructuralMember(self: *Checker, source: types.TypeId, name: []const u8, depth: usize) ?types.SemanticMember {
+        if (depth == max_path_segments) return null;
+        const source_type = self.store.lookup(source) orelse return null;
+        return switch (source_type.kind) {
+            .object => |properties| if (findProperty(properties, name)) |property| .{
+                .name = property.name,
+                .type_id = property.type_id,
+                .readonly = property.readonly,
+                .optional = property.optional,
+            } else null,
+            .interface => |interface| blk: {
+                const semantic = self.store.lookupInterfaceSemanticType(interface.identity);
+                const members = if (semantic) |value| value.members.members else interface.members.members;
+                for (members) |member| if (std.mem.eql(u8, member.name, name)) break :blk member;
+                if (semantic) |value| for (value.inheritance.extends) |base|
+                    if (self.findStructuralMember(base, name, depth + 1)) |member| break :blk member;
+                break :blk null;
+            },
+            .class => |instance| blk: {
+                const semantic = self.store.lookupClassSemanticType(instance.identity) orelse break :blk null;
+                for (semantic.instance_members.members) |member| if (std.mem.eql(u8, member.name, name)) break :blk member;
+                if (semantic.inheritance.extends) |base|
+                    if (self.findStructuralMember(base, name, depth + 1)) |member| break :blk member;
+                break :blk null;
+            },
+            else => null,
+        };
     }
 
     fn compareFunctions(self: *Checker, source: types.TypeId, target: types.TypeId) CompatibilityResult {
@@ -371,9 +458,35 @@ fn literalEqual(left: types.LiteralValue, right: types.LiteralValue) bool {
 
 fn isObjectLike(kind: types.TypeKind) bool {
     return switch (kind) {
-        .function, .array, .tuple, .object, .class, .interface => true,
+        .function, .array, .tuple, .object, .class, .class_constructor, .interface => true,
         else => false,
     };
+}
+
+fn isStructuralSource(kind: types.TypeKind) bool {
+    return switch (kind) {
+        .object, .interface, .class => true,
+        else => false,
+    };
+}
+
+test "Goal 147 compatibility keeps classes and enums nominal but interfaces structural" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = types.TypeStore.init(arena.allocator());
+    const a = types.SemanticDeclId.init(1, 42);
+    const b = types.SemanticDeclId.init(2, 42);
+
+    const a_class = try store.intern(.{ .class = .{ .identity = a, .name = "Shared" } });
+    const b_class = try store.intern(.{ .class = .{ .identity = b, .name = "Shared" } });
+    const a_interface = try store.intern(.{ .interface = .{ .identity = a, .name = "Shape" } });
+    const b_interface = try store.intern(.{ .interface = .{ .identity = b, .name = "Shape" } });
+    const a_enum = try store.intern(.{ .enum_type = .{ .identity = a, .name = "Choice" } });
+    const b_enum = try store.intern(.{ .enum_type = .{ .identity = b, .name = "Choice" } });
+
+    try std.testing.expect(!check(a_class, b_class, &store).isCompatible());
+    try std.testing.expect(check(a_interface, b_interface, &store).isCompatible());
+    try std.testing.expect(!check(a_enum, b_enum, &store).isCompatible());
 }
 
 /// Pretty-name for diagnostics and debug output. Returns the canonical builtin

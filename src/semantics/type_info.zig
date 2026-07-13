@@ -18,9 +18,10 @@ pub const SymbolTypeInfo = struct {
     inferred_type: ?types.TypeId = null,
     state: TypeResolutionState = .resolved,
 
-    /// Returns the preferred type for this symbol: declared if present,
-    /// otherwise inferred; `null` only when neither is known.
+    /// Error state has no usable type. Otherwise declaration evidence wins over
+    /// inference, with null reserved for a symbol that has neither.
     pub fn effective(self: @This()) ?types.TypeId {
+        if (self.state == .@"error") return null;
         return self.declared_type orelse self.inferred_type;
     }
 
@@ -51,6 +52,16 @@ pub const SymbolTypeInfo = struct {
         try std.testing.expect(entry.effective() == null);
     }
 
+    test "effective returns null for an error state" {
+        const entry = SymbolTypeInfo{
+            .symbol_id = 4,
+            .declared_type = 42,
+            .inferred_type = 7,
+            .state = .@"error",
+        };
+        try std.testing.expect(entry.effective() == null);
+    }
+
     test "defaults declare and infer to null" {
         const entry = SymbolTypeInfo{ .symbol_id = 0 };
         try std.testing.expect(entry.declared_type == null);
@@ -64,6 +75,7 @@ pub const SymbolTypeInfo = struct {
 
 pub const NodeTypeInfo = struct {
     node_id: ast_mod.NodeId,
+    /// Actual source-inferred type. Contextual expectations never replace it.
     type_id: types.TypeId,
     state: TypeResolutionState = .resolved,
     issue: TypeIssue = .none,
@@ -76,6 +88,14 @@ pub const NodeTypeInfo = struct {
     /// real element-level mismatch rather than a generic "incompatible" hit.
     contextual_type: ?types.TypeId = null,
 
+    /// Effective expression type is the actual inferred type when resolution
+    /// succeeded. Context only guides inference; it is never the expression's
+    /// result type.
+    pub fn effective(self: @This()) ?types.TypeId {
+        if (self.state != .resolved or self.type_id == types.invalid_type) return null;
+        return self.type_id;
+    }
+
     test "nodeTypeInfo stores id and type" {
         const n = NodeTypeInfo{ .node_id = 42, .type_id = 7 };
         try std.testing.expectEqual(@as(usize, 42), @as(usize, n.node_id));
@@ -85,6 +105,13 @@ pub const NodeTypeInfo = struct {
     test "contextual_type defaults to null" {
         const n = NodeTypeInfo{ .node_id = 1, .type_id = 2 };
         try std.testing.expect(n.contextual_type == null);
+    }
+
+    test "effective uses inference and never substitutes context" {
+        const n = NodeTypeInfo{ .node_id = 1, .type_id = 2, .contextual_type = 3 };
+        try std.testing.expectEqual(@as(types.TypeId, 2), n.effective().?);
+        const failed = NodeTypeInfo{ .node_id = 1, .type_id = 2, .contextual_type = 3, .state = .@"error" };
+        try std.testing.expect(failed.effective() == null);
     }
 };
 
@@ -97,6 +124,8 @@ pub const TypeIssue = enum {
     invalid_index,
     invalid_argument_count,
     invalid_argument_type,
+    invalid_callee,
+    invalid_constructor,
     satisfies,
 };
 
@@ -104,6 +133,7 @@ pub const TypeIssue = enum {
 pub const FlowTypeInfo = struct {
     function_node: ast_mod.NodeId,
     block_id: u32,
+    program_point: u32 = 0,
     symbol_id: binder.SymbolId,
     reference_node: ast_mod.NodeId,
     type_id: types.TypeId,
@@ -142,7 +172,7 @@ pub const TypeInfo = struct {
     /// when no entry is found.
     pub fn lookupNode(self: @This(), node_id: ast_mod.NodeId) ?types.TypeId {
         for (self.nodes) |entry| {
-            if (entry.node_id == node_id) return entry.type_id;
+            if (entry.node_id == node_id) return entry.effective();
         }
         return null;
     }
@@ -155,8 +185,22 @@ pub const TypeInfo = struct {
     }
 
     pub fn lookupFlowType(self: @This(), function_node: ast_mod.NodeId, block_id: u32, symbol_id: binder.SymbolId) ?types.TypeId {
+        var found: ?types.TypeId = null;
         for (self.flow_types) |entry| {
             if (entry.function_node == function_node and entry.block_id == block_id and entry.symbol_id == symbol_id)
+                found = entry.type_id;
+        }
+        return found;
+    }
+
+    pub fn lookupFlowTypeAtReference(self: @This(), reference_node: ast_mod.NodeId) ?types.TypeId {
+        for (self.flow_types) |entry| if (entry.reference_node == reference_node) return entry.type_id;
+        return null;
+    }
+
+    pub fn lookupFlowTypeAtPoint(self: @This(), function_node: ast_mod.NodeId, block_id: u32, program_point: u32, symbol_id: binder.SymbolId) ?types.TypeId {
+        for (self.flow_types) |entry| {
+            if (entry.function_node == function_node and entry.block_id == block_id and entry.program_point == program_point and entry.symbol_id == symbol_id)
                 return entry.type_id;
         }
         return null;
@@ -202,6 +246,27 @@ pub const TypeInfo = struct {
         try std.testing.expectEqual(@as(types.TypeId, 31), info.lookupNode(5).?);
         try std.testing.expectEqual(@as(types.TypeId, 32), info.lookupNode(6).?);
         try std.testing.expect(info.lookupNode(99) == null);
+    }
+
+    test "flow lookups distinguish references and program points in one block" {
+        const empty_symbols: [0]SymbolTypeInfo = .{};
+        const empty_nodes: [0]NodeTypeInfo = .{};
+        const flow = [_]FlowTypeInfo{
+            .{ .function_node = 10, .block_id = 2, .program_point = 0, .symbol_id = 7, .reference_node = 20, .type_id = 30 },
+            .{ .function_node = 10, .block_id = 2, .program_point = 1, .symbol_id = 7, .reference_node = 21, .type_id = 31 },
+        };
+        const empty_diagnostics: [0]diagnostics_mod.Diagnostic = .{};
+        const info: TypeInfo = .{
+            .symbols = &empty_symbols,
+            .nodes = &empty_nodes,
+            .flow_types = &flow,
+            .diagnostics = &empty_diagnostics,
+        };
+
+        try std.testing.expectEqual(@as(types.TypeId, 30), info.lookupFlowTypeAtReference(20).?);
+        try std.testing.expectEqual(@as(types.TypeId, 31), info.lookupFlowTypeAtReference(21).?);
+        try std.testing.expectEqual(@as(types.TypeId, 30), info.lookupFlowTypeAtPoint(10, 2, 0, 7).?);
+        try std.testing.expectEqual(@as(types.TypeId, 31), info.lookupFlowType(10, 2, 7).?);
     }
 
     test "empty table lookup returns null" {

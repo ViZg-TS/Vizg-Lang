@@ -156,7 +156,7 @@ pub fn main(init: std.process.Init) !void {
         .types => {
             const info = semantic_result.type_info;
             const bind_sym = result.bind.symbols;
-            try printTypes(stdout, path, info, bind_sym, result.ast, &semantic_result.type_store.builtins);
+            try printTypes(stdout, path, info, bind_sym, result.ast, &semantic_result.type_store, arena);
 
             if (hasErrors(semantic_result.diagnostics)) {
                 try stdout.flush();
@@ -266,7 +266,7 @@ fn printTypeNode(writer: *Io.Writer, tree: ast_mod.Ast, type_id: ast_mod.TypeNod
             try writer.writeByte('\n');
             for (members) |member| {
                 try printIndent(writer, depth + 1);
-                try writer.print("TypeMember name=\"{s}\" optional={} {}..{}\n", .{ member.name, member.optional, member.span.start, member.span.end });
+                try writer.print("TypeMember name=\"{s}\" optional={} readonly={} {}..{}\n", .{ member.name, member.optional, member.readonly, member.span.start, member.span.end });
                 try printTypeNode(writer, tree, member.type_node, depth + 2);
             }
         },
@@ -418,7 +418,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             for (expr.members) |member| try printAstNode(writer, tree, member, depth + 1);
         },
         .ClassField => |field| {
-            try writer.print("ClassField #{} name=\"{s}\" static={} access={s} optional={} definite={} {}..{}\n", .{ node_id, field.name, field.is_static, @tagName(field.access), field.optional, field.definite, node.span.start, node.span.end });
+            try writer.print("ClassField #{} name=\"{s}\" static={} readonly={} access={s} optional={} definite={} {}..{}\n", .{ node_id, field.name, field.is_static, field.readonly, @tagName(field.access), field.optional, field.definite, node.span.start, node.span.end });
             if (field.type_annotation) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             if (field.initializer) |initializer| try printAstNode(writer, tree, initializer, depth + 1);
         },
@@ -1225,27 +1225,22 @@ test "printModules emits deterministic shape with module ids and status labels" 
     try std.testing.expect(std.mem.indexOf(u8, out, "\nDiagnostics\n") != null);
 }
 
-/// Returns the canonical builtin name for a TypeId in this semantic context.
-fn builtinNameFromId(type_id: types_pkg.TypeId, builtins: *const types_pkg.Builtins) []const u8 {
-    const kind = builtins.kindFor(type_id) orelse return "<unknown>";
-    return types_pkg.builtinKindName(kind);
-}
-
 fn printTypes(
     writer: *Io.Writer,
     path: []const u8,
     info: semantics.TypeInfo,
     bind_symbols: []const binder.Symbol,
     tree: ast_mod.Ast,
-    builtins: *const types_pkg.Builtins,
+    type_store: *const types_pkg.TypeStore,
+    allocator: std.mem.Allocator,
 ) !void {
     try writer.print("Types\n", .{});
 
     // Symbols — declared / inferred types per symbol.
     for (info.symbols, 0..) |sym, i| {
         const name = symbolNameFromSlice(bind_symbols, sym.symbol_id);
-        const decl_str = if (sym.declared_type) |t| builtinNameFromId(t, builtins) else "null";
-        const infer_str = if (sym.inferred_type) |t| builtinNameFromId(t, builtins) else "null";
+        const decl_str = if (sym.declared_type) |t| try type_store.formatDebugAlloc(allocator, t) else "null";
+        const infer_str = if (sym.inferred_type) |t| try type_store.formatDebugAlloc(allocator, t) else "null";
         const i_u32: u32 = @intCast(i);
         try writer.print(
             "  symbol {d} name=\"{s}\" declared={s} inferred={s}\n",
@@ -1253,7 +1248,7 @@ fn printTypes(
         );
     }
 
-    // Node types — inferred primitive type per literal/keyword node.
+    // Node types — canonical semantic type per classified node.
     try writer.print("\nNodes\n", .{});
     if (info.nodes.len == 0) {
         try writer.writeAll("  none\n");
@@ -1261,7 +1256,7 @@ fn printTypes(
         for (info.nodes, 0..) |entry, i| {
             _ = i; // node_id field is the primary key.
             const kind_name = nodeKindName(tree, entry.node_id);
-            const type_str = builtinNameFromId(entry.type_id, builtins);
+            const type_str = try type_store.formatDebugAlloc(allocator, entry.type_id);
             try writer.print("  node {d} {s} type={s}\n", .{
                 entry.node_id, kind_name, type_str,
             });

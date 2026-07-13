@@ -6,18 +6,11 @@ pub const TypeStore = struct {
     builtins: model.Builtins,
     records: std.ArrayList(StoredType),
     signatures: std.ArrayList(model.FunctionSignature),
-    
-    /// Maps declaration_id (== NominalType.declaration_id) to ClassSemanticModel.
-    /// Populated during class analysis; used by member access lookup and constructor typing.
-    /// Identity key used to lookup ClassSemanticModel entries. Includes both module_id (graph module source)
-    /// and the local declaration NodeId so two declarations with the same name/NodeId in different modules
-    /// never collide inside one TypeStore.
-    class_models: std.AutoHashMap(SemanticDeclKey, model.ClassSemanticModel),
 
-    const SemanticDeclKey = struct {
-        module_id: ?u32,
-        declaration_id: u32,
-    };
+    /// Qualified keys prevent equal local AST NodeIds in different modules from
+    /// colliding. Classes and interfaces have different semantic contracts.
+    class_types: std.AutoHashMap(model.SemanticDeclId, model.ClassSemanticType),
+    interface_types: std.AutoHashMap(model.SemanticDeclId, model.InterfaceSemanticType),
 
     const StoredType = struct {
         id: model.TypeId,
@@ -30,7 +23,8 @@ pub const TypeStore = struct {
             .builtins = model.Builtins.init(),
             .records = .empty,
             .signatures = .empty,
-            .class_models = std.AutoHashMap(SemanticDeclKey, model.ClassSemanticModel).init(allocator),
+            .class_types = std.AutoHashMap(model.SemanticDeclId, model.ClassSemanticType).init(allocator),
+            .interface_types = std.AutoHashMap(model.SemanticDeclId, model.InterfaceSemanticType).init(allocator),
         };
     }
 
@@ -50,74 +44,95 @@ pub const TypeStore = struct {
         }
         return null;
     }
-    /// Store semantic model for a class declaration. Called during class analysis 
-    /// to populate field and method information for later member access lookups.
-    pub fn storeClassSemanticModel(self: *TypeStore, model_: model.ClassSemanticModel) !void {
-        try self.class_models.put(TypeStore.SemanticDeclKey{ .module_id = model_.module_id, .declaration_id = model_.declaration_id }, model_);
-    }
-
-    /// Store semantic model for an interface declaration. Called during interface analysis.
-    pub fn storeInterfaceSemanticModel(self: *TypeStore, model_: model.InterfaceSemanticModel) !void {
-        // Store as a class-like model (interfaces use same member lookup path) —
-        // we synthesize a ClassSemanticModel by converting members to ClassField entries.
-        const decl_id = model_.declaration_id;
-        var fields = try self.allocator.alloc(model.ClassField, model_.members.len);
-        for (model_.members, 0..) |member, i| {
-            fields[i] = .{
-                .name = member.name,
-                .type_id = member.type_id,
-                .is_public = true,  // interface members are public by default
-                .is_readonly = true,
-            };
-        }
-        const synthesized = model.ClassSemanticModel{
-            .declaration_id = decl_id,
-            .module_id = model_.module_id,
-            .name = model_.name,
-            .fields = fields,
-            .methods = &.{},  // interfaces don't have implementations
-            .constructor_signature = null,
+    pub fn createClassSemanticType(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        name: []const u8,
+    ) !model.ClassSemanticType {
+        if (self.class_types.get(identity)) |existing| return existing;
+        const instance_type = try self.intern(.{ .class = .{ .identity = identity, .name = name } });
+        const constructor_type = try self.intern(.{ .class_constructor = .{
+            .identity = identity,
+            .name = name,
+            .instance_type = instance_type,
+        } });
+        const result: model.ClassSemanticType = .{
+            .identity = identity,
+            .name = name,
+            .constructor_type = constructor_type,
+            .instance_type = instance_type,
         };
-        try self.class_models.put(TypeStore.SemanticDeclKey{ .module_id = synthesized.module_id, .declaration_id = synthesized.declaration_id }, synthesized);
+        try self.class_types.put(identity, result);
+        return result;
     }
 
-    /// Look up a field type from a class instance by name. Returns null if not found.
-    pub fn lookupClassField(self: *const TypeStore, class_id: model.TypeId, field_name: []const u8) ?model.TypeId {
-        // Find the nominal type to get declaration_id
-        const record = self.stored(class_id) orelse return null;
-        const nominal = switch (record.kind) {
-            .class => |n| n,
-            .interface => |n| n,
-            else => return null,
+    pub fn createInterfaceSemanticType(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        name: []const u8,
+        members: model.MemberTable,
+    ) !model.InterfaceSemanticType {
+        if (self.interface_types.get(identity)) |existing| return existing;
+        const type_id = try self.intern(.{ .interface = .{
+            .identity = identity,
+            .name = name,
+            .members = members,
+        } });
+        const stored_interface = self.lookup(type_id).?.kind.interface;
+        const result: model.InterfaceSemanticType = .{
+            .identity = identity,
+            .name = stored_interface.name,
+            .type_id = type_id,
+            .members = stored_interface.members,
         };
-        
-        // Look up stored class model by declaration_id
-        if (self.class_models.get(TypeStore.SemanticDeclKey{ .module_id = nominal.module_id, .declaration_id = nominal.declaration_id })) |model_| {
-            for (model_.fields) |field| {
-                if (std.mem.eql(u8, field.name, field_name)) return field.type_id;
-            }
-        }
-        return null;
+        try self.interface_types.put(identity, result);
+        return result;
     }
 
-    /// Look up a method signature from a class instance by name. Returns null if not found.
-    pub fn lookupClassMethod(self: *const TypeStore, class_id: model.TypeId, method_name: []const u8) ?model.FunctionSignatureId {
-        const record = self.stored(class_id) orelse return null;
-        const nominal = switch (record.kind) {
-            .class => |n| n,
-            .interface => |n| n,
-            else => return null,
+    pub fn lookupClassSemanticType(self: *const TypeStore, identity: model.SemanticDeclId) ?model.ClassSemanticType {
+        return self.class_types.get(identity);
+    }
+
+    pub fn lookupInterfaceSemanticType(self: *const TypeStore, identity: model.SemanticDeclId) ?model.InterfaceSemanticType {
+        return self.interface_types.get(identity);
+    }
+
+    /// Complete the member-bearing portion of a predeclared class identity.
+    pub fn completeClassSemanticType(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        static_members: model.MemberTable,
+        instance_members: model.MemberTable,
+        constructor_signature: ?model.TypeId,
+        inheritance: model.ClassInheritance,
+    ) !void {
+        const semantic = self.class_types.getPtr(identity) orelse return error.UnknownClassIdentity;
+        semantic.static_members = try self.cloneMemberTable(static_members);
+        semantic.instance_members = try self.cloneMemberTable(instance_members);
+        semantic.constructor_signature = constructor_signature;
+        semantic.inheritance = .{
+            .extends = inheritance.extends,
+            .implements = try self.allocator.dupe(model.TypeId, inheritance.implements),
         };
-        
-        if (self.class_models.get(TypeStore.SemanticDeclKey{ .module_id = nominal.module_id, .declaration_id = nominal.declaration_id })) |model_| {
-            for (model_.methods) |method| {
-                if (std.mem.eql(u8, method.name, method_name)) return method.signature_id;
-            }
-        }
-        return null;
     }
 
-
+    /// Complete a predeclared interface while preserving its stable TypeId.
+    pub fn completeInterfaceSemanticType(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        members: model.MemberTable,
+        inheritance: model.InterfaceInheritance,
+    ) !void {
+        const semantic = self.interface_types.getPtr(identity) orelse return error.UnknownInterfaceIdentity;
+        const owned_members = try self.cloneMemberTable(members);
+        const record = self.storedMut(semantic.type_id) orelse return error.InvalidTypeId;
+        if (record.kind) |*kind| switch (kind.*) {
+            .interface => |*interface| interface.members = owned_members,
+            else => return error.InvalidInterfaceType,
+        } else return error.InvalidInterfaceType;
+        semantic.members = owned_members;
+        semantic.inheritance = .{ .extends = try self.allocator.dupe(model.TypeId, inheritance.extends) };
+    }
 
     /// Reserve identity before its definition is available. References may safely
     /// point at this id; lookup starts succeeding only after defineReserved.
@@ -133,14 +148,13 @@ pub const TypeStore = struct {
         record.kind = try self.cloneKind(kind);
     }
 
-    /// Anonymous structural types are interned. Nominal types retain declaration
-    /// identity. Recursive construction uses reserve/defineReserved instead.
+    /// Structural shapes and exact nominal identities are interned. Distinct
+    /// declarations remain distinct because nominal equality includes identity.
+    /// Recursive construction uses reserve/defineReserved instead.
     pub fn intern(self: *TypeStore, kind: model.TypeKind) !model.TypeId {
-        if (!isNominal(kind)) {
-            for (self.records.items) |record| {
-                const existing = record.kind orelse continue;
-                if (kindsEqual(existing, kind)) return record.id;
-            }
+        for (self.records.items) |record| {
+            const existing = record.kind orelse continue;
+            if (kindsEqual(existing, kind)) return record.id;
         }
         const id = try self.reserve();
         try self.defineReserved(id, kind);
@@ -162,18 +176,17 @@ pub const TypeStore = struct {
         type_parameter_count: u32,
         flags: model.FunctionFlags,
     ) !model.TypeId {
-        // Check for structural equality but prevent cross-declaration sharing.
-        // Each function declaration gets its own TypeId even if signatures match structurally.
-        // Each function declaration gets its own immutable signature to prevent cross-declaration contamination
+        // Function signatures are immutable structural values. Reuse an equal
+        // signature; allocate a new TypeId for every changed shape.
         const new_signature: model.FunctionSignature = .{
-            .id = undefined,  // id not yet assigned; used only for comparison
+            .id = undefined, // id not yet assigned; used only for comparison
             .parameters = parameters,
             .return_type = return_type,
             .type_parameter_count = type_parameter_count,
             .flags = flags,
-            .declaration_id = null,  // Not a real declaration yet
+            .declaration_id = null, // Not a real declaration yet
         };
-        
+
         for (self.signatures.items) |signature| {
             if (!structurallyEqualSignatures(signature, new_signature)) continue;
             return signature.id;
@@ -192,9 +205,8 @@ pub const TypeStore = struct {
         return id;
     }
 
-    /// Returns the TypeId for a function's current signature. Does NOT mutate - 
-    /// to change a function's return type, create a new signature via addFunctionDetailed
-    /// and update the symbol's declared type externally. This prevents shared-state bugs.
+    /// Returns an immutable signature. Changes require addFunctionDetailed and
+    /// replacement of the owning symbol's TypeId.
     pub fn lookupFunctionSignature(self: *const TypeStore, id: model.TypeId) ?model.FunctionSignature {
         for (self.signatures.items) |signature| {
             if (signature.id == id) return signature;
@@ -259,7 +271,40 @@ pub const TypeStore = struct {
     /// Debug rendering is deliberately lossy and must never drive type decisions.
     pub fn formatDebugAlloc(self: *const TypeStore, allocator: std.mem.Allocator, id: model.TypeId) ![]u8 {
         const ty = self.lookup(id) orelse return std.fmt.allocPrint(allocator, "<invalid:{d}>", .{id});
-        return std.fmt.allocPrint(allocator, "{s}#{d}", .{ ty.displayName(), id });
+        return switch (ty.kind) {
+            .primitive, .literal => std.fmt.allocPrint(allocator, "{s}#{d}", .{ ty.displayName(), id }),
+            .function => |signature_id| if (self.lookupFunctionSignature(signature_id)) |signature|
+                std.fmt.allocPrint(allocator, "function#{d}[parameters={d},return={d}]", .{ id, signature.parameters.len, signature.return_type })
+            else
+                std.fmt.allocPrint(allocator, "function#{d}[signature={d}]", .{ id, signature_id }),
+            .promise => |value| std.fmt.allocPrint(allocator, "promise#{d}[value={d}]", .{ id, value.value_type }),
+            .generator => |value| std.fmt.allocPrint(allocator, "generator#{d}[yield={d},return={d}]", .{ id, value.yield_type, value.return_type }),
+            .union_type => |members| std.fmt.allocPrint(allocator, "union#{d}[members={d}]", .{ id, members.len }),
+            .intersection => |members| std.fmt.allocPrint(allocator, "intersection#{d}[members={d}]", .{ id, members.len }),
+            .array => |value| std.fmt.allocPrint(allocator, "array#{d}[element={d},readonly={}]", .{ id, value.element_type, value.readonly }),
+            .tuple => |value| std.fmt.allocPrint(allocator, "tuple#{d}[elements={d},readonly={}]", .{ id, value.elements.len, value.readonly }),
+            .object => |properties| if (properties.len == 0)
+                std.fmt.allocPrint(allocator, "object#{d}[properties=0]", .{id})
+            else
+                std.fmt.allocPrint(allocator, "object#{d}[properties={d},first={s}:{d}]", .{ id, properties.len, properties[0].name, properties[0].type_id }),
+            .class => |value| formatNominalDebugAlloc(allocator, "class", value.name, id, value.identity),
+            .class_constructor => |value| std.fmt.allocPrint(
+                allocator,
+                "class-constructor {s}#{d}[module={d},declaration={d},instance={d}]",
+                .{ value.name, id, value.identity.module_id, value.identity.declaration_id, value.instance_type },
+            ),
+            .interface => |value| std.fmt.allocPrint(
+                allocator,
+                "interface {s}#{d}[module={d},declaration={d},members={d}]",
+                .{ value.name, id, value.identity.module_id, value.identity.declaration_id, value.members.members.len },
+            ),
+            .enum_type => |value| formatNominalDebugAlloc(allocator, "enum", value.name, id, value.identity),
+            .type_parameter => |value| std.fmt.allocPrint(
+                allocator,
+                "type-parameter {s}#{d}[module={d},declaration={d},parameter={d}]",
+                .{ value.name, id, value.identity.module_id, value.identity.declaration_id, value.parameter_id },
+            ),
+        };
     }
 
     fn stored(self: *const TypeStore, id: model.TypeId) ?*const StoredType {
@@ -307,11 +352,24 @@ pub const TypeStore = struct {
                 }
                 break :blk .{ .object = copy };
             },
-            .class => |nominal| .{ .class = try self.cloneNominal(nominal) },
-            .interface => |nominal| .{ .interface = try self.cloneNominal(nominal) },
+            .class => |instance| .{ .class = .{
+                .identity = instance.identity,
+                .name = try self.allocator.dupe(u8, instance.name),
+            } },
+            .class_constructor => |constructor| .{ .class_constructor = .{
+                .identity = constructor.identity,
+                .name = try self.allocator.dupe(u8, constructor.name),
+                .instance_type = constructor.instance_type,
+            } },
+            .interface => |interface| .{ .interface = .{
+                .identity = interface.identity,
+                .name = try self.allocator.dupe(u8, interface.name),
+                .members = try self.cloneMemberTable(interface.members),
+            } },
             .enum_type => |nominal| .{ .enum_type = try self.cloneNominal(nominal) },
             .type_parameter => |parameter| .{ .type_parameter = .{
-                .declaration_id = parameter.declaration_id,
+                .identity = parameter.identity,
+                .parameter_id = parameter.parameter_id,
                 .name = try self.allocator.dupe(u8, parameter.name),
                 .constraint = parameter.constraint,
                 .default = parameter.default,
@@ -320,15 +378,31 @@ pub const TypeStore = struct {
     }
 
     fn cloneNominal(self: *TypeStore, nominal: model.NominalType) !model.NominalType {
-        return .{ .module_id = nominal.module_id, .declaration_id = nominal.declaration_id, .name = try self.allocator.dupe(u8, nominal.name) };
+        return .{ .identity = nominal.identity, .name = try self.allocator.dupe(u8, nominal.name) };
+    }
+
+    fn cloneMemberTable(self: *TypeStore, table: model.MemberTable) !model.MemberTable {
+        const members = try self.allocator.alloc(model.SemanticMember, table.members.len);
+        for (table.members, 0..) |member, index| {
+            members[index] = member;
+            members[index].name = try self.allocator.dupe(u8, member.name);
+        }
+        return .{ .members = members };
     }
 };
 
-fn isNominal(kind: model.TypeKind) bool {
-    return switch (kind) {
-        .class, .interface, .enum_type, .type_parameter => true,
-        else => false,
-    };
+fn formatNominalDebugAlloc(
+    allocator: std.mem.Allocator,
+    kind_name: []const u8,
+    name: []const u8,
+    id: model.TypeId,
+    identity: model.SemanticDeclId,
+) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "{s} {s}#{d}[module={d},declaration={d}]",
+        .{ kind_name, name, id, identity.module_id, identity.declaration_id },
+    );
 }
 
 fn appendSortedUnique(
@@ -345,7 +419,7 @@ fn appendSortedUnique(
 /// Compare two FunctionSignatures for structural equality (ignoring declaration_id).
 /// Used internally to detect duplicate signatures during interning.
 fn structurallyEqualSignatures(
-    left: model.FunctionSignature, 
+    left: model.FunctionSignature,
     right: model.FunctionSignature,
 ) bool {
     if (left.return_type == right.return_type and
@@ -380,11 +454,24 @@ fn kindsEqual(left: model.TypeKind, right: model.TypeKind) bool {
         .generator => |value| value.yield_type == right.generator.yield_type and value.return_type == right.generator.return_type,
         .tuple => |value| tupleEqual(value, right.tuple),
         .object => |value| propertiesEqual(value, right.object),
-        .class => |value| value.module_id == right.class.module_id and value.declaration_id == right.class.declaration_id,
-        .interface => |value| value.module_id == right.interface.module_id and value.declaration_id == right.interface.declaration_id,
-        .enum_type => |value| value.module_id == right.enum_type.module_id and value.declaration_id == right.enum_type.declaration_id,
-        .type_parameter => |value| value.declaration_id == right.type_parameter.declaration_id,
+        .class => |value| value.identity.eql(right.class.identity),
+        .class_constructor => |value| value.identity.eql(right.class_constructor.identity) and
+            value.instance_type == right.class_constructor.instance_type,
+        .interface => |value| value.identity.eql(right.interface.identity) and
+            memberTablesEqual(value.members, right.interface.members),
+        .enum_type => |value| value.identity.eql(right.enum_type.identity),
+        .type_parameter => |value| value.identity.eql(right.type_parameter.identity) and
+            value.parameter_id == right.type_parameter.parameter_id,
     };
+}
+
+fn memberTablesEqual(left: model.MemberTable, right: model.MemberTable) bool {
+    if (left.members.len != right.members.len) return false;
+    for (left.members, right.members) |a, b| {
+        if (!std.mem.eql(u8, a.name, b.name) or a.type_id != b.type_id or
+            a.visibility != b.visibility or a.readonly != b.readonly or a.optional != b.optional) return false;
+    }
+    return true;
 }
 
 fn tupleEqual(left: model.TupleType, right: model.TupleType) bool {
@@ -427,10 +514,14 @@ test "TypeStore owns every required shape and interns structural types" {
     } } });
     const object = try store.intern(.{ .object = &.{.{ .name = "x", .type_id = b.number }} });
     const function = try store.addFunction(&.{.{ .name = "x", .type_id = b.number }}, b.string);
-    const class = try store.intern(.{ .class = .{ .declaration_id = 1, .name = "C" } });
-    const interface = try store.intern(.{ .interface = .{ .declaration_id = 2, .name = "I" } });
-    const enum_type = try store.intern(.{ .enum_type = .{ .declaration_id = 3, .name = "E" } });
-    const parameter = try store.intern(.{ .type_parameter = .{ .declaration_id = 4, .name = "T" } });
+    const class = try store.intern(.{ .class = .{ .identity = model.SemanticDeclId.init(0, 1), .name = "C" } });
+    const interface = try store.intern(.{ .interface = .{ .identity = model.SemanticDeclId.init(0, 2), .name = "I" } });
+    const enum_type = try store.intern(.{ .enum_type = .{ .identity = model.SemanticDeclId.init(0, 3), .name = "E" } });
+    const parameter = try store.intern(.{ .type_parameter = .{
+        .identity = model.SemanticDeclId.init(0, 4),
+        .parameter_id = 9,
+        .name = "T",
+    } });
     const union_type = try store.unionOf(&.{ literal, b.never, literal, b.number });
     const intersection = try store.intersectionOf(&.{ object, b.unknown, object, interface });
 
@@ -441,46 +532,103 @@ test "TypeStore owns every required shape and interns structural types" {
     try std.testing.expect(store.lookupFunction(function) != null);
 }
 
-test "Cross-module NominalType with same local NodeId but different module_id is not interned to same TypeId" {
-    // Goal 136 regression: two declarations sharing a local declaration_id in 
-    // distinct graph modules must NOT collapse into one nominal identity. The 
-    // equality code compares both module_id and declaration_id (kindsEqual branch);
-    // the map key for class_models is now SemanticDeclKey (module_id + declaration_id).
+test "Goal 134 inferred function signatures are immutable" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var store = TypeStore.init(arena.allocator());
 
-    const a_decl = try store.intern(.{ .class = .{ .module_id = 1, .declaration_id = 42, .name = "Node" } });
-    const b_decl = try store.intern(.{ .class = .{ .module_id = 2, .declaration_id = 42, .name = "Node" } });
+    const number_signature = try store.addFunction(&.{}, store.builtins.number);
+    const string_signature = try store.addFunction(&.{}, store.builtins.string);
 
-    // Same local NodeId (42) but different graph modules -> distinct TypeIds.
-    try std.testing.expect(a_decl != b_decl);
-
-    // kindsEqual must distinguish by module_id+declaration_id — the actual 
-    // cross-module isolation guarantee (intern skips nominal dedup so we 
-    // assert on equality directly, not on intern identity).
-    const a_key: model.TypeKind = .{ .class = .{ .module_id = 1, .declaration_id = 42, .name = "Node" } };
-    const b_key: model.TypeKind = .{ .class = .{ .module_id = 2, .declaration_id = 42, .name = "Node" } };
-    try std.testing.expect(kindsEqual(a_key, a_key));           // same -> equal
-    try std.testing.expect(!kindsEqual(a_key, b_key));          // diff module -> not equal
-
-    // Cross-module lookup: ClassSemanticModel stored under key (1, 42) must NOT 
-    // shadow or be reachable via key (2, 42). The class_models map is keyed by 
-    // SemanticDeclKey { module_id, declaration_id }, so two modules can coexist.
-    try store.storeClassSemanticModel(.{ .declaration_id = 42, .module_id = 1, .name = "Node", .fields = &.{}, .methods = &.{} });
-    const got_a = store.class_models.get(TypeStore.SemanticDeclKey{ .module_id = 1, .declaration_id = 42 }) orelse unreachable;
-    try std.testing.expect(std.mem.eql(u8, got_a.name, "Node"));
-
-    // Same local NodeId in module 2 is a separate entry.
-    const got_b = store.class_models.get(TypeStore.SemanticDeclKey{ .module_id = 2, .declaration_id = 42 }) orelse null;
-    try std.testing.expect(got_b == null); // not yet stored under key (2, 42)
-
-    try store.storeClassSemanticModel(.{ .declaration_id = 42, .module_id = 2, .name = "Node", .fields = &.{}, .methods = &.{} });
-    const got_b_now = store.class_models.get(TypeStore.SemanticDeclKey{ .module_id = 2, .declaration_id = 42 }) orelse unreachable;
-    try std.testing.expect(std.mem.eql(u8, got_b_now.name, "Node"));
+    try std.testing.expect(number_signature != string_signature);
+    try std.testing.expectEqual(
+        store.builtins.number,
+        store.lookupFunctionSignature(number_signature).?.return_type,
+    );
+    try std.testing.expectEqual(
+        store.builtins.string,
+        store.lookupFunctionSignature(string_signature).?.return_type,
+    );
 }
 
+test "Goal 136 qualified nominal identities isolate equal local declaration ids" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
 
+    const a = model.SemanticDeclId.init(1, 42);
+    const b = model.SemanticDeclId.init(2, 42);
+    inline for (.{ .class, .interface, .enum_type }) |tag| {
+        const a_kind: model.TypeKind = @unionInit(model.TypeKind, @tagName(tag), .{ .identity = a, .name = "Node" });
+        const b_kind: model.TypeKind = @unionInit(model.TypeKind, @tagName(tag), .{ .identity = b, .name = "Node" });
+        try std.testing.expect(kindsEqual(a_kind, a_kind));
+        try std.testing.expect(!kindsEqual(a_kind, b_kind));
+        const a_id = try store.intern(a_kind);
+        const cloned = store.lookup(a_id).?;
+        const cloned_identity = switch (cloned.kind) {
+            .class => |value| value.identity,
+            .interface => |value| value.identity,
+            .enum_type => |value| value.identity,
+            else => unreachable,
+        };
+        try std.testing.expectEqual(a, cloned_identity);
+    }
+
+    _ = try store.createClassSemanticType(a, "A");
+    _ = try store.createClassSemanticType(b, "B");
+    try std.testing.expectEqualStrings("A", store.class_types.get(a).?.name);
+    try std.testing.expectEqualStrings("B", store.class_types.get(b).?.name);
+
+    const a_interface = model.SemanticDeclId.init(1, 43);
+    const b_interface = model.SemanticDeclId.init(2, 43);
+    _ = try store.createInterfaceSemanticType(a_interface, "IA", .{});
+    _ = try store.createInterfaceSemanticType(b_interface, "IB", .{});
+    try std.testing.expectEqualStrings("IA", store.interface_types.get(a_interface).?.name);
+    try std.testing.expectEqualStrings("IB", store.interface_types.get(b_interface).?.name);
+
+    const debug_id = try store.intern(.{ .class = .{ .identity = a, .name = "Node" } });
+    const debug = try store.formatDebugAlloc(arena.allocator(), debug_id);
+    try std.testing.expect(std.mem.indexOf(u8, debug, "class Node") != null);
+    try std.testing.expect(std.mem.indexOf(u8, debug, "module=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, debug, "declaration=42") != null);
+}
+
+test "Goal 141 class and interface semantic foundations preserve identity and shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+
+    const class_identity = model.SemanticDeclId.init(7, 11);
+    const class_type = try store.createClassSemanticType(class_identity, "Service");
+    try std.testing.expect(class_type.constructor_type != class_type.instance_type);
+    try std.testing.expectEqual(class_identity, store.lookup(class_type.instance_type).?.kind.class.identity);
+    const constructor = store.lookup(class_type.constructor_type).?.kind.class_constructor;
+    try std.testing.expectEqual(class_identity, constructor.identity);
+    try std.testing.expectEqual(class_type.instance_type, constructor.instance_type);
+    try std.testing.expectEqual(@as(usize, 0), class_type.static_members.members.len);
+    try std.testing.expectEqual(@as(usize, 0), class_type.instance_members.members.len);
+    try std.testing.expect(class_type.constructor_signature == null);
+    try std.testing.expect(class_type.inheritance.extends == null);
+
+    const interface_identity = model.SemanticDeclId.init(7, 12);
+    const interface_type = try store.createInterfaceSemanticType(interface_identity, "Named", .{ .members = &.{
+        .{ .name = "name", .type_id = store.builtins.string, .visibility = .public, .readonly = true },
+        .{ .name = "secret", .type_id = store.builtins.string, .visibility = .protected, .optional = true },
+        .{ .name = "hidden", .type_id = store.builtins.boolean, .visibility = .private },
+        .{ .name = "plain", .type_id = store.builtins.number, .visibility = .none },
+    } });
+    const shape = store.lookup(interface_type.type_id).?.kind.interface;
+    try std.testing.expectEqual(interface_identity, shape.identity);
+    try std.testing.expectEqual(@as(usize, 4), shape.members.members.len);
+    try std.testing.expectEqual(model.Visibility.public, shape.members.members[0].visibility);
+    try std.testing.expectEqual(model.Visibility.protected, shape.members.members[1].visibility);
+    try std.testing.expectEqual(model.Visibility.private, shape.members.members[2].visibility);
+    try std.testing.expectEqual(model.Visibility.none, shape.members.members[3].visibility);
+
+    const other_module = try store.createClassSemanticType(model.SemanticDeclId.init(8, 11), "Service");
+    try std.testing.expect(other_module.instance_type != class_type.instance_type);
+    try std.testing.expect(other_module.constructor_type != class_type.constructor_type);
+}
 
 test "TypeStore normalization and propagation rules are deterministic" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -510,4 +658,5 @@ test "TypeStore recursive references use reserve then define without loops" {
 
     const rendered = try store.formatDebugAlloc(arena.allocator(), recursive);
     try std.testing.expect(std.mem.startsWith(u8, rendered, "object#"));
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "first=next") != null);
 }

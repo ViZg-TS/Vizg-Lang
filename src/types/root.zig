@@ -15,14 +15,24 @@ pub const next_user_type_id = model.next_user_type_id;
 pub const TypeKind = model.TypeKind;
 pub const Type = model.Type;
 
-pub const FunctionSignatureId = model.FunctionSignatureId;
 pub const ParameterType = model.ParameterType;
 pub const LiteralValue = model.LiteralValue;
 pub const ObjectProperty = model.ObjectProperty;
 pub const ArrayType = model.ArrayType;
 pub const TupleElement = model.TupleElement;
 pub const TupleType = model.TupleType;
+pub const SemanticDeclId = model.SemanticDeclId;
 pub const NominalType = model.NominalType;
+pub const Visibility = model.Visibility;
+pub const SemanticMember = model.SemanticMember;
+pub const MemberTable = model.MemberTable;
+pub const ClassInstanceType = model.ClassInstanceType;
+pub const ClassConstructorType = model.ClassConstructorType;
+pub const InterfaceType = model.InterfaceType;
+pub const ClassInheritance = model.ClassInheritance;
+pub const InterfaceInheritance = model.InterfaceInheritance;
+pub const ClassSemanticType = model.ClassSemanticType;
+pub const InterfaceSemanticType = model.InterfaceSemanticType;
 pub const TypeParameterType = model.TypeParameterType;
 pub const FunctionSignature = model.FunctionSignature;
 

@@ -846,9 +846,10 @@ const Parser = struct {
         const start = self.current().span;
         var access: ast_mod.AccessModifier = .none;
         var is_static = false;
+        var readonly = false;
         var is_async = false;
         while (self.at(.Identifier)) {
-            if (self.atIdentifierText("static")) is_static = true else if (self.atIdentifierText("public")) access = .public else if (self.atIdentifierText("private")) access = .private else if (self.atIdentifierText("protected")) access = .protected else break;
+            if (self.atIdentifierText("static")) is_static = true else if (self.atIdentifierText("readonly")) readonly = true else if (self.atIdentifierText("public")) access = .public else if (self.atIdentifierText("private")) access = .private else if (self.atIdentifierText("protected")) access = .protected else break;
             _ = self.advance();
         }
         if (self.atIdentifierText("async") and
@@ -894,7 +895,7 @@ const Parser = struct {
         _ = self.eat(.Semicolon);
         return self.addNode(.{
             .span = joinSpans(start, self.previousOrCurrent().span),
-            .data = .{ .ClassField = .{ .name = name_token.lexeme, .type_annotation = type_annotation, .initializer = initializer, .is_static = is_static, .access = access, .optional = optional_token != null, .definite = definite_token != null } },
+            .data = .{ .ClassField = .{ .name = name_token.lexeme, .type_annotation = type_annotation, .initializer = initializer, .is_static = is_static, .readonly = readonly, .access = access, .optional = optional_token != null, .definite = definite_token != null } },
         });
     }
 
@@ -1064,13 +1065,46 @@ const Parser = struct {
             errdefer members.deinit(self.allocator);
             while (!self.at(.RBrace) and !self.at(.EOF)) {
                 const before = self.index;
+                const readonly = if (self.atIdentifierText("readonly")) blk: {
+                    _ = self.advance();
+                    break :blk true;
+                } else false;
                 const name = self.expectIdentifierLike("expected property name in object type");
                 const optional = self.eat(.Question);
-                _ = self.expect(.Colon, "expected ':' after property name");
-                const member_type = try self.parseType();
+                const member_type = if (self.eat(.LParen)) blk: {
+                    var parameters: std.ArrayList(ast_mod.TypeParameter) = .empty;
+                    errdefer parameters.deinit(self.allocator);
+                    while (!self.at(.RParen) and !self.at(.EOF)) {
+                        const parameter_name = self.expectIdentifierLike("expected method parameter name");
+                        const parameter_optional = self.eat(.Question);
+                        _ = self.expect(.Colon, "expected ':' after method parameter");
+                        const parameter_type = try self.parseType();
+                        try parameters.append(self.allocator, .{
+                            .name = parameter_name.lexeme,
+                            .optional = parameter_optional,
+                            .type_node = parameter_type,
+                            .span = joinSpans(parameter_name.span, self.typeSpan(parameter_type)),
+                        });
+                        if (!self.eat(.Comma)) break;
+                    }
+                    _ = self.expect(.RParen, "expected ')' after method parameters");
+                    _ = self.expect(.Colon, "expected ':' before method return type");
+                    const return_type = try self.parseType();
+                    break :blk try self.addTypeNode(.{
+                        .span = joinSpans(name.span, self.typeSpan(return_type)),
+                        .data = .{ .Function = .{
+                            .parameters = try parameters.toOwnedSlice(self.allocator),
+                            .return_type = return_type,
+                        } },
+                    });
+                } else blk: {
+                    _ = self.expect(.Colon, "expected ':' after property name");
+                    break :blk try self.parseType();
+                };
                 try members.append(self.allocator, .{
                     .name = name.lexeme,
                     .optional = optional,
+                    .readonly = readonly,
                     .type_node = member_type,
                     .span = joinSpans(name.span, self.typeSpan(member_type)),
                 });

@@ -31,6 +31,7 @@ pub const LiteralType = struct {
 pub const TypeMember = struct {
     name: []const u8,
     optional: bool = false,
+    readonly: bool = false,
     type_node: TypeNodeId,
     span: tokens.Span,
 };
@@ -289,6 +290,7 @@ pub const ClassField = struct {
     type_annotation: ?TypeAnnotation = null,
     initializer: ?NodeId = null,
     is_static: bool = false,
+    readonly: bool = false,
     access: AccessModifier = .none,
     optional: bool = false,
     definite: bool = false,

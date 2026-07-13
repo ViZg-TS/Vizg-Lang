@@ -3,6 +3,7 @@ const ast_mod = @import("../frontend/ast.zig");
 const builtin_kind = @import("../types/builtin.zig");
 const types = @import("../types/root.zig");
 const tokens = @import("../frontend/tokens.zig");
+const cfg_mod = @import("../frontend/cfg.zig");
 const type_compat = @import("type_compat.zig");
 const node_type_info_mod = @import("type_info.zig");
 
@@ -125,19 +126,31 @@ pub fn inferPrimitiveExpressions(
     tree: ast_mod.Ast,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     store: *types.TypeStore,
-) !void {
+) !usize {
+    const cfgs = try cfg_mod.build(allocator, tree);
+    return inferPrimitiveExpressionsWithCfgs(allocator, tree, entries, store, cfgs);
+}
+
+pub fn inferPrimitiveExpressionsWithCfgs(
+    allocator: std.mem.Allocator,
+    tree: ast_mod.Ast,
+    entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
+    store: *types.TypeStore,
+    cfgs: []const cfg_mod.FunctionCfg,
+) !usize {
     try entries.ensureTotalCapacity(allocator, entries.items.len + tree.nodes.len);
     var round: usize = 0;
     while (round <= tree.nodes.len) : (round += 1) {
         var changed = false;
         for (tree.nodes, 0..) |node, raw_id| {
             const id: ast_mod.NodeId = @intCast(raw_id);
-            const candidate = try inferNode(allocator, id, node.data, tree, entries.items, store);
+            const candidate = try inferNode(allocator, id, node.data, tree, entries.items, store, cfgs);
             if (candidate) |value| changed = putType(entries, id, value.type_id, value.valid, value.issue, value.receiver_type) or changed;
         }
         changed = (try applyAggregateContexts(tree, entries, store)) or changed;
-        if (!changed) break;
+        if (!changed) return round + 1;
     }
+    return round;
 }
 
 fn inferNode(
@@ -147,6 +160,7 @@ fn inferNode(
     tree: ast_mod.Ast,
     entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
+    cfgs: []const cfg_mod.FunctionCfg,
 ) !?OperatorResult {
     const b = &store.builtins;
     return switch (data) {
@@ -227,13 +241,14 @@ fn inferNode(
                 null
         else
             null,
-        .CallExpression => |call| try inferCall(call.callee, call.arguments, call.optional, false, entries, store),
-        .NewExpression => |call| try inferCall(call.callee, call.arguments, false, true, entries, store),
+        .CallExpression => |call| try inferCall(allocator, call.callee, call.arguments, call.optional, false, entries, store),
+        .NewExpression => |call| try inferCall(allocator, call.callee, call.arguments, false, true, entries, store),
         .SpreadElement => |spread| if (findType(entries, spread.argument)) |ty| .{ .type_id = ty } else null,
-        .ArrayExpression => |array| .{ .type_id = try inferArray(allocator, array, tree, entries, store) },
+        .ArrayExpression => |array| .{ .type_id = try inferArray(allocator, node_id, array, tree, entries, store) },
         .ObjectExpression => |object| .{ .type_id = try inferObject(allocator, node_id, object, tree, entries, store) },
         .FunctionExpression => |function| .{ .type_id = try inferFunction(
             allocator,
+            node_id,
             function.params,
             function.body,
             false,
@@ -242,9 +257,11 @@ fn inferNode(
             tree,
             entries,
             store,
+            cfgs,
         ) },
         .ArrowFunctionExpression => |function| .{ .type_id = try inferFunction(
             allocator,
+            node_id,
             function.params,
             function.body,
             function.expression_body,
@@ -253,12 +270,14 @@ fn inferNode(
             tree,
             entries,
             store,
+            cfgs,
         ) },
         else => null,
     };
 }
 
 fn inferCall(
+    allocator: std.mem.Allocator,
     callee_id: ast_mod.NodeId,
     arguments: []const ast_mod.NodeId,
     optional: bool,
@@ -269,35 +288,87 @@ fn inferCall(
     const callee_type = findType(entries, callee_id) orelse return null;
     const callee = store.lookup(callee_type) orelse return .{ .type_id = store.builtins.unknown };
 
-    if (construct and callee.kind == .class) return .{
-        .type_id = callee_type,
-        .valid = arguments.len == 0,
-        .issue = if (arguments.len == 0) .none else .invalid_argument_count,
+    if (construct) {
+        if (callee_type == store.builtins.any or callee_type == store.builtins.unknown)
+            return .{ .type_id = callee_type };
+        if (callee.kind != .class_constructor) return .{
+            .type_id = store.builtins.unknown,
+            .valid = false,
+            .issue = .invalid_constructor,
+        };
+        const class = store.lookupClassSemanticType(callee.kind.class_constructor.identity) orelse return .{
+            .type_id = store.builtins.unknown,
+            .valid = false,
+            .issue = .invalid_constructor,
+        };
+        const signature_id = class.constructor_signature orelse return .{
+            .type_id = class.instance_type,
+            .valid = arguments.len == 0,
+            .issue = if (arguments.len == 0) .none else .invalid_argument_count,
+        };
+        const signature = store.lookupFunction(signature_id) orelse return .{
+            .type_id = store.builtins.unknown,
+            .valid = false,
+            .issue = .invalid_constructor,
+        };
+        return validateCallArguments(signature, class.instance_type, arguments, null, entries, store);
+    }
+    if (callee_type == store.builtins.any or callee_type == store.builtins.unknown)
+        return .{ .type_id = callee_type };
+
+    var returns: std.ArrayList(types.TypeId) = .empty;
+    const receiver = receiverFor(entries, callee_id);
+    const members = if (callee.kind == .union_type) callee.kind.union_type else &.{callee_type};
+    for (members) |member| {
+        if (isNullish(member, store) and optional) continue;
+        const member_type = store.lookup(member) orelse return .{ .type_id = store.builtins.unknown };
+        if (member_type.kind != .function) return .{
+            .type_id = store.builtins.unknown,
+            .valid = false,
+            .issue = .invalid_callee,
+            .receiver_type = receiver,
+        };
+        const signature = store.lookupFunction(member_type.kind.function) orelse return .{ .type_id = store.builtins.unknown };
+        const result = validateCallArguments(signature, signature.return_type, arguments, receiver, entries, store) orelse return null;
+        if (!result.valid) return result;
+        try returns.append(allocator, signature.return_type);
+    }
+    if (returns.items.len == 0) return .{
+        .type_id = store.builtins.unknown,
+        .valid = false,
+        .issue = .invalid_callee,
+        .receiver_type = receiver,
     };
-    if (callee.kind != .function) return .{ .type_id = if (callee_type == store.builtins.any) callee_type else store.builtins.unknown };
-    const signature = store.lookupFunction(callee.kind.function) orelse return .{ .type_id = store.builtins.unknown };
+    if (optional) try returns.append(allocator, store.builtins.undefined);
+    return .{ .type_id = try store.unionOf(returns.items), .receiver_type = receiver };
+}
+
+fn validateCallArguments(
+    signature: types.FunctionSignature,
+    result_type: types.TypeId,
+    arguments: []const ast_mod.NodeId,
+    receiver_type: ?types.TypeId,
+    entries: []const node_type_info_mod.NodeTypeInfo,
+    store: *types.TypeStore,
+) ?OperatorResult {
     if (!signature.acceptsArgumentCount(arguments.len)) return .{
-        .type_id = signature.return_type,
+        .type_id = result_type,
         .valid = false,
         .issue = .invalid_argument_count,
-        .receiver_type = receiverFor(entries, callee_id),
+        .receiver_type = receiver_type,
     };
     for (arguments, 0..) |argument, index| {
         const argument_type = findType(entries, argument) orelse return null;
         const parameter = parameterForArgument(signature, index) orelse continue;
         const parameter_type = restArgumentType(parameter, store);
         if (!type_compat.isAssignableInStore(argument_type, parameter_type, store)) return .{
-            .type_id = signature.return_type,
+            .type_id = result_type,
             .valid = false,
             .issue = .invalid_argument_type,
-            .receiver_type = receiverFor(entries, callee_id),
+            .receiver_type = receiver_type,
         };
     }
-    const result_type = if (optional)
-        try store.unionOf(&.{ signature.return_type, store.builtins.undefined })
-    else
-        signature.return_type;
-    return .{ .type_id = result_type, .receiver_type = receiverFor(entries, callee_id) };
+    return .{ .type_id = result_type, .receiver_type = receiver_type };
 }
 
 fn restArgumentType(parameter: types.ParameterType, store: *const types.TypeStore) types.TypeId {
@@ -379,6 +450,7 @@ fn lookupAccessSingle(
     const object = store.lookup(object_type) orelse return .{ .type_id = b.unknown };
     return switch (object.kind) {
         .object => |properties| try lookupObjectProperty(properties, key, tree, store),
+        .class, .class_constructor, .interface => try lookupDeclaredMember(object_type, key, tree, store),
         .tuple => |tuple| try lookupTupleElement(tuple, key, tree, store),
         .array => |array| if (isNumericIndex(key, tree, store))
             .{ .type_id = array.element_type }
@@ -390,6 +462,69 @@ fn lookupAccessSingle(
             invalidAccess(key, b.unknown),
         else => invalidAccess(key, b.unknown),
     };
+}
+
+fn lookupDeclaredMember(
+    object_type: types.TypeId,
+    key: AccessKey,
+    tree: ast_mod.Ast,
+    store: *types.TypeStore,
+) !OperatorResult {
+    const name = accessPropertyName(key, tree) orelse return invalidAccess(key, store.builtins.unknown);
+    const member = lookupSemanticMember(object_type, name, store, store.count() + 1) orelse
+        return .{ .type_id = store.builtins.unknown, .valid = false, .issue = .unknown_property };
+    return .{
+        .type_id = if (member.optional)
+            try store.unionOf(&.{ member.type_id, store.builtins.undefined })
+        else
+            member.type_id,
+    };
+}
+
+/// Own members win. Class bases are searched one-at-a-time; interface bases
+/// are searched in source order. The type-count bound makes cycles terminate
+/// without introducing order-dependent visited-state.
+fn lookupSemanticMember(
+    type_id: types.TypeId,
+    name: []const u8,
+    store: *const types.TypeStore,
+    remaining: usize,
+) ?types.SemanticMember {
+    if (remaining == 0) return null;
+    const ty = store.lookup(type_id) orelse return null;
+    return switch (ty.kind) {
+        .class => |instance| blk: {
+            const class = store.lookupClassSemanticType(instance.identity) orelse break :blk null;
+            if (findSemanticMember(class.instance_members, name)) |member| break :blk member;
+            break :blk if (class.inheritance.extends) |base|
+                lookupSemanticMember(base, name, store, remaining - 1)
+            else
+                null;
+        },
+        .class_constructor => |constructor| blk: {
+            const class = store.lookupClassSemanticType(constructor.identity) orelse break :blk null;
+            if (findSemanticMember(class.static_members, name)) |member| break :blk member;
+            const base_instance = class.inheritance.extends orelse break :blk null;
+            const base = store.lookup(base_instance) orelse break :blk null;
+            if (base.kind != .class) break :blk null;
+            const base_class = store.lookupClassSemanticType(base.kind.class.identity) orelse break :blk null;
+            break :blk lookupSemanticMember(base_class.constructor_type, name, store, remaining - 1);
+        },
+        .interface => |interface| blk: {
+            const semantic = store.lookupInterfaceSemanticType(interface.identity) orelse break :blk null;
+            if (findSemanticMember(semantic.members, name)) |member| break :blk member;
+            for (semantic.inheritance.extends) |base| {
+                if (lookupSemanticMember(base, name, store, remaining - 1)) |member| break :blk member;
+            }
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
+fn findSemanticMember(table: types.MemberTable, name: []const u8) ?types.SemanticMember {
+    for (table.members) |member| if (std.mem.eql(u8, member.name, name)) return member;
+    return null;
 }
 
 fn lookupObjectProperty(
@@ -491,11 +626,32 @@ fn invalidAccess(key: AccessKey, recovery: types.TypeId) OperatorResult {
 
 fn inferArray(
     allocator: std.mem.Allocator,
+    node_id: ast_mod.NodeId,
     array: ast_mod.ArrayExpression,
     tree: ast_mod.Ast,
     entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
 ) !types.TypeId {
+    if (findNodeInfo(entries, node_id)) |node_info| {
+        if (node_info.contextual_type) |contextual| {
+            if (store.lookup(contextual)) |contextual_type| switch (contextual_type.kind) {
+                .tuple => |tuple| {
+                    var elements = try store.allocator.alloc(types.TupleElement, array.elements.len);
+                    for (array.elements, 0..) |maybe_element, index| {
+                        elements[index] = if (maybe_element) |element| .{
+                            .type_id = findType(entries, element) orelse store.builtins.unknown,
+                        } else .{
+                            .type_id = if (index < tuple.elements.len) tuple.elements[index].type_id else store.builtins.unknown,
+                            .hole = true,
+                            .optional = true,
+                        };
+                    }
+                    return store.intern(.{ .tuple = .{ .elements = elements, .readonly = tuple.readonly } });
+                },
+                else => {},
+            };
+        }
+    }
     var members: std.ArrayList(types.TypeId) = .empty;
     for (array.elements) |maybe_element| {
         const element = maybe_element orelse continue; // holes are shape, never `undefined`
@@ -628,6 +784,7 @@ fn computedPropertyName(property: ast_mod.ObjectProperty, tree: ast_mod.Ast) ?[]
 
 fn inferFunction(
     allocator: std.mem.Allocator,
+    function_id: ast_mod.NodeId,
     params: []const ast_mod.NodeId,
     body: ast_mod.NodeId,
     expression_body: bool,
@@ -636,6 +793,7 @@ fn inferFunction(
     tree: ast_mod.Ast,
     entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
+    cfgs: []const cfg_mod.FunctionCfg,
 ) !types.TypeId {
     var parameters: std.ArrayList(types.ParameterType) = .empty;
     for (params) |param_id| switch (tree.node(param_id).data) {
@@ -654,7 +812,7 @@ fn inferFunction(
     var return_type = if (return_annotation) |annotation|
         try resolveTypeAnnotation(tree, annotation, store)
     else
-        try inferCallableReturn(allocator, body, expression_body, tree, entries, store);
+        try inferCallableReturn(allocator, function_id, body, expression_body, tree, entries, store, cfgs);
     return_type = try wrapFunctionReturn(return_type, flags, store);
     return store.addFunctionDetailed(parameters.items, return_type, 0, .{
         .is_async = flags.is_async,
@@ -671,7 +829,23 @@ pub fn inferFunctionReturn(
     entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
 ) !types.TypeId {
-    const return_type = try inferCallableReturn(allocator, body, expression_body, tree, entries, store);
+    const cfgs = try cfg_mod.build(allocator, tree);
+    const function_id = functionForBody(body, tree, cfgs) orelse ast_mod.invalid_node;
+    return inferFunctionReturnWithCfgs(allocator, function_id, body, expression_body, flags, tree, entries, store, cfgs);
+}
+
+pub fn inferFunctionReturnWithCfgs(
+    allocator: std.mem.Allocator,
+    function_id: ast_mod.NodeId,
+    body: ast_mod.NodeId,
+    expression_body: bool,
+    flags: ast_mod.FunctionFlags,
+    tree: ast_mod.Ast,
+    entries: []const node_type_info_mod.NodeTypeInfo,
+    store: *types.TypeStore,
+    cfgs: []const cfg_mod.FunctionCfg,
+) !types.TypeId {
+    const return_type = try inferCallableReturn(allocator, function_id, body, expression_body, tree, entries, store, cfgs);
     return wrapFunctionReturn(return_type, flags, store);
 }
 
@@ -691,17 +865,70 @@ pub fn wrapFunctionReturn(
 
 fn inferCallableReturn(
     allocator: std.mem.Allocator,
+    function_id: ast_mod.NodeId,
     body: ast_mod.NodeId,
     expression_body: bool,
     tree: ast_mod.Ast,
     entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
+    cfgs: []const cfg_mod.FunctionCfg,
 ) !types.TypeId {
     if (expression_body) return findType(entries, body) orelse store.builtins.unknown;
     var returns: std.ArrayList(types.TypeId) = .empty;
     try collectReturnTypes(allocator, body, tree, entries, store, &returns);
     if (returns.items.len == 0) return store.builtins.void;
+    if (try hasReachableFallthrough(allocator, function_id, tree, cfgs)) try returns.append(allocator, store.builtins.undefined);
     return store.unionOf(returns.items);
+}
+
+pub fn hasReachableFallthrough(
+    allocator: std.mem.Allocator,
+    function_id: ast_mod.NodeId,
+    tree: ast_mod.Ast,
+    cfgs: []const cfg_mod.FunctionCfg,
+) !bool {
+    for (cfgs) |function_cfg| {
+        if (function_cfg.function != function_id) continue;
+        const graph = function_cfg.graph;
+        const reachable = try allocator.alloc(bool, graph.blocks.len);
+        defer allocator.free(reachable);
+        @memset(reachable, false);
+        var work: std.ArrayList(cfg_mod.BasicBlockId) = .empty;
+        defer work.deinit(allocator);
+        try work.append(allocator, graph.entry);
+        reachable[@intCast(graph.entry)] = true;
+        var cursor: usize = 0;
+        while (cursor < work.items.len) : (cursor += 1) {
+            for (graph.blocks[@intCast(work.items[cursor])].successors) |successor| {
+                if (reachable[@intCast(successor)]) continue;
+                reachable[@intCast(successor)] = true;
+                try work.append(allocator, successor);
+            }
+        }
+        const exit = graph.blocks[@intCast(graph.exit)];
+        for (exit.predecessors) |predecessor| {
+            const block = graph.blocks[@intCast(predecessor)];
+            if (!reachable[@intCast(predecessor)]) continue;
+            if (block.kind == .@"unreachable") continue;
+            if (block.statements.len == 0) return true;
+            const last = block.statements[block.statements.len - 1];
+            const data = tree.node(last).data;
+            if (data != .ReturnStatement and data != .ThrowStatement) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+fn functionForBody(body: ast_mod.NodeId, tree: ast_mod.Ast, cfgs: []const cfg_mod.FunctionCfg) ?ast_mod.NodeId {
+    for (cfgs) |function_cfg| switch (tree.node(function_cfg.function).data) {
+        .FunctionDeclaration => |function| if (function.body == body) return function_cfg.function,
+        .FunctionExpression => |function| if (function.body == body) return function_cfg.function,
+        .ArrowFunctionExpression => |function| if (function.body == body) return function_cfg.function,
+        .ClassMethod => |method| if (method.body == body) return function_cfg.function,
+        else => {},
+    };
+    return null;
 }
 
 fn collectReturnTypes(
@@ -757,7 +984,12 @@ fn applyAggregateContexts(
         .VariableDeclarator => |declarator| {
             const annotation = declarator.type_annotation orelse continue;
             const initializer = declarator.init orelse continue;
-            const declared_contextual = try resolveTypeAnnotation(tree, annotation, store);
+            // The collector seeds named annotations (interfaces, aliases, imports) on the
+            // initializer. Inline aggregate annotations still resolve locally here.
+            const declared_contextual = if (findNodeInfo(entries.items, initializer)) |info|
+                info.contextual_type orelse try resolveTypeAnnotation(tree, annotation, store)
+            else
+                try resolveTypeAnnotation(tree, annotation, store);
 
             switch (tree.node(initializer).data) {
                 .ArrayExpression => |array| {
@@ -768,74 +1000,100 @@ fn applyAggregateContexts(
                             // This keeps type_id as a concrete .tuple so downstream code can read
                             // `kind.tuple.*` while preserving the true inferred element shapes for per-position
                             // checker comparison against the declared shape.
-                            var actual = try store.allocator.alloc(types.TupleElement, declared_tuple.elements.len);
+                            var actual = try store.allocator.alloc(types.TupleElement, array.elements.len);
                             @memset(actual, .{ .type_id = types.invalid_type, .hole = true });
                             for (array.elements, 0..) |maybe_elem, index| {
-                                if (index >= actual.len) break;
-                                if (maybe_elem == null) continue;
-                                const inferred = findType(entries.items, maybe_elem.?);
-                                if (inferred != null and inferred != store.builtins.unknown) {
+                                if (maybe_elem) |element| {
+                                    const inferred = findType(entries.items, element) orelse store.builtins.unknown;
+                                    if (index < declared_tuple.elements.len) {
+                                        changed = putContextualType(entries, element, declared_tuple.elements[index].type_id, store.builtins.unknown) or changed;
+                                    }
                                     actual[index] = .{
-                                        .type_id = inferred.?,
+                                        .type_id = inferred,
                                         .hole = false,
                                         .optional = false,
                                     };
                                 } else {
-                                    // Fall back to the declared element type for holes / unknowns.
-                                    const decl_elem = declared_tuple.elements[index];
+                                    // A source hole has no inferred value. Preserve its shape and
+                                    // use the contextual slot type only so later consumers can index it.
+                                    const contextual_element = if (index < declared_tuple.elements.len)
+                                        declared_tuple.elements[index].type_id
+                                    else
+                                        store.builtins.unknown;
                                     actual[index] = .{
-                                        .type_id = decl_elem.type_id,
-                                        .hole = decl_elem.hole,
-                                        .optional = decl_elem.optional,
-                                    };
-                                }
-                            }
-                            // Propagate any declared holes the source didn't fill.
-                            for (declared_tuple.elements, 0..) |decl_elem, index| {
-                                if (index >= actual.len) break;
-                                if (!actual[index].hole and decl_elem.hole) {
-                                    actual[index] = .{
-                                        .type_id = decl_elem.type_id,
+                                        .type_id = contextual_element,
                                         .hole = true,
                                         .optional = true,
                                     };
                                 }
                             }
-                            // Store only the *declared* tuple shape as contextual_type.
-                            // inferArray already set type_id with inferred element types —
-                            // do not overwrite it, so downstream comparison sees real
-                            // source-side shapes against the declared annotation shape.
-                            if (!updateContextualTypeOnly(entries, initializer, declared_contextual)) {
-                                changed = putTypeWithContextual(
-                                    entries, initializer, store.builtins.unknown, true, .none, null, declared_contextual,
-                                ) or changed;
-                            } else {
-                                changed = true;
-                            }
+                            const inferred_tuple = try store.intern(.{ .tuple = .{
+                                .elements = actual,
+                                .readonly = declared_tuple.readonly,
+                            } });
+                            changed = putTypeWithContextual(
+                                entries,
+                                initializer,
+                                inferred_tuple,
+                                true,
+                                .none,
+                                null,
+                                declared_contextual,
+                            ) or changed;
                         },
-                        .array => {
+                        .array => |declared_array| {
                             // For a declared array shape store the annotation as the contextual hint only.
                             // If an entry already exists from inferArray (with actual element types on type_id),
                             // update only contextual_type so the checker can compare actual vs declared element types.
-                            if (!updateContextualTypeOnly(entries, initializer, declared_contextual)) {
-                                changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, declared_contextual) or changed;
-                            } else {
-                                changed = true;
-                            }
+                            const inferred = findType(entries.items, initializer) orelse store.builtins.unknown;
+                            changed = putTypeWithContextual(entries, initializer, inferred, true, .none, null, declared_contextual) or changed;
+                            for (array.elements) |maybe_element| if (maybe_element) |element| {
+                                changed = putContextualType(entries, element, declared_array.element_type, store.builtins.unknown) or changed;
+                            };
                         },
                         else => {},
                     };
                 },
-                .ObjectExpression => {
+                .ObjectExpression => |object| {
                     if (store.lookup(declared_contextual)) |ty| switch (ty.kind) {
-                        .object => {
+                        .object => |expected_properties| {
                             // Store the declared object shape as contextual only — do not overwrite `type_id`.
                             // The checker will later compare actual property types against this declared shape and
                             // emit per-property mismatches when they diverge.
-                            if (!updateContextualTypeOnly(entries, initializer, declared_contextual)) {
-                                changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, declared_contextual) or changed;
-                            } else {
-                                changed = true;
+                            const inferred = findType(entries.items, initializer) orelse store.builtins.unknown;
+                            changed = putTypeWithContextual(entries, initializer, inferred, true, .none, null, declared_contextual) or changed;
+                            for (object.properties) |property| {
+                                if (property.kind == .spread) continue;
+                                const name = switch (property.kind) {
+                                    .computed => computedPropertyName(property, tree) orelse continue,
+                                    else => property.key,
+                                };
+                                for (expected_properties) |expected_property| {
+                                    if (!std.mem.eql(u8, name, expected_property.name)) continue;
+                                    changed = putContextualType(entries, property.value, expected_property.type_id, store.builtins.unknown) or changed;
+                                    break;
+                                }
+                            }
+                        },
+                        .interface => {
+                            // Interface annotations contextualize object literals structurally. Keep the
+                            // literal's inferred anonymous-object type while supplying direct or inherited
+                            // member types to its values.
+                            const inferred = findType(entries.items, initializer) orelse store.builtins.unknown;
+                            changed = putTypeWithContextual(entries, initializer, inferred, true, .none, null, declared_contextual) or changed;
+                            for (object.properties) |property| {
+                                if (property.kind == .spread) continue;
+                                const name = switch (property.kind) {
+                                    .computed => computedPropertyName(property, tree) orelse continue,
+                                    else => property.key,
+                                };
+                                const expected_member = lookupSemanticMember(
+                                    declared_contextual,
+                                    name,
+                                    store,
+                                    store.count() + 1,
+                                ) orelse continue;
+                                changed = putContextualType(entries, property.value, expected_member.type_id, store.builtins.unknown) or changed;
                             }
                         },
                         else => {},
@@ -932,6 +1190,11 @@ fn findType(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.N
     return null;
 }
 
+fn findNodeInfo(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) ?node_type_info_mod.NodeTypeInfo {
+    for (entries) |entry| if (entry.node_id == node_id) return entry;
+    return null;
+}
+
 fn putType(
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     node_id: ast_mod.NodeId,
@@ -994,22 +1257,26 @@ fn putTypeWithContextual(
     return true;
 }
 
-/// Update only the contextual_type slot on an existing entry, leaving type_id
-/// untouched. Used for aggregate annotations so the declared shape can coexist
-/// with a separately-inferred actual element/property type.
-fn updateContextualTypeOnly(
+/// Apply an expectation to a child without changing its inferred fact.
+fn putContextualType(
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     node_id: ast_mod.NodeId,
-    contextual_type: ?types.TypeId,
+    contextual_type: types.TypeId,
+    fallback_inferred: types.TypeId,
 ) bool {
     for (entries.items) |*entry| {
         if (entry.node_id != node_id) continue;
+        if (entry.contextual_type == contextual_type) return false;
         entry.contextual_type = contextual_type;
         return true;
     }
-    return false;
+    entries.appendAssumeCapacity(.{
+        .node_id = node_id,
+        .type_id = fallback_inferred,
+        .contextual_type = contextual_type,
+    });
+    return true;
 }
-
 
 /// Quick numeric test. Never rejects input the parser already accepted; may be
 /// slightly over-inclusive for edge cases like `"1e"`, which is acceptable
@@ -1269,6 +1536,36 @@ pub fn inferLiteralNodeTypes(
 //   * for non-literal cases, no classified node appears (empty slice).
 
 const test_builtins = types.Builtins.init();
+
+test "Goal 137 contextual aggregates converge and preserve child inference" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const result = try @import("../frontend/frontend.zig").analyze(
+        allocator,
+        .{ .text =
+        \\const values: number[] = ["wrong"];
+        \\const tuple: [number, string] = [1, "ok"];
+        \\const object: { value: number } = { value: "wrong" };
+    },
+        .{},
+    );
+    var store = types.TypeStore.init(allocator);
+    var entries: std.ArrayList(node_type_info_mod.NodeTypeInfo) = .empty;
+    const literals = try inferLiteralNodeTypes(allocator, result.ast, &store.builtins);
+    try entries.appendSlice(allocator, literals);
+
+    const rounds = try inferPrimitiveExpressions(allocator, result.ast, &entries, &store);
+    try std.testing.expect(rounds <= 3);
+
+    var distinct_context_count: usize = 0;
+    for (entries.items) |entry| {
+        if (entry.contextual_type) |contextual| {
+            if (entry.type_id != contextual) distinct_context_count += 1;
+        }
+    }
+    try std.testing.expect(distinct_context_count >= 2);
+}
 
 test "number literal node has type number" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
