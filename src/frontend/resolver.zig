@@ -158,6 +158,7 @@ const Resolver = struct {
                 try self.resolveNode(import_expr.source, scope);
                 if (import_expr.options) |options| try self.resolveNode(options, scope);
             },
+            .MetaProperty => {},
             .CallExpression => |call| {
                 _ = call.optional; // Syntax metadata only; resolution traverses both call forms identically.
                 try self.resolveCallee(call.callee, scope);
@@ -469,6 +470,19 @@ test "resolver visits dynamic import source and options" {
     }
     try std.testing.expectEqual(@as(usize, 1), source_reads);
     try std.testing.expectEqual(@as(usize, 1), options_reads);
+}
+
+test "resolver does not create references for meta-properties" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const scanned = try scanner.scanAll(allocator, "import.meta.url; function f() { return new.target; }", true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.references.len);
 }
 
 test "resolver visits prefix unary operands" {

@@ -77,7 +77,7 @@ const Parser = struct {
             self.recoverUnsupportedStatement();
             return null;
         }
-        if (self.at(.Keyword_import) and self.peek(1).kind != .LParen) return try self.parseImportDeclaration();
+        if (self.at(.Keyword_import) and self.peek(1).kind != .LParen and self.peek(1).kind != .Dot) return try self.parseImportDeclaration();
         if (self.at(.Keyword_export)) return try self.parseExportDeclaration();
         if (self.atTypeAliasDeclaration()) return try self.parseTypeAliasDeclaration();
         if (self.atInterfaceDeclaration()) return try self.parseInterfaceDeclaration();
@@ -316,6 +316,22 @@ const Parser = struct {
         return self.addNode(.{
             .span = joinSpans(start.span, end),
             .data = .{ .ImportExpression = .{ .source = source, .options = options } },
+        });
+    }
+
+    fn parseMetaProperty(self: *Parser, start: Token, expected: []const u8, kind: ast_mod.MetaPropertyKind) anyerror!NodeId {
+        _ = self.expect(.Dot, "expected . in meta-property");
+        const property = self.expectIdentifierLike("expected meta-property name");
+        if (!std.mem.eql(u8, property.lexeme, expected)) {
+            self.reportAt(property, if (kind == .import_meta) "expected 'meta' after import." else "expected 'target' after new.", .unexpected_token);
+            return self.addNode(.{
+                .span = joinSpans(start.span, property.span),
+                .data = .{ .Identifier = .{ .name = "" } },
+            });
+        }
+        return self.addNode(.{
+            .span = joinSpans(start.span, property.span),
+            .data = .{ .MetaProperty = .{ .kind = kind } },
         });
     }
 
@@ -2061,8 +2077,8 @@ const Parser = struct {
             .Keyword_class => node = try self.parseClassExpression(token),
             .Keyword_this => node = try self.addNode(.{ .span = token.span, .data = .{ .ThisExpression = .{} } }),
             .Keyword_super => node = try self.addNode(.{ .span = token.span, .data = .{ .SuperExpression = .{} } }),
-            .Keyword_new => node = try self.parseNewExpression(token),
-            .Keyword_import => node = try self.parseImportExpression(token),
+            .Keyword_new => node = if (self.at(.Dot)) try self.parseMetaProperty(token, "target", .new_target) else try self.parseNewExpression(token),
+            .Keyword_import => node = if (self.at(.Dot)) try self.parseMetaProperty(token, "meta", .import_meta) else try self.parseImportExpression(token),
             .StringLiteral, .NumberLiteral, .BigIntLiteral, .TrueLiteral, .FalseLiteral, .NullLiteral => node = try self.addNode(.{
                 .span = token.span,
                 .data = .{ .Literal = .{ .value = token.lexeme } },
@@ -2447,6 +2463,45 @@ test "parser distinguishes dynamic imports from static declarations" {
     const conditional = parsed.ast.node(parsed.ast.node(call).data.CallExpression.arguments[0]).data.ConditionalExpression;
     try std.testing.expectEqual(.ImportExpression, std.meta.activeTag(parsed.ast.node(conditional.consequent).data));
     try std.testing.expectEqual(.ImportExpression, std.meta.activeTag(parsed.ast.node(conditional.alternate).data));
+}
+
+test "parser preserves strict meta-properties, spans, nesting, and recovery" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\const url = import.meta.url;
+        \\function current() { return new.target; }
+        \\import.target;
+        \\const afterImport = 1;
+        \\new.meta;
+        \\const afterNew = 2;
+    ;
+    const scan = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 2), parsed.diagnostics.len);
+    try std.testing.expectEqualStrings("expected 'meta' after import.", parsed.diagnostics[0].message);
+    try std.testing.expectEqualStrings("expected 'target' after new.", parsed.diagnostics[1].message);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 6), statements.len);
+
+    const url_decl = parsed.ast.node(statements[0]).data.VariableDeclaration;
+    const url_member_id = parsed.ast.node(url_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const url_member = parsed.ast.node(url_member_id).data.MemberExpression;
+    const import_meta_node = parsed.ast.node(url_member.object);
+    try std.testing.expectEqual(.import_meta, import_meta_node.data.MetaProperty.kind);
+    try std.testing.expectEqualStrings("import.meta", source[import_meta_node.span.start..import_meta_node.span.end]);
+
+    const function = parsed.ast.node(statements[1]).data.FunctionDeclaration;
+    const body = parsed.ast.node(function.body).data.BlockStatement.statements;
+    const returned = parsed.ast.node(body[0]).data.ReturnStatement.argument.?;
+    const new_target_node = parsed.ast.node(returned);
+    try std.testing.expectEqual(.new_target, new_target_node.data.MetaProperty.kind);
+    try std.testing.expectEqualStrings("new.target", source[new_target_node.span.start..new_target_node.span.end]);
+
+    try std.testing.expectEqual(.VariableDeclaration, std.meta.activeTag(parsed.ast.node(statements[3]).data));
+    try std.testing.expectEqual(.VariableDeclaration, std.meta.activeTag(parsed.ast.node(statements[5]).data));
 }
 
 fn joinSpans(a: tokens.Span, b: tokens.Span) tokens.Span {

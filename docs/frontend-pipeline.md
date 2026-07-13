@@ -184,6 +184,10 @@ source and optional options payload are normal traversable expressions. Static
 `ImportDeclaration` remains distinct, and only static declarations contribute
 module-graph edges.
 
+The exact pairs `import.meta` and `new.target` use `MetaProperty` nodes rather
+than identifiers or member access. Normal postfix parsing continues afterward,
+so `import.meta.url` is a member access whose object is the meta-property.
+
 Example CLI shape:
 
 ```txt

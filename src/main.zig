@@ -344,6 +344,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, import_expr.source, depth + 1);
             if (import_expr.options) |options| try printAstNode(writer, tree, options, depth + 1);
         },
+        .MetaProperty => |meta| try writer.print("MetaProperty #{} kind={s} {}..{}\n", .{ node_id, @tagName(meta.kind), node.span.start, node.span.end }),
         .VariableDeclaration => |decl| {
             try writer.print("VariableDeclaration #{} kind={s} {}..{}\n", .{ node_id, @tagName(decl.kind), node.span.start, node.span.end });
             for (decl.declarations) |declarator| try printAstNode(writer, tree, declarator, depth + 1);
@@ -1273,6 +1274,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .TemplateExpression => return "TemplateExpression",
         .TaggedTemplateExpression => return "TaggedTemplateExpression",
         .ImportExpression => return "ImportExpression",
+        .MetaProperty => return "MetaProperty",
         .VariableDeclaration => return "VariableDeclaration",
         .TypeAliasDeclaration => return "TypeAliasDeclaration",
         .InterfaceDeclaration => return "InterfaceDeclaration",

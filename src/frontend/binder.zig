@@ -289,6 +289,7 @@ const Binder = struct {
                 try self.bindNode(import_expr.source, scope);
                 if (import_expr.options) |options| try self.bindNode(options, scope);
             },
+            .MetaProperty => {},
             .RegExpLiteral => {},
             .SpreadElement => |spread| try self.bindNode(spread.argument, scope),
             .ThisExpression, .SuperExpression => {},

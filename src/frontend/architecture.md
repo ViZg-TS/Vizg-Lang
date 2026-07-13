@@ -30,6 +30,8 @@ Los templates con interpolación se dividen en `TemplateHead`, `TemplateMiddle` 
 
 `import(source, options?)` se representa como `ImportExpression`; ambos payloads son expresiones recorribles. Se mantiene separado de `ImportDeclaration`, única forma que crea aristas en el grafo estático de módulos.
 
+Los pares exactos `import.meta` y `new.target` usan `MetaProperty`, sin referencias de identificador para `import`, `meta`, `new` ni `target`. El postfix normal puede continuar sobre el nodo.
+
 El scanner decide contextualmente si `/` inicia un `RegExpLiteral` o representa división. El AST conserva el patrón, las flags válidas y el span del literal completo.
 
 Las expresiones unarias prefijas (`!`, `~`, `-`, `+`, `typeof`, `void`, `delete`, `await`) se agrupan antes que los operadores multiplicativos. La aserción no nula `value!` sigue siendo una expresión postfija distinta.

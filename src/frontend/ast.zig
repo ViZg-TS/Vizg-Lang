@@ -90,6 +90,12 @@ pub const ImportExpression = struct {
     options: ?NodeId = null,
 };
 
+pub const MetaPropertyKind = enum { import_meta, new_target };
+
+pub const MetaProperty = struct {
+    kind: MetaPropertyKind,
+};
+
 pub const ImportDeclaration = struct {
     kind: ImportKind,
     type_only: bool = false,
@@ -421,6 +427,7 @@ pub const NodeData = union(enum) {
     TemplateExpression: TemplateExpression,
     TaggedTemplateExpression: TaggedTemplateExpression,
     ImportExpression: ImportExpression,
+    MetaProperty: MetaProperty,
     TypeAliasDeclaration: TypeAliasDeclaration,
     InterfaceDeclaration: InterfaceDeclaration,
     VariableDeclaration: VariableDeclaration,
