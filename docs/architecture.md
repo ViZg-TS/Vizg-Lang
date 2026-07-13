@@ -62,7 +62,7 @@ archive for each listed Linux, Windows, macOS, and Android target. It also
 compiles a C translation unit against `Lib/vizg.h` for each target. These are
 compile and header-neutrality probes, not foreign-target runtime claims.
 
-The ABI currently exposes tokens and diagnostics from single-file analysis. It does not expose the Zig `SemanticResult`, AST nodes, symbols, references, CFGs, module graph data, type inference, execution, or compilation. `SemanticResult` additions therefore do not change C ABI v1 layouts or ownership rules.
+The ABI currently exposes tokens and diagnostics from single-file analysis. It does not expose the Zig `SemanticResult`, AST nodes, symbols, references, CFGs, module graph data, type inference, execution, or compilation. `SemanticResult` additions therefore do not change C ABI v1 layouts or ownership rules. Appending a member to a public C enum is a compatible v1 extension when all existing numeric values and enum widths remain unchanged; consumers must tolerate unknown newer values. Removing or renumbering an existing member, or changing its representation, requires an ABI version change.
 
 Build dependency direction:
 
@@ -305,6 +305,7 @@ Shared diagnostics live outside the frontend:
 - `references`
 - `refs`
 - `cfg`
+- `types`: print canonical symbol and expression types through the owning `TypeStore`, including structural summaries and qualified nominal identities
 - `modules`: print modules + import edges + **Links** (per-link resolved target or unresolved for external imports) + diagnostics
 - `help`
 
@@ -312,14 +313,14 @@ The CLI is intentionally diagnostic and exploratory. It is not a compiler driver
 
 ## Diagnostics
 
-Diagnostics are phase-tagged records with a severity, stable code, display name, message, source span, optional label, and optional path. Current diagnostics come from scanner, parser, binder, resolver, and module graph phases. Future phase names already exist in the enum, but their systems are not implemented yet.
+Diagnostics are phase-tagged records with a severity, stable code, display name, message, source span, optional label, and optional path. Current diagnostics come from scanner, parser, binder, resolver, module graph, and semantic checking phases. Future phase names already exist in the enum, but their systems are not implemented yet.
 
 ## Future Layers
 
 Likely future layers are intentionally separate from the current frontend and module graph:
 
 - Expanded module layer: package lookup, configuration-aware resolution, and richer import/export forms.
-- Type checker: infer/check types, validate calls and assignments, and produce semantic diagnostics.
+- Type checker expansion: add advanced TypeScript forms beyond the supported Typed Semantics v2 subset.
 - HIR/lowering: lower AST or typed AST into a more compiler-friendly intermediate form.
 - Runtime/compiler layers: execute, interpret, compile, or emit code from lowered forms.
 

@@ -45,6 +45,7 @@ commands:
   references <file> print resolved identifier references
   refs <file>       alias for references
   cfg <file>      print function control-flow graphs
+  types <file>    print canonical semantic symbol and expression types
   modules <file>  build module graph; print Modules, Imports, **Links**, and Diagnostics
   help            print this help
 ```
@@ -214,6 +215,18 @@ Function name #node
 ```
 
 Exit behavior: exits `0` if the frontend command completes.
+
+## `types <file>`
+
+Purpose: run typed semantics and print canonical symbol and expression types. Structural types include their members; class and interface output includes stable nominal identity information. Supported structural types are not rendered as `<unknown>`.
+
+Example:
+
+```sh
+zig build run -- types test/frontend/vizg_capabilities_test.ts
+```
+
+Exit behavior: exits `0` when semantic analysis completes. Semantic diagnostics remain inspectable in the output.
 
 ## `modules <file>`
 

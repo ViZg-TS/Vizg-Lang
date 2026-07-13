@@ -18,10 +18,10 @@ Implemented today:
 - Cross-file import linking layer that resolves local imports to their target module's exported symbols, tracks import kind (named, default, namespace, external, unresolved), and emits `VZG5001`, `VZG5002`, and `VZG5003` diagnostics alongside link records.
 - Owned Zig `SemanticResult` analysis API with stable node/symbol/scope/reference/module/type-ID lookup, split syntax/semantic diagnostics, one canonical per-result `TypeStore`, symbol/expression types, aggregate/access/function/call inference, CFG-backed flow narrowing, centralized structural compatibility and checker diagnostics, and explicit destruction.
 - Owned Zig `ProjectSemanticResult` API with one shared project `TypeStore`, qualified exported identities, named/default/namespace/type-only import and re-export propagation, bounded cycle handling, partial unresolved links, and explicit destruction.
-- CLI inspection commands for checks, tokens, AST, symbols, references, CFGs, and modules.
+- CLI inspection commands for checks, tokens, AST, symbols, references, CFGs, canonical semantic types, and modules.
 - Static library `libvizg.a` with a public C header and file/in-memory analysis entry points.
 
-Supported syntax is enforced by `test/frontend/vizg_capabilities_test.ts` and `test/syntax/`. Current AST coverage includes modules (static attributes and dynamic imports), classes, enums, generic declarations, async/generator functions, rich parameters, labeled control flow, modern expressions, and structured TypeScript types including literal, indexed-access, `keyof`, and simple-identifier type-query nodes. Generic constraints/defaults are preserved with scopes, but resolving their type references is assigned to Typed Semantics v2. Decorators, private fields, namespaces, JSX/TSX, mapped and conditional types, qualified or import-based type queries, `with`, and reserved pipeline syntax are intentionally unsupported and receive targeted `VZG2004`-`VZG2006` recovery. This is a stable syntax/frontend contract, not HIR, runtime, bundler, or complete structural type checking.
+Supported syntax is enforced by `test/frontend/vizg_capabilities_test.ts` and `test/syntax/`. Current AST coverage includes modules (static attributes and dynamic imports), classes, enums, generic declarations, async/generator functions, rich parameters, labeled control flow, modern expressions, and structured TypeScript types including literal, indexed-access, `keyof`, and simple-identifier type-query nodes. Typed Semantics v2 resolves the supported named, structural, generic, and cross-module annotations while preserving canonical project identities and declaration shapes. Decorators, private fields, namespaces, JSX/TSX, mapped and conditional types, qualified or import-based type queries, `with`, and reserved pipeline syntax are intentionally unsupported and receive targeted `VZG2004`-`VZG2006` recovery. This is a stable syntax/frontend contract, not HIR, runtime, bundler, or complete TypeScript type checking.
 
 ## Build
 
@@ -115,6 +115,8 @@ cc -I Lib consumer.c -L zig-out/lib -lvizg -o consumer
 
 See `example/c/hello/` and `example/zig/consumer/` for complete consumers. The ABI exposes the current single-file frontend result; the owned `SemanticResult` and `ProjectSemanticResult` are Zig-only and do not alter C ABI v1. The ABI does not expose the module graph, linker, or a runtime.
 
+New enum members appended to public C ABI enums are compatible extensions: existing numeric values and layouts remain unchanged. Consumers must tolerate enum values added by a newer v1 library; removing, renumbering, or changing the width of existing members requires an ABI version change.
+
 ## Validation
 
 A portable build step installs all public artifacts, runs the registered tests, and exercises the CLI:
@@ -137,6 +139,7 @@ zig build run -- ast test/frontend/basic-module.ts
 zig build run -- symbols test/frontend/vizg_capabilities_test.ts
 zig build run -- references test/frontend/resolver_missing_name.ts
 zig build run -- cfg test/frontend/control-flow.ts
+zig build run -- types test/frontend/vizg_capabilities_test.ts
 zig build run -- modules test/frontend/modules/manual/success.ts
 ```
 

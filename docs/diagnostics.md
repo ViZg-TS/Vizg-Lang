@@ -50,7 +50,7 @@ Across the C ABI, diagnostic messages and paths are pointer/length pairs. Consum
 | `VZG5002` | `missing_export` | module_graph | Named import requested an export the target module does not provide. |
 | `VZG5003` | `circular_import` | module_graph | Static local imports formed a cycle. |
 | `VZG6004` | `unknown_type_name` | type_checker | A type annotation names a type that cannot be resolved. |
-| `VZG6005` | `type_mismatch` | type_checker | Initialization, assignment, return, operator, or `satisfies` types are incompatible. |
+| `VZG6005` | `type_mismatch` | type_checker | Initialization, assignment, compound-assignment result, return/fallthrough, operator, `satisfies`, call target, or constructor target types are incompatible. |
 | `VZG6006` | `unknown_property` | type_checker | Property lookup failed on the receiver type. |
 | `VZG6007` | `invalid_index` | type_checker | Indexed access used an unsupported key or index. |
 | `VZG6008` | `invalid_argument_count` | type_checker | Call argument count does not match the function signature. |
@@ -98,6 +98,10 @@ span and attach the relevant declaration, target, callee, receiver, or operand
 as a related span when available. They are emitted in deterministic source
 order. Nodes already typed as unresolved, unknown, or recovered error suppress
 derivative checker diagnostics.
+
+Structural `VZG6005` diagnostics include the stable failing property path when
+an interface or anonymous-object member is missing or incompatible, including
+requirements inherited from base interfaces.
 
 ## Labels, Notes, And Hints
 

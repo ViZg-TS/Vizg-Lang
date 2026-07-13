@@ -126,8 +126,9 @@ It reports duplicate declarations and duplicate exports with `VZG3xxx` codes.
 Interfaces do not merge; a repeated interface or type alias in the same type namespace is a duplicate declaration.
 
 Generic declarations preserve parameter names, constraints, defaults, and their
-scopes. Resolving references inside constraint/default type syntax belongs to
-Typed Semantics v2; Syntax Coverage v2.1 guarantees syntax plus scope only.
+scopes. Typed Semantics v2 resolves supported references inside constraint and
+default type syntax; Syntax Coverage v2.1 remains responsible only for syntax
+and scope identity.
 
 Classes bind in both value and type namespaces. Each class has a member scope; each method or constructor has a nested function scope. `this` and `super` are syntax nodes traversed within those scopes. Decorators, private fields, abstract semantics, and class type checking are deferred.
 
@@ -240,10 +241,11 @@ Try CFGs expose normal try and catch paths and join their fallthrough through an
 
 The type model and semantic mapping do **not** live inside `src/frontend/`. They are separate layers:
 
-- Type model (primitives, function signatures): `src/types/root.zig`.
+- Canonical type model and store (primitives, literals, aggregates, functions,
+  structural shapes, and nominal identities): `src/types/root.zig`.
 - Semantic mappings (per-symbol, per-node types): `src/semantics/type_info.zig`.
 
-The frontend pipeline (`frontend.analyze`) produces syntax-level output only. Type annotations are a structured, span-preserving syntax tree with dedicated union, intersection, function, and array precedence. This syntax tree is distinct from semantic `TypeId` values. Primitive named annotations remain compatible with the current semantic collector; composite interpretation remains a later semantic pass above the module graph.
+The frontend pipeline (`frontend.analyze`) produces syntax-level output only. Type annotations are a structured, span-preserving syntax tree with dedicated union, intersection, function, and array precedence. This syntax tree is distinct from semantic `TypeId` values. The semantics layer above the module graph lowers supported named, structural, generic, and cross-module annotations into one canonical `TypeStore` per result or project.
 
 
 ## Module Graph And Linker (Cross-File Resolution)

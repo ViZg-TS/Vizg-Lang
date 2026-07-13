@@ -68,14 +68,27 @@ Planned, not implemented:
 - Prepare for interpretation, analysis, or code generation.
 - Reserve `VZG7xxx` diagnostics for lowering errors.
 
-HIR work may start only when all of these gates hold:
+### HIR Entry Checklist — Satisfied 2026-07-13
 
-- The owned `SemanticResult` and `ProjectSemanticResult` contracts are stable, including teardown and partial-result behavior.
-- One canonical `TypeStore` per result/project and context-local ID rules remain enforced.
-- Tests cover value/function/class/enum/interface/type-alias exports; aliases, default/namespace/re-export/type-only imports; missing/external links; cycles; and repeated rebuild/teardown.
-- Checker diagnostics retain stable source and related spans while recovered semantic data stays inspectable.
-- Full test, validation, cross-target, Android, and ABI gates are green.
-- HIR consumes semantic results. It must not parse, bind, infer again, or create a competing `TypeStore`.
+No HIR implementation was introduced while closing Typed Semantics v2.
+
+- [x] The owned `SemanticResult` and `ProjectSemanticResult` contracts are stable, including teardown and partial-result behavior.
+- [x] One canonical `TypeStore` per result/project and context-local ID rules remain enforced.
+- [x] Tests cover value/function/class/enum/interface/type-alias exports; aliases, default/namespace/re-export/type-only imports; missing/external links; cycles; and repeated rebuild/teardown.
+- [x] Checker diagnostics retain stable source and related spans while recovered semantic data stays inspectable.
+- [x] Full test, validation, cross-target, Android, and ABI gates are green.
+- [x] Future HIR must consume semantic results. It must not parse, bind, infer again, or create a competing `TypeStore`.
+
+### Typed Semantics v2 Closure Verification — 2026-07-13
+
+- `zig build test` — PASS, exit 0, no command output. The registered suite reports 403/403 tests passed with `zig build test --summary all`.
+- `zig build validate` — PASS, exit 0: `test/frontend/vizg_capabilities_test.ts` produced 0 errors and 0 warnings.
+- `zig build cross-check` — PASS, exit 0, no command output.
+- `zig build abi-cross-check` — PASS, exit 0, no command output.
+- `zig build abi-layout-test` — PASS, exit 0, no command output.
+- `zig build android-aarch64-lib` — PASS, exit 0, no command output; produced the Android AArch64 static library.
+- `zig build run -- types test/frontend/satisfies-expression-test.ts` — PASS, exit 0; output included `interface Config#1000[module=0,declaration=0,members=1]` and `object#1001[properties=1,first=enabled:106]`, with no structural `<unknown>` placeholder.
+- `git diff --check` — PASS, exit 0, no output.
 
 ## Future Milestone: Runtime Or Compiler Backend
 

@@ -13,11 +13,11 @@ V8's compilation phases map cleanly to vizg's planned layers:
 | `Lexer` | Tokenize source text | `src/frontend/scanner.zig` | ✅ Implemented |
 | `Parser` | Produce AST with spans | `src/frontend/parser.zig` | ✅ Implemented |
 | `ScopeAnalyzer::Analyze()` | Determine bindings, hoisting, strict mode | `src/frontend/binder.zig` | ✅ Partially implemented (parameter scoping done; function-declaration hoisting and strict-mode resolution pending) |
-| `TypeSpecialization` | Forward-infer types on AST → typed AST, then fixpoint iterate to stabilize circular references | `src/semantics/inference.zig` (forwardInfer stubbed) + new checker v2 | ⚠️ Partially implemented: forward pass classifies literals only; CallExpression classification is `_ = call; // unresolved stub` |
+| `TypeSpecialization` | Forward-infer types on AST → typed AST, then fixpoint iterate to stabilize circular references | Canonical pipeline in `src/semantics/type_collector.zig`, `type_inference.zig`, `dataflow.zig`, `narrowing.zig`, and `checker.zig` | ✅ Implemented for the supported syntax subset, including bounded project propagation |
 | `BytecodeGenerator` (Ignition) | Lower typed AST into compact bytecode form with normalized control flow and constants pool | New `src/hir/` layer | ❌ Not started — planned Phase 2 |
 | `MacroAssembler` / TurboFan | Optimize bytecode into SSA IR → machine code | Future runtime/compiler backend | ❌ Not started (future) |
 
-**Key V8 insight:** Scope analysis *precedes* type specialization. Vizg's binder already performs scope analysis; the next layer adds TypeSpecialization (forward classify → fixpoint → validate). This ordering matters: types are only reliable after bindings are resolved.
+**Key V8 insight:** Scope analysis *precedes* type specialization. Vizg follows that ordering: binding and module linking establish identities before annotation lowering, inference, dataflow narrowing, and checking.
 
 ### JavaScriptCore Inspector Protocol (Reference)
 
@@ -40,8 +40,8 @@ Vizg maps this to its existing analysis layers since vizg is **analysis-only** (
 ### Codebase Size
 - ~11,250 lines Zig total across 40 source files
 - 6 frontend pipeline stages implemented (scanner → CFG builder)
-- Types model with `TypeId` enum (primitives + function signatures), `FunctionSignatureStore`, builtin kinds
-- Semantics layer: v1 checker (literal RHS only), partial forward inference (stub for CallExpression classification)
+- Types model with context-local `TypeId` handles, module-qualified `SemanticDeclId` nominal identities, and one canonical `TypeStore` owning primitives, structural types, nominal types, and function signatures
+- Semantics layer: canonical expression inference and checker passes with separate inferred, contextual, and effective node-type facts; aggregate context guides children without replacing source inference
 
 ### Key Files & Their Current State
 
@@ -52,9 +52,9 @@ Vizg maps this to its existing analysis layers since vizg is **analysis-only** (
 | `src/frontend/binder.zig` | Binder | Scopes, symbols, imports/exports | ✅ Partial (hoisting + strict mode pending) |
 | `src/frontend/resolver.zig` | Resolver | Identifier reference resolution | ✅ Complete |
 | `src/frontend/cfg.zig` | CFG Builder | Basic blocks for function bodies | ✅ Complete (preliminary) |
-| `src/semantics/checker.zig` | v1 Checker | Validates variable initializers and literal RHS assignments | ⚠️ ~60% — handles literals, has stub for call expressions (`lookupCallReturnTypeId`) |
-| `src/semantics/inference.zig` | Forward Inference (V8-style) | Mirrors V8 TypeSpecialization: classify → fixpoint loop | ⚠️ ~40% — literal classification works; CallExpression classification is `_ = call; // unresolved stub` |
-| `src/semantics/type_inference.zig` | Node-level Literal Inference | Walks AST, returns classified nodes slice | ✅ Complete for literals only |
+| `src/semantics/checker.zig` | Checker v2 | Validates the supported semantic model through the canonical compatibility relation | ✅ Complete for supported syntax |
+| `src/semantics/type_inference.zig` | Canonical Expression Inference | Infers expressions, calls, access, operators, aggregates, and function returns into the owned semantic result | ✅ Complete for supported syntax |
+| `src/semantics/dataflow.zig` | CFG Dataflow | Computes deterministic block facts and narrowing program points | ✅ Complete for supported syntax |
 | `src/modules/graph.zig` | Module Graph | Recursive analysis of local imports with cache | ✅ Partial — no package.json or node_modules lookup |
 | `src/modules/resolver.zig` | Import Resolution | Relative path resolution + extension list | ⚠️ ~50% — relative imports work; external/package resolution stubbed |
 | `src/modules/linker.zig` | Cross-file Linking | Named/default/namespace import linking to exports | ✅ Complete for local imports |
@@ -69,115 +69,63 @@ Vizg maps this to its existing analysis layers since vizg is **analysis-only** (
 | `VZG3xxx` | Binder errors | ✅ Used (VZG3001–VZG3002) |
 | `VZG4xxx` | Resolver errors | ✅ Used (VZG4001) |
 | `VZG5xxx` | Module graph errors | ✅ Used (VZG5001–VZG5003) |
-| `VZG6xxx` | Type checker semantic errors | 📌 Allocated, unused — Phase 1 will use these |
+| `VZG6xxx` | Type checker semantic errors | ✅ Used (VZG6004–VZG6009) |
 | `VZG7xxx` | HIR/lowering errors | 📌 Reserved for Phase 2 |
 | `VZG8xxx` | Protocol-level errors | 📌 Reserved for Phase 4 |
 
 ---
 
-## Phase 1: Type Checker v2 (Forward → Fixpoint)
+## Phase 1: Typed Semantics v2 — Complete For Supported Syntax
 
 ### Purpose
-Expand the type checker from literal-only RHS matching to full inference and semantic checking. Mirrors V8's `TypeSpecialization` architecture exactly: classify forward pass → fixpoint iteration on unresolved symbols → validate with a typed AST.
+Provide one owned semantic pipeline for annotation lowering, expression and function inference, CFG dataflow narrowing, cross-module propagation, and checking. The pipeline consumes frontend/module results and produces one canonical `TypeStore`; no HIR was introduced.
+
+Current foundation: annotation resolution has an explicit `TypeResolutionContext`, canonical builtin lookup, scope-aware local and generic type-space lookup, and exact imported/re-exported type identity. Value and type namespaces remain distinct; type-only imports have no runtime binding, cyclic imports recover with stable placeholders, and unresolved local names produce one stable diagnostic at the annotation span.
+
+Completed Goal 139: generic declaration environments and imported type identities now preserve canonical `TypeId` and module-qualified declaration identity across aliases and re-exports. Namespace type-member lookup remains outside v1.
+
+Completed Goal 140: canonical annotation lowering now exhaustively handles every supported `TypeNodeData` variant. Literal, indexed-access, object-like `keyof`, simple annotated-binding `typeof`, generic named, and existing structural forms resolve without an implicit `unknown` fallback; invalid operations emit targeted semantic diagnostics.
+
+Completed Goal 141: class declarations now have distinct constructor-value and instance `TypeId`s backed by one `SemanticDeclId`; authoritative class records separate static/instance members and preserve visibility, constructor, and inheritance metadata. Interfaces are first-class structural, member-bearing semantic types keyed by the same module-qualified identity scheme.
+
+Completed Goal 142: class and interface declarations now populate their semantic member tables. Fields, canonical method/constructor signatures, constructor parameter properties, static/instance separation, optional/readonly/visibility metadata, and heritage identities are preserved; initializer-only field inference remains an explicit `unknown` placeholder for the inference pass.
+
+Completed Goal 143: class instances, constructor values, and interfaces now resolve their declared and inherited members deterministically. `new` validates the canonical constructor signature and returns the instance type, method access preserves receiver metadata, and Checker v2 diagnoses unknown members and invalid constructor targets.
+
+Completed Goal 144: function return inference now uses CFG reachability for fallthrough, optional and callable-union calls retain argument validation and precise return unions, compound assignments validate inferred call results against their targets, and async/generator v1 categories are explicit.
+
+Completed Goal 145: a reusable forward CFG dataflow solver now computes immutable block entry/exit facts with deterministic joins and worklist loop convergence; narrowing supplies language guards and records assignment-sensitive per-reference program points.
+
+Completed Goal 146: sound narrowing v1 adds literal-aware truthiness, primitive `typeof`, constructor-to-instance `instanceof`, supported object/interface/class `in` guards, predecessor joins, and conservative invalidation on assignment and unknown calls.
+
+Completed Goal 147: Checker v2 now covers the supported semantic model through one compatibility relation. Interfaces and anonymous objects compare structurally, inherited mismatches retain property paths, named contextual initializers use collector-resolved types without replacing inference, and class/enum identity remains nominal.
 
 ### Architecture — Direct V8 Mapping
 
 ```txt
-V8: ScopeAnalyzer          → vizg: existing binder (complete)
-V8: TypeSpecialization     → vizg: src/semantics/inference.zig (forwardInfer + fixpoint loop)
-    ├── forward classify   →     walkDeclarations() + classifyInferred()
-    ├── fixpoint iterate   →     retry unresolved until TypeInfoSnapshot stabilizes or N rounds hit
-    └── typed AST output   →     TypeInfoSnapshot with symbol_ids and expr_types populated
-V8: type guard insertion   →     not applicable (static analysis, no execution) but concept useful for future narrowing
+V8: ScopeAnalyzer          → vizg: frontend binder and module linker
+V8: TypeSpecialization     → vizg: canonical semantics pipeline
+    ├── annotation lowering →    src/semantics/type_collector.zig
+    ├── expression inference →   src/semantics/type_inference.zig
+    ├── flow fixpoint       →    src/semantics/dataflow.zig + narrowing.zig
+    ├── project propagation →    bounded iterations in src/semantics/root.zig
+    └── typed output        →    TypeInfo plus one owned TypeStore
 
-vizg TypeChecker v2:       →     src/semantics/checker_v2.zig (new file)
-    ├── checkFile          →     entry point replacing existing checkFile
-    ├── isAssignable()     →     type compatibility validation
-    ├── emit diagnostic    →     VZG6xxx codes
+vizg TypeChecker v2:       →     src/semantics/checker.zig
+    ├── check supported AST →    initializers, assignments, calls, returns, access, operators, satisfies
+    ├── compatibility       →    src/semantics/type_compat.zig
+    └── diagnostics         →    VZG6xxx codes with source and related spans
 ```
 
-### Tasks
+### Closure Summary
 
-#### 1.1 Complete `src/semantics/inference.zig` — Fixpoint Iteration Framework
-
-The file already has a working forward pass that classifies:
-- Variable declarations with annotated types (`let x: number`)
-- Function signatures (parameters + return type)
-- Literal RHS values (number, string, boolean via `classifyLiteralValue()`)
-
-**Missing:** CallExpression classification is `_ = call; // unresolved stub`. The framework for fixpoint iteration (`max_fixpoint_rounds = 10`, loop in `forwardInfer`) exists but the forward pass itself doesn't fill what fixpoint needs to retry.
-
-**Work required:**
-- Implement `classifyCallExpression()` that looks up callee name → finds function signature from binder → assigns return type
-- Extend fixpoint loop: after first round, iterate while any symbol's `inferred_type` was updated in the previous round (up to `max_fixpoint_rounds`)
-- Handle cross-import symbols: if a symbol is imported, look up its declaration in the linked module's forward inference result
-
-#### 1.2 Create `src/semantics/checker_v2.zig` — Semantic Checker v2
-
-This replaces the existing literal-only `checkFile()` with full semantic checking.
-
-**Core types for isAssignable():**
-```zig
-fn isAssignable(from: TypeId, to: TypeId) bool
-//   - exact TypeId match
-//   - boolean-compatible-with-any-boolean (future: numeric subtypes)
-//   - any/unknown assignable from/to anything
-//   - function signatures: arity + parameter types + return type matching
-```
-
-**Three check paths:**
-
-1. **Function call returns → assignment target** (`VZG6001` — type_mismatch):
-   ```ts
-   let x: number;
-   x = getString();  // error: string is not assignable to number
-   ```
-   Walk each `VariableDeclarator.init`, check RHS expression type against LHS declared type via forward inference result.
-
-2. **Object literal property validation** (`VZG6002` — unknown_type_name):
-   ```ts
-   let obj: { name: string; age: number };
-   let o = { name: 42, age: "old" };  // error on each mismatched property
-   ```
-   Resolve member access from binder → match key type to declared object property type. Object types are represented in the AST as `ObjectLiteralExpression` (parser already handles); check property names + value types against any available annotation context (from prior typed assignments or interface definitions if those get added).
-
-3. **Import-assigned variables** (`VZG6003` — unknown_type_name):
-   ```ts
-   import { X } from "./mod";
-   let x = X;  // infer type from the imported symbol's declaration in mod.ts
-   ```
-   When a symbol is imported, forward inference should already classify it via the module graph link. The checker validates that the import target exists and its inferred type (from the source module's forward inference pass) matches what was declared as `X`'s declared type there.
-
-#### 1.3 Extend existing `src/semantics/checker.zig` — Backward Compatibility
-
-- Keep v1 `checkFile()` working for incremental adoption
-- Add a `BuildOption.strict = false` flag (default true) that gates which checker runs
-- The new `checker_v2.zig` becomes the default when strict mode is on
-
-#### 1.4 Diagnostic Codes to Emit
-
-| Code | Name | Message Pattern |
-|------|------|-----------------|
-| `VZG6005` (already exists) | `type_mismatch` | "cannot assign `<rhs_kind>` to declared `<expected_name>`" |
-| `VZG6004` (already exists) | `unknown_type_name` | "unknown type name for imported symbol `<name>`" |
-
-#### 1.5 Tests
-
-- Add negative fixtures in `test/frontend/type_checks.ts`:
-  - Function call returning wrong type assigned to variable with declared annotation → VZG6005
-  - Object property value not matching declared property type → VZG6002 (or reuse VZG6005 as "type mismatch")
-  - Import-assigned var where the imported name doesn't exist in target module → VZG6004
-- Add positive fixture where everything matches
-- Extend `src/semantics/checker.zig` tests to cover the new v2 path when strict mode enabled
-
-### Files Changed (Phase 1)
-| File | Action | Notes |
-|------|--------|-------|
-| `src/semantics/inference.zig` | Edit | Complete CallExpression classify, wire fixpoint loop fully |
-| `src/semantics/checker_v2.zig` | New | Semantic checker entry point (replaces literal-only logic) |
-| `src/semantics/checker.zig` | Edit | Add strict mode toggle; keep v1 as fallback |
-| `test/frontend/type_checks.ts` | New | Fixture for type checking tests |
-| `src/semantics/types_compat_test.zig` | New | Unit tests for `isAssignable()` |
+- A single canonical `TypeStore` owns builtin, structural, function, and nominal types for each semantic result/project.
+- Named annotations, aliases, re-exports, cycles, and type-only imports preserve canonical identities across modules.
+- Class instance/constructor identities remain nominal; interfaces and anonymous object types remain structural.
+- Class and interface member shapes, inheritance, constructors, and signatures propagate across modules.
+- `vizg types` uses `TypeStore.formatDebugAlloc` for useful structural and nominal output.
+- The obsolete alternative `src/semantics/inference.zig` implementation was removed.
+- Full TypeScript compatibility, HIR, MIR, bytecode, runtime, and backend work remain outside this phase.
 
 ---
 
@@ -547,7 +495,7 @@ Phase 4 (inspector protocol) — depends on all three above; interfaces all laye
 
 4. **Protocol transport**: stdio-first matches how `clangd` and `rust-analyzer` work (zero config, works with any editor). WebSocket fallback can be added later if needed for browser-remote analysis tools.
 
-5. **ForwardInference + fixpoint split is correct but incomplete today**: The existing `inference.zig` already has the scaffolding (`forwardInfer`, `walkDeclarations`, `classifyInferred`). The CallExpression stub means fixpoint iteration has nothing to retry in most cases — fixing this is Phase 1's primary unblocking task.
+5. **Keep semantic ownership singular**: Future type-system work must extend the canonical collector, inference, dataflow, narrowing, checker, and project-propagation pipeline. It must not restore a parallel inference result or competing `TypeStore`.
 
 ---
 
