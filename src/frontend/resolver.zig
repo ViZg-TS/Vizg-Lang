@@ -93,6 +93,9 @@ const Resolver = struct {
                 const function_scope = self.takeScope();
                 try self.resolveNode(function_expr.body, function_scope);
             },
+            .YieldExpression => |yield_expr| {
+                if (yield_expr.argument) |argument| try self.resolveNode(argument, scope);
+            },
             .ClassDeclaration => |class_decl| {
                 if (class_decl.super_class) |super_class| try self.resolveNode(super_class, scope);
                 const class_scope = self.takeScope();
@@ -483,6 +486,25 @@ test "resolver does not create references for meta-properties" {
     const bound = try binder.bind(allocator, parsed.ast);
     const resolved = try resolve(allocator, parsed.ast, bound);
     try std.testing.expectEqual(@as(usize, 0), resolved.references.len);
+}
+
+test "resolver visits yield arguments" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const scanned = try scanner.scanAll(allocator, "function* values(source) { yield source; yield* source; }", true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+
+    var source_reads: usize = 0;
+    for (resolved.references) |reference| {
+        if (std.mem.eql(u8, reference.name, "source") and reference.kind == .read) source_reads += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), source_reads);
 }
 
 test "resolver visits prefix unary operands" {

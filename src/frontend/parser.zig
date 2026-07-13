@@ -22,6 +22,7 @@ const Parser = struct {
     type_nodes: std.ArrayList(ast_mod.TypeNode) = .empty,
     diagnostics: std.ArrayList(diagnostics.Diagnostic) = .empty,
     parenthesized_nodes: std.ArrayList(NodeId) = .empty,
+    function_contexts: std.ArrayList(ast_mod.FunctionFlags) = .empty,
     allow_in: bool = true,
     recover_errors: bool = true,
     allocation_error: ?anyerror = null,
@@ -34,6 +35,7 @@ const Parser = struct {
 
     fn parse(self: *Parser) anyerror!ParseResult {
         defer self.parenthesized_nodes.deinit(self.allocator);
+        defer self.function_contexts.deinit(self.allocator);
         const root = try self.parseProgram();
         if (self.allocation_error) |err| return err;
         return .{
@@ -534,6 +536,7 @@ const Parser = struct {
 
     fn parseFunctionDeclaration(self: *Parser, exported: bool, is_async: bool) anyerror!NodeId {
         const start = self.expect(.Keyword_function, "expected function").span;
+        const is_generator = self.eat(.Asterisk);
         const name = self.expectIdentifierLike("expected function name").lexeme;
         _ = self.expect(.LParen, "expected (");
 
@@ -543,7 +546,8 @@ const Parser = struct {
         _ = self.expect(.RParen, "expected )");
         const return_type: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
 
-        const body = if (self.at(.LBrace)) try self.parseBlockStatement() else ast_mod.invalid_node;
+        const flags: ast_mod.FunctionFlags = .{ .is_async = is_async, .is_generator = is_generator };
+        const body = if (self.at(.LBrace)) try self.parseFunctionBlock(flags) else ast_mod.invalid_node;
         const end_span = if (body == ast_mod.invalid_node)
             self.previousOrCurrent().span
         else
@@ -555,7 +559,7 @@ const Parser = struct {
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
                 .exported = exported,
-                .flags = .{ .is_async = is_async },
+                .flags = flags,
                 .return_type = return_type,
             } },
         });
@@ -563,6 +567,7 @@ const Parser = struct {
 
     fn parseFunctionExpression(self: *Parser, start: Token, is_async: bool) anyerror!NodeId {
         if (is_async) _ = self.expect(.Keyword_function, "expected function");
+        const is_generator = self.eat(.Asterisk);
         const name: ?[]const u8 = if (self.at(.Identifier) or self.at(.PrivateIdentifier)) self.advance().lexeme else null;
         _ = self.expect(.LParen, "expected (");
 
@@ -571,7 +576,8 @@ const Parser = struct {
         try self.parseParameterList(&params);
         _ = self.expect(.RParen, "expected )");
         const return_type: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
-        const body = if (self.at(.LBrace)) try self.parseBlockStatement() else blk: {
+        const flags: ast_mod.FunctionFlags = .{ .is_async = is_async, .is_generator = is_generator };
+        const body = if (self.at(.LBrace)) try self.parseFunctionBlock(flags) else blk: {
             self.report("expected function body", .expected_token);
             break :blk ast_mod.invalid_node;
         };
@@ -582,7 +588,7 @@ const Parser = struct {
                 .name = name,
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
-                .flags = .{ .is_async = is_async },
+                .flags = flags,
                 .return_type = return_type,
             } },
         });
@@ -641,12 +647,13 @@ const Parser = struct {
             _ = self.advance();
         }
         if (self.atIdentifierText("async") and
-            (self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and
-            self.peek(2).kind == .LParen)
+            (((self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and self.peek(2).kind == .LParen) or
+                (self.peek(1).kind == .Asterisk and (self.peek(2).kind == .Identifier or self.peek(2).kind == .PrivateIdentifier) and self.peek(3).kind == .LParen)))
         {
             is_async = true;
             _ = self.advance();
         }
+        const is_generator = self.eat(.Asterisk);
         const name_token = self.expectIdentifierLike("expected class member name");
         if (self.eat(.LParen)) {
             var params: std.ArrayList(NodeId) = .empty;
@@ -654,7 +661,8 @@ const Parser = struct {
             try self.parseParameterList(&params);
             _ = self.expect(.RParen, "expected )");
             const return_type = try self.parseOptionalTypeAnnotation();
-            const body = if (self.at(.LBrace)) try self.parseBlockStatement() else blk: {
+            const flags: ast_mod.FunctionFlags = .{ .is_async = is_async, .is_generator = is_generator };
+            const body = if (self.at(.LBrace)) try self.parseFunctionBlock(flags) else blk: {
                 self.report("expected method body", .expected_token);
                 break :blk ast_mod.invalid_node;
             };
@@ -668,7 +676,7 @@ const Parser = struct {
                     .is_static = is_static,
                     .access = access,
                     .kind = if (std.mem.eql(u8, name_token.lexeme, "constructor")) .constructor else .method,
-                    .flags = .{ .is_async = is_async },
+                    .flags = flags,
                 } },
             });
         }
@@ -976,6 +984,12 @@ const Parser = struct {
             .span = joinSpans(start, self.previousOrCurrent().span),
             .data = .{ .BlockStatement = .{ .statements = try statements.toOwnedSlice(self.allocator) } },
         });
+    }
+
+    fn parseFunctionBlock(self: *Parser, flags: ast_mod.FunctionFlags) anyerror!NodeId {
+        try self.function_contexts.append(self.allocator, flags);
+        defer _ = self.function_contexts.pop();
+        return self.parseBlockStatement();
     }
 
     fn parseVariableDeclarationStatement(self: *Parser) anyerror!NodeId {
@@ -1338,6 +1352,7 @@ const Parser = struct {
     }
 
     fn parseAssignmentExpression(self: *Parser) anyerror!NodeId {
+        if (self.at(.Keyword_yield)) return self.parseYieldExpression();
         if (self.isArrowFunctionStart()) return self.parseArrowFunctionExpression();
 
         const left = try self.parseConditionalExpression();
@@ -1369,6 +1384,24 @@ const Parser = struct {
             });
         }
         return left;
+    }
+
+    fn parseYieldExpression(self: *Parser) anyerror!NodeId {
+        const start = self.advance();
+        const in_generator = self.function_contexts.items.len != 0 and self.function_contexts.items[self.function_contexts.items.len - 1].is_generator;
+        if (!in_generator) self.reportAt(start, "yield is only valid inside generator functions", .unexpected_token);
+        const line_terminated = self.current().flags.has_leading_line_break;
+        const delegate = !line_terminated and self.eat(.Asterisk);
+        const argument: ?NodeId = if (line_terminated or self.at(.Semicolon) or self.at(.RBrace) or self.at(.EOF))
+            null
+        else
+            try self.parseAssignmentExpression();
+        if (delegate and argument == null) self.report("expected expression after yield*", .expected_token);
+        const end_span = if (argument) |id| self.nodes.items[@intCast(id)].span else start.span;
+        return self.addNode(.{
+            .span = joinSpans(start.span, end_span),
+            .data = .{ .YieldExpression = .{ .argument = argument, .delegate = delegate } },
+        });
     }
 
     fn isArrowFunctionStart(self: *const Parser) bool {
@@ -1431,13 +1464,16 @@ const Parser = struct {
 
         _ = self.expect(.EqualsGreaterThan, "expected =>");
         const expression_body = !self.at(.LBrace);
+        const flags: ast_mod.FunctionFlags = .{ .is_async = is_async };
+        try self.function_contexts.append(self.allocator, flags);
+        defer _ = self.function_contexts.pop();
         const body = if (expression_body) try self.parseAssignmentExpression() else try self.parseBlockStatement();
         return self.addNode(.{
             .span = joinSpans(start, self.nodes.items[@intCast(body)].span),
             .data = .{ .ArrowFunctionExpression = .{
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
-                .flags = .{ .is_async = is_async },
+                .flags = flags,
                 .expression_body = expression_body,
                 .return_type = return_type,
             } },
@@ -1763,6 +1799,7 @@ const Parser = struct {
                 if (!self.eat(.Comma)) break;
                 continue;
             }
+            const leading_generator = self.eat(.Asterisk);
             const key_tok = self.advance();
             const key_tok_kind = key_tok.kind;
 
@@ -1788,10 +1825,12 @@ const Parser = struct {
                 else => unreachable,
             };
 
-            if ((std.mem.eql(u8, key, "async") or std.mem.eql(u8, key, "get") or std.mem.eql(u8, key, "set")) and
-                isObjectPropertyKeyToken(self.current()) and self.peek(1).kind == .LParen)
+            if (!leading_generator and (std.mem.eql(u8, key, "async") or std.mem.eql(u8, key, "get") or std.mem.eql(u8, key, "set")) and
+                ((isObjectPropertyKeyToken(self.current()) and self.peek(1).kind == .LParen) or
+                    (std.mem.eql(u8, key, "async") and self.at(.Asterisk) and isObjectPropertyKeyToken(self.peek(1)) and self.peek(2).kind == .LParen)))
             {
                 const modifier = key;
+                const is_generator = std.mem.eql(u8, modifier, "async") and self.eat(.Asterisk);
                 const method_key = self.advance();
                 const method_name = objectPropertyKey(method_key);
                 const kind: ast_mod.ObjectPropertyKind = if (std.mem.eql(u8, modifier, "async"))
@@ -1800,7 +1839,7 @@ const Parser = struct {
                     .getter
                 else
                     .setter;
-                const value = try self.parseObjectMethod(key_tok, kind == .async_method);
+                const value = try self.parseObjectMethod(key_tok, kind == .async_method, is_generator);
                 try properties.append(self.allocator, .{
                     .kind = kind,
                     .key = method_name,
@@ -1808,7 +1847,7 @@ const Parser = struct {
                     .value = value,
                 });
             } else if (self.at(.LParen)) {
-                const value = try self.parseObjectMethod(key_tok, false);
+                const value = try self.parseObjectMethod(key_tok, false, leading_generator);
                 try properties.append(self.allocator, .{
                     .kind = .method,
                     .key = key,
@@ -1847,14 +1886,15 @@ const Parser = struct {
         });
     }
 
-    fn parseObjectMethod(self: *Parser, start: Token, is_async: bool) anyerror!NodeId {
+    fn parseObjectMethod(self: *Parser, start: Token, is_async: bool, is_generator: bool) anyerror!NodeId {
         _ = self.expect(.LParen, "expected (");
         var params: std.ArrayList(NodeId) = .empty;
         errdefer params.deinit(self.allocator);
         try self.parseParameterList(&params);
         _ = self.expect(.RParen, "expected )");
         const return_type = try self.parseOptionalTypeAnnotation();
-        const body = if (self.at(.LBrace)) try self.parseBlockStatement() else blk: {
+        const flags: ast_mod.FunctionFlags = .{ .is_async = is_async, .is_generator = is_generator };
+        const body = if (self.at(.LBrace)) try self.parseFunctionBlock(flags) else blk: {
             self.report("expected function body", .expected_token);
             break :blk ast_mod.invalid_node;
         };
@@ -1864,7 +1904,7 @@ const Parser = struct {
             .data = .{ .FunctionExpression = .{
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
-                .flags = .{ .is_async = is_async },
+                .flags = flags,
                 .return_type = return_type,
             } },
         });
@@ -2530,6 +2570,61 @@ test "parser preserves strict meta-properties, spans, nesting, and recovery" {
 
     try std.testing.expectEqual(.VariableDeclaration, std.meta.activeTag(parsed.ast.node(statements[3]).data));
     try std.testing.expectEqual(.VariableDeclaration, std.meta.activeTag(parsed.ast.node(statements[5]).data));
+}
+
+test "parser preserves generator flags and yield forms" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const scanned = try scanner.scanAll(allocator,
+        \\function* values(source) { yield; yield source; yield* source; }
+        \\const expression = async function* () { yield 1; };
+        \\class Stream { *items() { yield 2; } async *more() { yield* values; } }
+        \\const object = { *items() { yield 3; }, async *more() { yield* values; } };
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    var generator_count: usize = 0;
+    var yield_count: usize = 0;
+    var empty_yield = false;
+    var delegated_yield = false;
+    for (parsed.ast.nodes) |node| switch (node.data) {
+        .FunctionDeclaration => |function| if (function.flags.is_generator) {
+            generator_count += 1;
+        },
+        .FunctionExpression => |function| if (function.flags.is_generator) {
+            generator_count += 1;
+        },
+        .ClassMethod => |method| if (method.flags.is_generator) {
+            generator_count += 1;
+        },
+        .YieldExpression => |yield_expr| {
+            yield_count += 1;
+            empty_yield = empty_yield or yield_expr.argument == null;
+            delegated_yield = delegated_yield or yield_expr.delegate;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 6), generator_count);
+    try std.testing.expectEqual(@as(usize, 8), yield_count);
+    try std.testing.expect(empty_yield);
+    try std.testing.expect(delegated_yield);
+}
+
+test "parser diagnoses yield outside generator function contexts" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const scanned = try scanner.scanAll(allocator, "yield value; function* outer() { const inner = () => yield value; }", true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 2), parsed.diagnostics.len);
+    for (parsed.diagnostics) |diagnostic| {
+        try std.testing.expectEqual(diagnostics.DiagnosticCode.unexpected_token, diagnostic.code);
+        try std.testing.expectEqualStrings("yield is only valid inside generator functions", diagnostic.message);
+    }
 }
 
 fn joinSpans(a: tokens.Span, b: tokens.Span) tokens.Span {

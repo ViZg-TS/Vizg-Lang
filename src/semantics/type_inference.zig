@@ -126,6 +126,7 @@ pub fn inferLiteralNodeTypes(
             .VariableDeclarator => |vd| if (vd.init) |i| try stack.append(allocator, i),
             .FunctionDeclaration => |fn_decl| try stack.append(allocator, fn_decl.body),
             .FunctionExpression => |fn_expr| try stack.append(allocator, fn_expr.body),
+            .YieldExpression => |yield_expr| if (yield_expr.argument) |argument| try stack.append(allocator, argument),
             .ArrowFunctionExpression => |arrow| try stack.append(allocator, arrow.body),
             .ClassDeclaration => |class_decl| {
                 if (class_decl.super_class) |super_class| try stack.append(allocator, super_class);

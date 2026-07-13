@@ -367,7 +367,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             if (decl.init) |init| try printAstNode(writer, tree, init, depth + 1);
         },
         .FunctionDeclaration => |decl| {
-            try writer.print("FunctionDeclaration #{} name=\"{s}\" exported={} async={} body=#{} {}..{}\n", .{ node_id, decl.name, decl.exported, decl.flags.is_async, decl.body, node.span.start, node.span.end });
+            try writer.print("FunctionDeclaration #{} name=\"{s}\" exported={} async={} generator={} body=#{} {}..{}\n", .{ node_id, decl.name, decl.exported, decl.flags.is_async, decl.flags.is_generator, decl.body, node.span.start, node.span.end });
             for (decl.params) |param| try printAstNode(writer, tree, param, depth + 1);
             if (decl.return_type) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             try printAstNode(writer, tree, decl.body, depth + 1);
@@ -375,10 +375,16 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
         .FunctionExpression => |expr| {
             try writer.print("FunctionExpression #{}", .{node_id});
             if (expr.name) |name| try writer.print(" name=\"{s}\"", .{name});
-            try writer.print(" async={} body=#{} {}..{}\n", .{ expr.flags.is_async, expr.body, node.span.start, node.span.end });
+            try writer.print(" async={} generator={} body=#{} {}..{}\n", .{ expr.flags.is_async, expr.flags.is_generator, expr.body, node.span.start, node.span.end });
             for (expr.params) |param| try printAstNode(writer, tree, param, depth + 1);
             if (expr.return_type) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             try printAstNode(writer, tree, expr.body, depth + 1);
+        },
+        .YieldExpression => |yield_expr| {
+            try writer.print("YieldExpression #{} delegate={}", .{ node_id, yield_expr.delegate });
+            if (yield_expr.argument) |argument| try writer.print(" argument=#{}", .{argument});
+            try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
+            if (yield_expr.argument) |argument| try printAstNode(writer, tree, argument, depth + 1);
         },
         .ClassDeclaration => |decl| {
             try writer.print("ClassDeclaration #{} name=\"{s}\" members={} {}..{}\n", .{ node_id, decl.name, decl.members.len, node.span.start, node.span.end });
@@ -398,7 +404,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             if (field.initializer) |initializer| try printAstNode(writer, tree, initializer, depth + 1);
         },
         .ClassMethod => |method| {
-            try writer.print("ClassMethod #{} name=\"{s}\" kind={s} static={} async={} access={s} {}..{}\n", .{ node_id, method.name, @tagName(method.kind), method.is_static, method.flags.is_async, @tagName(method.access), node.span.start, node.span.end });
+            try writer.print("ClassMethod #{} name=\"{s}\" kind={s} static={} async={} generator={} access={s} {}..{}\n", .{ node_id, method.name, @tagName(method.kind), method.is_static, method.flags.is_async, method.flags.is_generator, @tagName(method.access), node.span.start, node.span.end });
             for (method.params) |param| try printAstNode(writer, tree, param, depth + 1);
             if (method.return_type) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             try printAstNode(writer, tree, method.body, depth + 1);
@@ -1281,6 +1287,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .VariableDeclarator => return "VariableDeclarator",
         .FunctionDeclaration => return "FunctionDeclaration",
         .FunctionExpression => return "FunctionExpression",
+        .YieldExpression => return "YieldExpression",
         .ArrowFunctionExpression => return "ArrowFunctionExpression",
         .ClassDeclaration => return "ClassDeclaration",
         .ClassExpression => return "ClassExpression",

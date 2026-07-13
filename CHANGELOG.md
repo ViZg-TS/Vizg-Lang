@@ -12,6 +12,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Added
 
+- Generator declarations, expressions, object methods, and class methods now preserve generator flags; `yield`, `yield value`, and delegated `yield*` use a contextual, traversable AST representation.
 - Function declarations, expressions, arrows, object methods, and class methods now share coherent async/generator flags; async declaration/default-export forms parse directly.
 - `import.meta` and `new.target` now use strict, dedicated meta-property AST nodes with normal postfix nesting.
 - Dynamic `import(source, options?)` now has a dedicated AST expression and stays outside the static module graph.

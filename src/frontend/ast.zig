@@ -197,6 +197,11 @@ pub const FunctionExpression = struct {
     return_type: ?TypeAnnotation = null,
 };
 
+pub const YieldExpression = struct {
+    argument: ?NodeId = null,
+    delegate: bool = false,
+};
+
 pub const ArrowFunctionExpression = struct {
     params: []const NodeId,
     body: NodeId,
@@ -441,6 +446,7 @@ pub const NodeData = union(enum) {
     VariableDeclarator: VariableDeclarator,
     FunctionDeclaration: FunctionDeclaration,
     FunctionExpression: FunctionExpression,
+    YieldExpression: YieldExpression,
     ArrowFunctionExpression: ArrowFunctionExpression,
     ClassDeclaration: ClassDeclaration,
     ClassExpression: ClassExpression,

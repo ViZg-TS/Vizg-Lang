@@ -192,6 +192,9 @@ const Binder = struct {
                 }
                 try self.bindNode(function_expr.body, function_scope);
             },
+            .YieldExpression => |yield_expr| {
+                if (yield_expr.argument) |argument| try self.bindNode(argument, scope);
+            },
             .ClassDeclaration => |class_decl| {
                 const value_symbol = try self.declareInNamespace(scope, class_decl.name, .class, .value, node_id, node.span);
                 _ = try self.declareInNamespace(scope, class_decl.name, .class, .type, node_id, node.span);
