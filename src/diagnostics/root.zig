@@ -29,6 +29,10 @@ pub const DiagnosticCode = enum {
     circular_import,
     unknown_type_name,
     type_mismatch,
+    unknown_property,
+    invalid_index,
+    invalid_argument_count,
+    invalid_argument_type,
     parse_recursion_limit_reached,
 };
 
@@ -53,6 +57,12 @@ pub const Diagnostic = struct {
     span: tokens.Span,
     label: ?[]const u8 = null,
     path: ?[]const u8 = null,
+    related: []const RelatedSpan = &.{},
+};
+
+pub const RelatedSpan = struct {
+    span: tokens.Span,
+    message: []const u8,
 };
 
 pub fn lexicalErrorCode(err: tokens.LexicalError) DiagnosticCode {
@@ -111,6 +121,10 @@ pub fn diagnosticCodeId(code: DiagnosticCode) []const u8 {
         .circular_import => "VZG5003",
         .unknown_type_name => "VZG6004",
         .type_mismatch => "VZG6005",
+        .unknown_property => "VZG6006",
+        .invalid_index => "VZG6007",
+        .invalid_argument_count => "VZG6008",
+        .invalid_argument_type => "VZG6009",
         .parse_recursion_limit_reached => "VZG2003",
     };
 }
@@ -138,6 +152,10 @@ pub fn diagnosticCodeName(code: DiagnosticCode) []const u8 {
         .circular_import => "circular_import",
         .unknown_type_name => "unknown_type_name",
         .type_mismatch => "type_mismatch",
+        .unknown_property => "unknown_property",
+        .invalid_index => "invalid_index",
+        .invalid_argument_count => "invalid_argument_count",
+        .invalid_argument_type => "invalid_argument_type",
         .parse_recursion_limit_reached => "parse_recursion_limit_reached",
     };
 }

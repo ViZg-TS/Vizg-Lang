@@ -53,6 +53,10 @@ typedef enum {
     VIZG_DIAG_UNSUPPORTED_SYNTAX       = 19,
     VIZG_DIAG_UNSUPPORTED_TS_SYNTAX    = 20,
     VIZG_DIAG_UNSUPPORTED_JSX          = 21,
+    VIZG_DIAG_UNKNOWN_PROPERTY         = 22,
+    VIZG_DIAG_INVALID_INDEX            = 23,
+    VIZG_DIAG_INVALID_ARGUMENT_COUNT   = 24,
+    VIZG_DIAG_INVALID_ARGUMENT_TYPE    = 25,
 } Vizg_DiagnosticCode;
 
 typedef enum {

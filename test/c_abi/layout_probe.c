@@ -57,6 +57,10 @@ int vizg_c_value_diag_invalid_utf8(void) { return VIZG_DIAG_INVALID_UTF8; }
 int vizg_c_value_diag_unsupported_syntax(void) { return VIZG_DIAG_UNSUPPORTED_SYNTAX; }
 int vizg_c_value_diag_unsupported_ts_syntax(void) { return VIZG_DIAG_UNSUPPORTED_TS_SYNTAX; }
 int vizg_c_value_diag_unsupported_jsx(void) { return VIZG_DIAG_UNSUPPORTED_JSX; }
+int vizg_c_value_diag_unknown_property(void) { return VIZG_DIAG_UNKNOWN_PROPERTY; }
+int vizg_c_value_diag_invalid_index(void) { return VIZG_DIAG_INVALID_INDEX; }
+int vizg_c_value_diag_invalid_argument_count(void) { return VIZG_DIAG_INVALID_ARGUMENT_COUNT; }
+int vizg_c_value_diag_invalid_argument_type(void) { return VIZG_DIAG_INVALID_ARGUMENT_TYPE; }
 int vizg_c_value_phase_internal(void) { return VIZG_PHASE_INTERNAL; }
 int vizg_c_value_token_invalid(void) { return VIZG_TOKEN_INVALID; }
 int vizg_c_value_token_identifier(void) { return VIZG_TOKEN_IDENTIFIER; }

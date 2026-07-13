@@ -180,6 +180,10 @@ pub const Vizg_DiagnosticCode = enum(c_int) {
     UnsupportedSyntax,
     UnsupportedTsSyntax,
     UnsupportedJsx,
+    UnknownProperty,
+    InvalidIndex,
+    InvalidArgumentCount,
+    InvalidArgumentType,
 };
 
 pub const Vizg_DiagnosticPhase = enum(c_int) {
@@ -291,6 +295,10 @@ fn toVizgDiagnosticCode(v: diagnostics_mod.DiagnosticCode) Vizg_DiagnosticCode {
         .unsupported_syntax => .UnsupportedSyntax,
         .unsupported_ts_syntax => .UnsupportedTsSyntax,
         .unsupported_jsx => .UnsupportedJsx,
+        .unknown_property => .UnknownProperty,
+        .invalid_index => .InvalidIndex,
+        .invalid_argument_count => .InvalidArgumentCount,
+        .invalid_argument_type => .InvalidArgumentType,
     };
 }
 
