@@ -888,6 +888,29 @@ const Parser = struct {
     }
 
     fn parsePrimaryType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        const literal_kind: ?ast_mod.LiteralTypeKind = switch (self.current().kind) {
+            .StringLiteral => .string,
+            .NumberLiteral => .number,
+            .BigIntLiteral => .bigint,
+            .TrueLiteral, .FalseLiteral => .boolean,
+            .NullLiteral => .null,
+            else => null,
+        };
+        if (literal_kind) |kind| {
+            const literal = self.advance();
+            return self.addTypeNode(.{ .span = literal.span, .data = .{ .Literal = .{ .kind = kind, .spelling = literal.lexeme } } });
+        }
+        if (self.at(.Minus) and (self.peek(1).kind == .NumberLiteral or self.peek(1).kind == .BigIntLiteral)) {
+            const minus = self.advance();
+            const number = self.advance();
+            self.reportAt(minus, "negative literal types are not supported", .unsupported_ts_syntax);
+            return self.addTypeNode(.{ .span = joinSpans(minus.span, number.span), .data = .{ .Named = .{ .name = "<unsupported-negative-literal>" } } });
+        }
+        if (self.at(.NoSubstitutionTemplate)) {
+            const template = self.advance();
+            self.reportAt(template, "template literal types are not supported", .unsupported_ts_syntax);
+            return self.addTypeNode(.{ .span = template.span, .data = .{ .Named = .{ .name = "<unsupported-template-literal>" } } });
+        }
         if (self.at(.Identifier) or self.at(.PrivateIdentifier)) {
             const name = self.advance();
             var arguments: std.ArrayList(ast_mod.TypeNodeId) = .empty;
@@ -3567,4 +3590,39 @@ test "parser preserves constructor parameter properties and class field markers"
     const invalid = try parse(allocator, invalid_scan.tokens, .{});
     try std.testing.expectEqual(@as(usize, 2), invalid.diagnostics.len);
     for (invalid.diagnostics) |diagnostic| try std.testing.expectEqualStrings("parameter properties are only allowed in constructors", diagnostic.message);
+}
+
+test "parser preserves literal types separately from literal expressions" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\type Mode = "dark" | "light";
+        \\type Status = 200 | 404;
+        \\type Value = 1n | true | false | null;
+        \\const expression = "dark";
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const mode = parsed.ast.typeNode(parsed.ast.node(statements[0]).data.TypeAliasDeclaration.type_annotation.root).data.Union;
+    try std.testing.expectEqual(ast_mod.LiteralTypeKind.string, parsed.ast.typeNode(mode[0]).data.Literal.kind);
+    try std.testing.expectEqualStrings("\"dark\"", parsed.ast.typeNode(mode[0]).data.Literal.spelling);
+    const status = parsed.ast.typeNode(parsed.ast.node(statements[1]).data.TypeAliasDeclaration.type_annotation.root).data.Union;
+    try std.testing.expectEqualStrings("200", parsed.ast.typeNode(status[0]).data.Literal.spelling);
+    try std.testing.expectEqualStrings("404", parsed.ast.typeNode(status[1]).data.Literal.spelling);
+    const values = parsed.ast.typeNode(parsed.ast.node(statements[2]).data.TypeAliasDeclaration.type_annotation.root).data.Union;
+    try std.testing.expectEqual(ast_mod.LiteralTypeKind.bigint, parsed.ast.typeNode(values[0]).data.Literal.kind);
+    try std.testing.expectEqual(ast_mod.LiteralTypeKind.boolean, parsed.ast.typeNode(values[1]).data.Literal.kind);
+    try std.testing.expectEqual(ast_mod.LiteralTypeKind.null, parsed.ast.typeNode(values[3]).data.Literal.kind);
+    const expression_id = parsed.ast.node(parsed.ast.node(statements[3]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    try std.testing.expect(parsed.ast.node(expression_id).data == .Literal);
+
+    const unsupported_scan = try scanner.scanAll(allocator, "type Negative = -1; type Template = `value`;", true);
+    const unsupported = try parse(allocator, unsupported_scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 2), unsupported.diagnostics.len);
+    try std.testing.expectEqualStrings("negative literal types are not supported", unsupported.diagnostics[0].message);
+    try std.testing.expectEqualStrings("template literal types are not supported", unsupported.diagnostics[1].message);
 }

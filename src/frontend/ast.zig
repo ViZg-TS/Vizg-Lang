@@ -21,6 +21,13 @@ pub const NamedType = struct {
     type_arguments: []const TypeNodeId = &.{},
 };
 
+pub const LiteralTypeKind = enum { string, number, bigint, boolean, null };
+
+pub const LiteralType = struct {
+    kind: LiteralTypeKind,
+    spelling: []const u8,
+};
+
 pub const TypeMember = struct {
     name: []const u8,
     optional: bool = false,
@@ -44,6 +51,7 @@ pub const GenericTypeParameter = struct {
 
 pub const TypeNodeData = union(enum) {
     Named: NamedType,
+    Literal: LiteralType,
     Array: TypeNodeId,
     Readonly: TypeNodeId,
     Union: []const TypeNodeId,

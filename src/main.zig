@@ -257,6 +257,7 @@ fn printTypeNode(writer: *Io.Writer, tree: ast_mod.Ast, type_id: ast_mod.TypeNod
             try writer.print(" name=\"{s}\"\n", .{named.name});
             for (named.type_arguments) |child| try printTypeNode(writer, tree, child, depth + 1);
         },
+        .Literal => |literal| try writer.print(" kind={s} spelling=\"{s}\"\n", .{ @tagName(literal.kind), literal.spelling }),
         .Array, .Readonly, .Parenthesized => |child| {
             try writer.writeByte('\n');
             try printTypeNode(writer, tree, child, depth + 1);
