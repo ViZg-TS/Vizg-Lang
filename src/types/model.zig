@@ -69,6 +69,31 @@ pub const TupleType = struct {
     readonly: bool = false,
 };
 
+// ---------------------------------------------------------------------------
+// SemanticDeclId — module-qualified identity for a nominal declaration.
+// Pair of (module_id, declaration_id) where declaration_id is local to one AST;
+// the pair forms a globally unique key across modules in one project result.
+// Struct equality on u32 fields gives cheap cross-module comparison without
+// allocations and matches the "never equal merely because local NodeIds match"
+// invariant — two declarations share identity only when both components match.
+// ---------------------------------------------------------------------------
+
+pub const SemanticDeclId = struct {
+    module_id: u32,
+    declaration_id: u32,
+
+    pub fn init(module_id_: u32, decl_id_: u32) SemanticDeclId {
+        return .{ .module_id = module_id_, .declaration_id = decl_id_ };
+    }
+
+    /// Returns the local (per-AST) component — useful for legacy paths that only
+    /// know how to key by a single declaration id within one module. Cross-module
+    /// callers MUST compare both components via SemanticDeclId equality.
+    pub fn local(self: SemanticDeclId) u32 {
+        return self.declaration_id;
+    }
+};
+
 pub const NominalType = struct {
     /// Unique identifier per class/interface/enum declaration. Prevents structural 
     /// interning from merging distinct declarations with same name across modules.
