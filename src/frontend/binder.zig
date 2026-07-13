@@ -280,6 +280,7 @@ const Binder = struct {
             },
             .FinallyClause => |finally_clause| try self.bindNode(finally_clause.body, scope),
             .BreakStatement, .ContinueStatement => {},
+            .LabeledStatement => |labeled| try self.bindNode(labeled.body, scope),
             .ExpressionStatement => |statement| try self.bindNode(statement.expression, scope),
             .TemplateExpression => |template| {
                 for (template.parts) |part| if (part.expression) |expression| try self.bindNode(expression, scope);

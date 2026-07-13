@@ -145,6 +145,7 @@ const Resolver = struct {
             },
             .FinallyClause => |finally_clause| try self.resolveNode(finally_clause.body, scope),
             .BreakStatement, .ContinueStatement => {},
+            .LabeledStatement => |labeled| try self.resolveNode(labeled.body, scope),
             .ExpressionStatement => |statement| try self.resolveNode(statement.expression, scope),
             .Identifier => |identifier| try self.addReference(node_id, identifier.name, scope, .read),
             .ThisExpression, .SuperExpression => {},

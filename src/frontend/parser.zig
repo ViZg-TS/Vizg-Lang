@@ -23,6 +23,8 @@ const Parser = struct {
     diagnostics: std.ArrayList(diagnostics.Diagnostic) = .empty,
     parenthesized_nodes: std.ArrayList(NodeId) = .empty,
     function_contexts: std.ArrayList(ast_mod.FunctionFlags) = .empty,
+    labels: std.ArrayList(LabelContext) = .empty,
+    function_label_bases: std.ArrayList(usize) = .empty,
     allow_in: bool = true,
     recover_errors: bool = true,
     allocation_error: ?anyerror = null,
@@ -36,6 +38,8 @@ const Parser = struct {
     fn parse(self: *Parser) anyerror!ParseResult {
         defer self.parenthesized_nodes.deinit(self.allocator);
         defer self.function_contexts.deinit(self.allocator);
+        defer self.labels.deinit(self.allocator);
+        defer self.function_label_bases.deinit(self.allocator);
         const root = try self.parseProgram();
         if (self.allocation_error) |err| return err;
         return .{
@@ -100,12 +104,39 @@ const Parser = struct {
         if (self.at(.Keyword_while)) return try self.parseWhileStatement();
         if (self.at(.Keyword_for)) return try self.parseForStatement();
         if (self.at(.Keyword_switch)) return try self.parseSwitchStatement();
+        if (self.at(.Identifier) and self.peek(1).kind == .Colon) return try self.parseLabeledStatement();
         if (self.isVariableKeyword(self.current().kind)) return try self.parseVariableDeclarationStatement();
         if (self.at(.Semicolon)) {
             _ = self.advance();
             return null;
         }
         return try self.parseExpressionStatement();
+    }
+
+    const LabelContext = struct { name: []const u8, iteration: bool };
+
+    fn labeledBodyIsIteration(self: *const Parser) bool {
+        var cursor = self.index;
+        while (self.tokens[cursor].kind == .Identifier and self.tokens[cursor + 1].kind == .Colon) cursor += 2;
+        return self.tokens[cursor].kind == .Keyword_for or self.tokens[cursor].kind == .Keyword_while or self.tokens[cursor].kind == .Keyword_do;
+    }
+
+    fn parseLabeledStatement(self: *Parser) anyerror!NodeId {
+        const label = self.advance();
+        _ = self.expect(.Colon, "expected ':' after label");
+        for (self.labels.items[self.currentLabelBase()..]) |active| if (std.mem.eql(u8, active.name, label.lexeme)) {
+            self.reportAt(label, "duplicate label", .unexpected_token);
+            break;
+        };
+        try self.labels.append(self.allocator, .{ .name = label.lexeme, .iteration = self.labeledBodyIsIteration() });
+        defer _ = self.labels.pop();
+        const body = (try self.parseStatement()) orelse ast_mod.invalid_node;
+        const end = if (body == ast_mod.invalid_node) label.span else self.nodes.items[@intCast(body)].span;
+        return self.addNode(.{ .span = joinSpans(label.span, end), .data = .{ .LabeledStatement = .{ .label = label.lexeme, .body = body } } });
+    }
+
+    fn currentLabelBase(self: *const Parser) usize {
+        return if (self.function_label_bases.items.len == 0) 0 else self.function_label_bases.items[self.function_label_bases.items.len - 1];
     }
 
     fn atTypeAliasDeclaration(self: *const Parser) bool {
@@ -989,6 +1020,8 @@ const Parser = struct {
     fn parseFunctionBlock(self: *Parser, flags: ast_mod.FunctionFlags) anyerror!NodeId {
         try self.function_contexts.append(self.allocator, flags);
         defer _ = self.function_contexts.pop();
+        try self.function_label_bases.append(self.allocator, self.labels.items.len);
+        defer _ = self.function_label_bases.pop();
         return self.parseBlockStatement();
     }
 
@@ -1102,23 +1135,27 @@ const Parser = struct {
 
     fn parseLoopControlStatement(self: *Parser, kind: TokenType) anyerror!NodeId {
         const start = self.advance();
-        if (self.at(.Identifier)) {
-            try self.diagnostics.append(self.allocator, .{
-                .severity = .@"error",
-                .code = .unexpected_token,
-                .phase = .parser,
-                .message = "labeled break and continue statements are not supported",
-                .span = self.current().span,
-            });
-            _ = self.advance();
+        const label_token: ?Token = if (!self.current().flags.has_leading_line_break and self.at(.Identifier)) self.advance() else null;
+        if (label_token) |target| {
+            var found: ?LabelContext = null;
+            var index = self.labels.items.len;
+            const base = self.currentLabelBase();
+            while (index > base) {
+                index -= 1;
+                if (std.mem.eql(u8, self.labels.items[index].name, target.lexeme)) {
+                    found = self.labels.items[index];
+                    break;
+                }
+            }
+            if (found == null) self.reportAt(target, "unknown label", .unexpected_token) else if (kind == .Keyword_continue and !found.?.iteration) self.reportAt(target, "continue label must target an iteration statement", .unexpected_token);
         }
         _ = self.eat(.Semicolon);
         const span = joinSpans(start.span, self.previousOrCurrent().span);
         return self.addNode(.{
             .span = span,
             .data = switch (kind) {
-                .Keyword_break => .{ .BreakStatement = .{} },
-                .Keyword_continue => .{ .ContinueStatement = .{} },
+                .Keyword_break => .{ .BreakStatement = .{ .label = if (label_token) |token| token.lexeme else null } },
+                .Keyword_continue => .{ .ContinueStatement = .{ .label = if (label_token) |token| token.lexeme else null } },
                 else => unreachable,
             },
         });
@@ -1467,6 +1504,8 @@ const Parser = struct {
         const flags: ast_mod.FunctionFlags = .{ .is_async = is_async };
         try self.function_contexts.append(self.allocator, flags);
         defer _ = self.function_contexts.pop();
+        try self.function_label_bases.append(self.allocator, self.labels.items.len);
+        defer _ = self.function_label_bases.pop();
         const body = if (expression_body) try self.parseAssignmentExpression() else try self.parseBlockStatement();
         return self.addNode(.{
             .span = joinSpans(start, self.nodes.items[@intCast(body)].span),
@@ -3194,4 +3233,51 @@ test "parser diagnoses try without catch or finally" {
     try std.testing.expectEqual(@as(usize, 1), parsed.diagnostics.len);
     try std.testing.expectEqual(diagnostics.DiagnosticCode.expected_token, parsed.diagnostics[0].code);
     try std.testing.expectEqualStrings("expected catch or finally after try", parsed.diagnostics[0].message);
+}
+
+test "parser preserves labels and validates control targets" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\outer: for (;;) { continue outer; break outer; }
+        \\block: { break block; }
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 2), statements.len);
+
+    const outer = parsed.ast.node(statements[0]).data.LabeledStatement;
+    try std.testing.expectEqualStrings("outer", outer.label);
+    const loop = parsed.ast.node(outer.body).data.ForStatement;
+    const loop_body = parsed.ast.node(loop.body).data.BlockStatement.statements;
+    try std.testing.expectEqualStrings("outer", parsed.ast.node(loop_body[0]).data.ContinueStatement.label.?);
+    try std.testing.expectEqualStrings("outer", parsed.ast.node(loop_body[1]).data.BreakStatement.label.?);
+
+    const block = parsed.ast.node(statements[1]).data.LabeledStatement;
+    try std.testing.expectEqualStrings("block", block.label);
+}
+
+test "parser diagnoses invalid duplicate unknown and cross-function labels" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\block: { continue block; }
+        \\same: same: while (ready) { break same; }
+        \\break missing;
+        \\outer: { function nested() { break outer; } }
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 4), parsed.diagnostics.len);
+    try std.testing.expectEqualStrings("continue label must target an iteration statement", parsed.diagnostics[0].message);
+    try std.testing.expectEqualStrings("duplicate label", parsed.diagnostics[1].message);
+    try std.testing.expectEqualStrings("unknown label", parsed.diagnostics[2].message);
+    try std.testing.expectEqualStrings("unknown label", parsed.diagnostics[3].message);
+    try std.testing.expectEqual(@as(usize, 4), parsed.ast.node(parsed.ast.root).data.Program.statements.len);
 }

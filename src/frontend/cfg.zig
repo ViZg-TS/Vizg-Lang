@@ -97,6 +97,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
         },
         .CatchClause => |catch_clause| try collectFunctions(allocator, tree, catch_clause.body, functions),
         .FinallyClause => |finally_clause| try collectFunctions(allocator, tree, finally_clause.body, functions),
+        .LabeledStatement => |labeled| try collectFunctions(allocator, tree, labeled.body, functions),
         .SwitchStatement => |switch_stmt| {
             for (switch_stmt.cases) |case| try collectFunctions(allocator, tree, case, functions);
         },
@@ -137,12 +138,14 @@ const GraphBuilder = struct {
     const LoopContext = struct {
         continue_target: BasicBlockId,
     };
+    const LabelContext = struct { name: []const u8, break_target: BasicBlockId, continue_target: ?BasicBlockId, iteration: bool };
 
     allocator: std.mem.Allocator,
     tree: ast_mod.Ast,
     blocks: std.ArrayList(BlockBuilder) = .empty,
     loops: std.ArrayList(LoopContext) = .empty,
     break_targets: std.ArrayList(BasicBlockId) = .empty,
+    labels: std.ArrayList(LabelContext) = .empty,
     exit: BasicBlockId = 0,
 
     fn init(allocator: std.mem.Allocator, tree: ast_mod.Ast) GraphBuilder {
@@ -187,14 +190,25 @@ const GraphBuilder = struct {
                 try self.addEdge(current, self.exit);
                 return null;
             },
-            .BreakStatement => {
+            .LabeledStatement => |labeled| return self.buildLabeledStatement(current, labeled),
+            .BreakStatement => |break_statement| {
                 try self.addStatement(current, statement);
-                if (self.currentBreakTarget()) |target| try self.addEdge(current, target);
+                const target = if (break_statement.label) |label|
+                    if (self.findLabel(label)) |context| context.break_target else null
+                else
+                    self.currentBreakTarget();
+                if (target) |destination| try self.addEdge(current, destination);
                 return null;
             },
-            .ContinueStatement => {
+            .ContinueStatement => |continue_statement| {
                 try self.addStatement(current, statement);
-                if (self.currentLoop()) |loop| try self.addEdge(current, loop.continue_target);
+                const target = if (continue_statement.label) |label|
+                    if (self.findLabel(label)) |context| context.continue_target else null
+                else if (self.currentLoop()) |loop|
+                    loop.continue_target
+                else
+                    null;
+                if (target) |destination| try self.addEdge(current, destination);
                 return null;
             },
             .IfStatement => |if_statement| return self.buildIfStatement(current, statement, if_statement),
@@ -216,6 +230,37 @@ const GraphBuilder = struct {
                 return current;
             },
         }
+    }
+
+    fn buildLabeledStatement(self: *GraphBuilder, current: BasicBlockId, labeled: ast_mod.LabeledStatement) anyerror!?BasicBlockId {
+        const after = try self.createBlock(.normal);
+        const body_node = self.tree.node(labeled.body);
+        const fallthrough = switch (body_node.data) {
+            .WhileStatement => |value| try self.buildWhileStatementLabeled(current, labeled.body, value, labeled.label, after),
+            .DoWhileStatement => |value| try self.buildDoWhileStatementLabeled(current, labeled.body, value, labeled.label, after),
+            .ForStatement => |value| try self.buildForStatementLabeled(current, labeled.body, value, labeled.label, after),
+            else => blk: {
+                try self.labels.append(self.allocator, .{ .name = labeled.label, .break_target = after, .continue_target = null, .iteration = self.isIterationLabelBody(labeled.body) });
+                defer _ = self.labels.pop();
+                break :blk try self.buildStatement(current, labeled.body);
+            },
+        };
+        if (fallthrough) |block| if (block != after) try self.addEdge(block, after);
+        return after;
+    }
+
+    fn isIterationLabelBody(self: *GraphBuilder, node_id: NodeId) bool {
+        return switch (self.tree.node(node_id).data) {
+            .WhileStatement, .DoWhileStatement, .ForStatement => true,
+            .LabeledStatement => |nested| self.isIterationLabelBody(nested.body),
+            else => false,
+        };
+    }
+
+    fn activatePendingIterationLabels(self: *GraphBuilder, target: BasicBlockId) void {
+        for (self.labels.items) |*label| if (label.iteration and label.continue_target == null) {
+            label.continue_target = target;
+        };
     }
 
     fn buildTryStatement(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, try_statement: ast_mod.TryStatement) anyerror!?BasicBlockId {
@@ -277,11 +322,19 @@ const GraphBuilder = struct {
     }
 
     fn buildWhileStatement(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, while_statement: ast_mod.WhileStatement) anyerror!?BasicBlockId {
+        return self.buildWhileStatementWithLabel(current, statement, while_statement, null, null);
+    }
+
+    fn buildWhileStatementLabeled(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, while_statement: ast_mod.WhileStatement, label: []const u8, after: BasicBlockId) anyerror!?BasicBlockId {
+        return self.buildWhileStatementWithLabel(current, statement, while_statement, label, after);
+    }
+
+    fn buildWhileStatementWithLabel(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, while_statement: ast_mod.WhileStatement, label: ?[]const u8, forced_after: ?BasicBlockId) anyerror!?BasicBlockId {
         const condition = try self.beginConditionBlock(current);
         try self.addStatement(condition, statement);
 
         const body = try self.createBlock(.normal);
-        const after = try self.createBlock(.normal);
+        const after = forced_after orelse try self.createBlock(.normal);
         try self.addEdge(condition, body);
         try self.addEdge(condition, after);
 
@@ -289,15 +342,28 @@ const GraphBuilder = struct {
         defer _ = self.loops.pop();
         try self.break_targets.append(self.allocator, after);
         defer _ = self.break_targets.pop();
+        self.activatePendingIterationLabels(condition);
+        if (label) |name| try self.labels.append(self.allocator, .{ .name = name, .break_target = after, .continue_target = condition, .iteration = true });
+        defer if (label != null) {
+            _ = self.labels.pop();
+        };
         const body_fallthrough = try self.buildStatement(body, while_statement.body);
         if (body_fallthrough) |block| try self.addEdge(block, condition);
         return after;
     }
 
     fn buildDoWhileStatement(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, do_while_statement: ast_mod.DoWhileStatement) anyerror!?BasicBlockId {
+        return self.buildDoWhileStatementWithLabel(current, statement, do_while_statement, null, null);
+    }
+
+    fn buildDoWhileStatementLabeled(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, do_while_statement: ast_mod.DoWhileStatement, label: []const u8, after: BasicBlockId) anyerror!?BasicBlockId {
+        return self.buildDoWhileStatementWithLabel(current, statement, do_while_statement, label, after);
+    }
+
+    fn buildDoWhileStatementWithLabel(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, do_while_statement: ast_mod.DoWhileStatement, label: ?[]const u8, forced_after: ?BasicBlockId) anyerror!?BasicBlockId {
         const body = try self.createBlock(.normal);
         const condition = try self.createBlock(.condition);
-        const after = try self.createBlock(.normal);
+        const after = forced_after orelse try self.createBlock(.normal);
         try self.addEdge(current, body);
         try self.addStatement(condition, statement);
 
@@ -305,6 +371,11 @@ const GraphBuilder = struct {
         defer _ = self.loops.pop();
         try self.break_targets.append(self.allocator, after);
         defer _ = self.break_targets.pop();
+        self.activatePendingIterationLabels(condition);
+        if (label) |name| try self.labels.append(self.allocator, .{ .name = name, .break_target = after, .continue_target = condition, .iteration = true });
+        defer if (label != null) {
+            _ = self.labels.pop();
+        };
         const body_fallthrough = try self.buildStatement(body, do_while_statement.body);
         if (body_fallthrough) |block| try self.addEdge(block, condition);
 
@@ -327,6 +398,14 @@ const GraphBuilder = struct {
     }
 
     fn buildForStatement(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, for_statement: ast_mod.ForStatement) anyerror!?BasicBlockId {
+        return self.buildForStatementWithLabel(current, statement, for_statement, null, null);
+    }
+
+    fn buildForStatementLabeled(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, for_statement: ast_mod.ForStatement, label: []const u8, after: BasicBlockId) anyerror!?BasicBlockId {
+        return self.buildForStatementWithLabel(current, statement, for_statement, label, after);
+    }
+
+    fn buildForStatementWithLabel(self: *GraphBuilder, current: BasicBlockId, statement: NodeId, for_statement: ast_mod.ForStatement, label: ?[]const u8, forced_after: ?BasicBlockId) anyerror!?BasicBlockId {
         const before_condition = current;
         if (for_statement.init) |init_node| try self.addStatement(before_condition, init_node);
 
@@ -337,7 +416,7 @@ const GraphBuilder = struct {
         const body = try self.createBlock(.normal);
         try self.addEdge(condition, body);
 
-        const after = try self.createBlock(.normal);
+        const after = forced_after orelse try self.createBlock(.normal);
         if (for_statement.kind != .classic or for_statement.condition != null) try self.addEdge(condition, after);
 
         const update_block = if (for_statement.update != null) try self.createBlock(.normal) else null;
@@ -346,6 +425,11 @@ const GraphBuilder = struct {
         defer _ = self.loops.pop();
         try self.break_targets.append(self.allocator, after);
         defer _ = self.break_targets.pop();
+        self.activatePendingIterationLabels(continue_target);
+        if (label) |name| try self.labels.append(self.allocator, .{ .name = name, .break_target = after, .continue_target = continue_target, .iteration = true });
+        defer if (label != null) {
+            _ = self.labels.pop();
+        };
 
         const body_fallthrough = try self.buildStatement(body, for_statement.body);
         if (body_fallthrough) |block| {
@@ -401,6 +485,15 @@ const GraphBuilder = struct {
     fn currentBreakTarget(self: *GraphBuilder) ?BasicBlockId {
         if (self.break_targets.items.len == 0) return null;
         return self.break_targets.items[self.break_targets.items.len - 1];
+    }
+
+    fn findLabel(self: *GraphBuilder, name: []const u8) ?LabelContext {
+        var index = self.labels.items.len;
+        while (index > 0) {
+            index -= 1;
+            if (std.mem.eql(u8, self.labels.items[index].name, name)) return self.labels.items[index];
+        }
+        return null;
     }
 
     fn finish(self: *GraphBuilder) ![]const BasicBlock {
@@ -592,4 +685,48 @@ test "cfg routes try and catch fallthrough through finally" {
         dispatch.?.successors[0];
     try std.testing.expect(containsBlockId(graph.blocks[@intCast(try_body)].successors, finally_block.?.id));
     try std.testing.expect(containsBlockId(catch_block.?.successors, finally_block.?.id));
+}
+
+test "cfg routes labeled break and continue to explicit targets" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\function run(stop) {
+        \\    first: second: for (;;) {
+        \\        if (stop) break second;
+        \\        continue first;
+        \\    }
+        \\    return 1;
+        \\}
+    , true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const graph = (try build(allocator, parsed.ast))[0].graph;
+
+    var condition_id: ?BasicBlockId = null;
+    var break_block: ?BasicBlock = null;
+    var continue_block: ?BasicBlock = null;
+    for (graph.blocks) |block| {
+        if (block.kind == .condition) {
+            for (block.statements) |statement| switch (parsed.ast.node(statement).data) {
+                .ForStatement => condition_id = block.id,
+                else => {},
+            };
+        }
+        for (block.statements) |statement| switch (parsed.ast.node(statement).data) {
+            .BreakStatement => break_block = block,
+            .ContinueStatement => continue_block = block,
+            else => {},
+        };
+    }
+    try std.testing.expect(condition_id != null);
+    try std.testing.expect(break_block != null);
+    try std.testing.expect(continue_block != null);
+    try std.testing.expect(containsBlockId(continue_block.?.successors, condition_id.?));
+    try std.testing.expectEqual(@as(usize, 1), break_block.?.successors.len);
+    try std.testing.expect(break_block.?.successors[0] != condition_id.?);
 }

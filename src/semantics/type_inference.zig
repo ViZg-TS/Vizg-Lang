@@ -152,6 +152,7 @@ pub fn inferLiteralNodeTypes(
             .CatchClause => |catch_clause| try stack.append(allocator, catch_clause.body),
             .FinallyClause => |finally_clause| try stack.append(allocator, finally_clause.body),
             .BreakStatement, .ContinueStatement => {},
+            .LabeledStatement => |labeled| try stack.append(allocator, labeled.body),
             .CallExpression => |call| {
                 try stack.append(allocator, call.callee);
                 for (call.arguments) |arg| try stack.append(allocator, arg);

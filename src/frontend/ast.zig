@@ -278,9 +278,14 @@ pub const FinallyClause = struct {
     body: NodeId,
 };
 
-pub const BreakStatement = struct {};
+pub const LabeledStatement = struct {
+    label: []const u8,
+    body: NodeId,
+};
 
-pub const ContinueStatement = struct {};
+pub const BreakStatement = struct { label: ?[]const u8 = null };
+
+pub const ContinueStatement = struct { label: ?[]const u8 = null };
 
 pub const ExpressionStatement = struct {
     expression: NodeId,
@@ -461,6 +466,7 @@ pub const NodeData = union(enum) {
     FinallyClause: FinallyClause,
     BreakStatement: BreakStatement,
     ContinueStatement: ContinueStatement,
+    LabeledStatement: LabeledStatement,
     ThisExpression: ThisExpression,
     SuperExpression: SuperExpression,
     NewExpression: NewExpression,

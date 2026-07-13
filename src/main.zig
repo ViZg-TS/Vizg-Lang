@@ -455,8 +455,12 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try writer.print("FinallyClause #{} body=#{} {}..{}\n", .{ node_id, clause.body, node.span.start, node.span.end });
             try printAstNode(writer, tree, clause.body, depth + 1);
         },
-        .BreakStatement => try writer.print("BreakStatement #{} {}..{}\n", .{ node_id, node.span.start, node.span.end }),
-        .ContinueStatement => try writer.print("ContinueStatement #{} {}..{}\n", .{ node_id, node.span.start, node.span.end }),
+        .BreakStatement => |statement| try writer.print("BreakStatement #{} label={s} {}..{}\n", .{ node_id, statement.label orelse "-", node.span.start, node.span.end }),
+        .ContinueStatement => |statement| try writer.print("ContinueStatement #{} label={s} {}..{}\n", .{ node_id, statement.label orelse "-", node.span.start, node.span.end }),
+        .LabeledStatement => |statement| {
+            try writer.print("LabeledStatement #{} label={s} {}..{}\n", .{ node_id, statement.label, node.span.start, node.span.end });
+            try printAstNode(writer, tree, statement.body, depth + 1);
+        },
         .ThisExpression => try writer.print("ThisExpression #{} {}..{}\n", .{ node_id, node.span.start, node.span.end }),
         .SuperExpression => try writer.print("SuperExpression #{} {}..{}\n", .{ node_id, node.span.start, node.span.end }),
         .NewExpression => |new_expr| {
@@ -1302,6 +1306,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .FinallyClause => return "FinallyClause",
         .BreakStatement => return "BreakStatement",
         .ContinueStatement => return "ContinueStatement",
+        .LabeledStatement => return "LabeledStatement",
         .ThisExpression => return "ThisExpression",
         .SuperExpression => return "SuperExpression",
         .NewExpression => return "NewExpression",
