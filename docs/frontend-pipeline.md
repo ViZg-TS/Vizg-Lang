@@ -179,6 +179,11 @@ escapes but does not decode them, so the AST does not claim unavailable cooked
 text. Tagged forms use `TaggedTemplateExpression { tag, template }`; the tag
 and interpolation expressions participate in normal binding and resolution.
 
+Dynamic `import(source, options?)` uses a dedicated `ImportExpression`. Its
+source and optional options payload are normal traversable expressions. Static
+`ImportDeclaration` remains distinct, and only static declarations contribute
+module-graph edges.
+
 Example CLI shape:
 
 ```txt

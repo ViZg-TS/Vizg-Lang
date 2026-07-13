@@ -103,6 +103,10 @@ pub fn inferLiteralNodeTypes(
                 try stack.append(allocator, tagged.tag);
                 try stack.append(allocator, tagged.template);
             },
+            .ImportExpression => |import_expr| {
+                try stack.append(allocator, import_expr.source);
+                if (import_expr.options) |options| try stack.append(allocator, options);
+            },
             .Identifier => |ident| {
                 if (classifyIdentifier(ident.name)) |kind| {
                     try out_list.append(allocator, .{

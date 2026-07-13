@@ -12,6 +12,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Added
 
+- Dynamic `import(source, options?)` now has a dedicated AST expression and stays outside the static module graph.
 - Tagged template expressions now preserve identifier/member tags and a unified raw/optional-cooked payload for interpolated and no-substitution templates.
 - TypeScript `satisfies` expressions now have a distinct AST node, preserve structured type syntax, and compose with `as` assertions.
 - Logical `&&=` and `||=` assignments now parse alongside `??=`, and all compound assignments use read-modify-write reference semantics.

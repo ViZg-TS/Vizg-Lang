@@ -285,6 +285,10 @@ const Binder = struct {
                 try self.bindNode(tagged.tag, scope);
                 try self.bindNode(tagged.template, scope);
             },
+            .ImportExpression => |import_expr| {
+                try self.bindNode(import_expr.source, scope);
+                if (import_expr.options) |options| try self.bindNode(options, scope);
+            },
             .RegExpLiteral => {},
             .SpreadElement => |spread| try self.bindNode(spread.argument, scope),
             .ThisExpression, .SuperExpression => {},

@@ -85,6 +85,11 @@ pub const TaggedTemplateExpression = struct {
     template: NodeId,
 };
 
+pub const ImportExpression = struct {
+    source: NodeId,
+    options: ?NodeId = null,
+};
+
 pub const ImportDeclaration = struct {
     kind: ImportKind,
     type_only: bool = false,
@@ -415,6 +420,7 @@ pub const NodeData = union(enum) {
     RegExpLiteral: RegExpLiteral,
     TemplateExpression: TemplateExpression,
     TaggedTemplateExpression: TaggedTemplateExpression,
+    ImportExpression: ImportExpression,
     TypeAliasDeclaration: TypeAliasDeclaration,
     InterfaceDeclaration: InterfaceDeclaration,
     VariableDeclaration: VariableDeclaration,

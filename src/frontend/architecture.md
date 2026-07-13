@@ -28,6 +28,8 @@ tokens.zig define el vocabulario léxico completo: keywords, literales, operador
 
 Los templates con interpolación se dividen en `TemplateHead`, `TemplateMiddle` y `TemplateTail`. El parser representa todos los templates, incluso `NoSubstitutionTemplate`, como `TemplateExpression`. Cada parte conserva `raw` prestado del source, `cooked` opcional (actualmente `null`, porque el scanner valida escapes pero no los decodifica), expresión interpolada opcional y span. Los tags usan `TaggedTemplateExpression` sin degradarse a llamadas.
 
+`import(source, options?)` se representa como `ImportExpression`; ambos payloads son expresiones recorribles. Se mantiene separado de `ImportDeclaration`, única forma que crea aristas en el grafo estático de módulos.
+
 El scanner decide contextualmente si `/` inicia un `RegExpLiteral` o representa división. El AST conserva el patrón, las flags válidas y el span del literal completo.
 
 Las expresiones unarias prefijas (`!`, `~`, `-`, `+`, `typeof`, `void`, `delete`, `await`) se agrupan antes que los operadores multiplicativos. La aserción no nula `value!` sigue siendo una expresión postfija distinta.

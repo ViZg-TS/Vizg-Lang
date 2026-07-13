@@ -154,6 +154,10 @@ const Resolver = struct {
                 try self.resolveCallee(tagged.tag, scope);
                 try self.resolveNode(tagged.template, scope);
             },
+            .ImportExpression => |import_expr| {
+                try self.resolveNode(import_expr.source, scope);
+                if (import_expr.options) |options| try self.resolveNode(options, scope);
+            },
             .CallExpression => |call| {
                 _ = call.optional; // Syntax metadata only; resolution traverses both call forms identically.
                 try self.resolveCallee(call.callee, scope);
@@ -445,6 +449,26 @@ test "resolver visits tagged template tag and interpolations" {
     try std.testing.expectEqual(@as(usize, 1), tag_calls);
     try std.testing.expectEqual(@as(usize, 1), name_reads);
     try std.testing.expectEqual(@as(usize, 1), obj_reads);
+}
+
+test "resolver visits dynamic import source and options" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const scanned = try scanner.scanAll(allocator, "import(specifier, attributes);", true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    var source_reads: usize = 0;
+    var options_reads: usize = 0;
+    for (resolved.references) |reference| {
+        if (std.mem.eql(u8, reference.name, "specifier") and reference.kind == .read) source_reads += 1;
+        if (std.mem.eql(u8, reference.name, "attributes") and reference.kind == .read) options_reads += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), source_reads);
+    try std.testing.expectEqual(@as(usize, 1), options_reads);
 }
 
 test "resolver visits prefix unary operands" {

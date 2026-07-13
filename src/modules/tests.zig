@@ -373,6 +373,31 @@ test "module graph resolves relative imports inside a standard temporary directo
     try std.testing.expect(graph.linked_imports[0].target_symbol != null);
 }
 
+test "module graph excludes dynamic imports from static edges" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\import { value } from "./static";
+        \\const lazy = import("./dynamic");
+        \\export const result = value;
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "static.ts", .data = "export const value = 1;\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "dynamic.ts", .data = "export const value = 2;\n" });
+    const entry_path = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
+    defer std.testing.allocator.free(entry_path);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const graph = try modules_mod.build(arena.allocator(), io, entry_path, .{
+        .collect_comments = false,
+        .recover_errors = true,
+        .max_source_bytes = max_source_bytes,
+    }, null);
+    try std.testing.expectEqual(@as(usize, 2), graph.modules.len);
+    try std.testing.expectEqual(@as(usize, 1), graph.imports.len);
+    try std.testing.expectEqualStrings("./static", graph.imports[0].specifier);
+}
+
 test "module graph records complete import forms" {
     const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
     var tmp = std.testing.tmpDir(.{});

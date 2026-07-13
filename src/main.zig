@@ -339,6 +339,11 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, tagged.tag, depth + 1);
             try printAstNode(writer, tree, tagged.template, depth + 1);
         },
+        .ImportExpression => |import_expr| {
+            try writer.print("ImportExpression #{} source=#{} options={?} {}..{}\n", .{ node_id, import_expr.source, import_expr.options, node.span.start, node.span.end });
+            try printAstNode(writer, tree, import_expr.source, depth + 1);
+            if (import_expr.options) |options| try printAstNode(writer, tree, options, depth + 1);
+        },
         .VariableDeclaration => |decl| {
             try writer.print("VariableDeclaration #{} kind={s} {}..{}\n", .{ node_id, @tagName(decl.kind), node.span.start, node.span.end });
             for (decl.declarations) |declarator| try printAstNode(writer, tree, declarator, depth + 1);
@@ -1267,6 +1272,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .RegExpLiteral => return "RegExpLiteral",
         .TemplateExpression => return "TemplateExpression",
         .TaggedTemplateExpression => return "TaggedTemplateExpression",
+        .ImportExpression => return "ImportExpression",
         .VariableDeclaration => return "VariableDeclaration",
         .TypeAliasDeclaration => return "TypeAliasDeclaration",
         .InterfaceDeclaration => return "InterfaceDeclaration",

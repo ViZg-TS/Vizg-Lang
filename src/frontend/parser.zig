@@ -77,7 +77,7 @@ const Parser = struct {
             self.recoverUnsupportedStatement();
             return null;
         }
-        if (self.at(.Keyword_import)) return try self.parseImportDeclaration();
+        if (self.at(.Keyword_import) and self.peek(1).kind != .LParen) return try self.parseImportDeclaration();
         if (self.at(.Keyword_export)) return try self.parseExportDeclaration();
         if (self.atTypeAliasDeclaration()) return try self.parseTypeAliasDeclaration();
         if (self.atInterfaceDeclaration()) return try self.parseInterfaceDeclaration();
@@ -305,6 +305,17 @@ const Parser = struct {
                 .source = source_unquoted,
                 .source_span = source_span,
             } },
+        });
+    }
+
+    fn parseImportExpression(self: *Parser, start: Token) anyerror!NodeId {
+        _ = self.expect(.LParen, "expected ( after import");
+        const source = try self.parseAssignmentExpression();
+        const options = if (self.eat(.Comma)) try self.parseAssignmentExpression() else null;
+        const end = self.expect(.RParen, "expected ) after import expression").span;
+        return self.addNode(.{
+            .span = joinSpans(start.span, end),
+            .data = .{ .ImportExpression = .{ .source = source, .options = options } },
         });
     }
 
@@ -2051,6 +2062,7 @@ const Parser = struct {
             .Keyword_this => node = try self.addNode(.{ .span = token.span, .data = .{ .ThisExpression = .{} } }),
             .Keyword_super => node = try self.addNode(.{ .span = token.span, .data = .{ .SuperExpression = .{} } }),
             .Keyword_new => node = try self.parseNewExpression(token),
+            .Keyword_import => node = try self.parseImportExpression(token),
             .StringLiteral, .NumberLiteral, .BigIntLiteral, .TrueLiteral, .FalseLiteral, .NullLiteral => node = try self.addNode(.{
                 .span = token.span,
                 .data = .{ .Literal = .{ .value = token.lexeme } },
@@ -2410,6 +2422,31 @@ test "parser preserves tagged template tags and raw payload availability" {
     const called_id = parsed.ast.node(called_decl.declarations[0]).data.VariableDeclarator.init.?;
     const called = parsed.ast.node(called_id).data.TaggedTemplateExpression;
     try std.testing.expectEqual(.CallExpression, std.meta.activeTag(parsed.ast.node(called.tag).data));
+}
+
+test "parser distinguishes dynamic imports from static declarations" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const scan = try scanner.scanAll(allocator,
+        \\import value from "./static";
+        \\const mod = import("./dynamic", options);
+        \\consume(flag ? import("./a") : import("./b"));
+    , true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(.ImportDeclaration, std.meta.activeTag(parsed.ast.node(statements[0]).data));
+    const declaration = parsed.ast.node(statements[1]).data.VariableDeclaration;
+    const import_id = parsed.ast.node(declaration.declarations[0]).data.VariableDeclarator.init.?;
+    const import_expr = parsed.ast.node(import_id).data.ImportExpression;
+    try std.testing.expectEqual(.Literal, std.meta.activeTag(parsed.ast.node(import_expr.source).data));
+    try std.testing.expect(import_expr.options != null);
+    const call = parsed.ast.node(statements[2]).data.ExpressionStatement.expression;
+    const conditional = parsed.ast.node(parsed.ast.node(call).data.CallExpression.arguments[0]).data.ConditionalExpression;
+    try std.testing.expectEqual(.ImportExpression, std.meta.activeTag(parsed.ast.node(conditional.consequent).data));
+    try std.testing.expectEqual(.ImportExpression, std.meta.activeTag(parsed.ast.node(conditional.alternate).data));
 }
 
 fn joinSpans(a: tokens.Span, b: tokens.Span) tokens.Span {
