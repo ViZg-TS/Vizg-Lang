@@ -6,6 +6,10 @@ pub const TypeStore = struct {
     builtins: model.Builtins,
     records: std.ArrayList(StoredType),
     signatures: std.ArrayList(model.FunctionSignature),
+    
+    /// Maps declaration_id (== NominalType.declaration_id) to ClassSemanticModel.
+    /// Populated during class analysis; used by member access lookup and constructor typing.
+    class_models: std.AutoHashMap(u32, model.ClassSemanticModel),
 
     const StoredType = struct {
         id: model.TypeId,
@@ -18,6 +22,7 @@ pub const TypeStore = struct {
             .builtins = model.Builtins.init(),
             .records = .empty,
             .signatures = .empty,
+            .class_models = std.AutoHashMap(u32, model.ClassSemanticModel).init(allocator),
         };
     }
 
@@ -37,6 +42,75 @@ pub const TypeStore = struct {
         }
         return null;
     }
+    /// Store semantic model for a class declaration. Called during class analysis 
+    /// to populate field and method information for later member access lookups.
+    pub fn storeClassSemanticModel(self: *TypeStore, model_: model.ClassSemanticModel) !void {
+        const decl_id = model_.declaration_id;
+        try self.class_models.put(decl_id, model_);
+    }
+
+    /// Store semantic model for an interface declaration. Called during interface analysis.
+    pub fn storeInterfaceSemanticModel(self: *TypeStore, model_: model.InterfaceSemanticModel) !void {
+        // Store as a class-like model (interfaces use same member lookup path) —
+        // we synthesize a ClassSemanticModel by converting members to ClassField entries.
+        const decl_id = model_.declaration_id;
+        var fields = try self.allocator.alloc(model.ClassField, model_.members.len);
+        for (model_.members, 0..) |member, i| {
+            fields[i] = .{
+                .name = member.name,
+                .type_id = member.type_id,
+                .is_public = true,  // interface members are public by default
+                .is_readonly = true,
+            };
+        }
+        const synthesized = model.ClassSemanticModel{
+            .declaration_id = decl_id,
+            .module_id = model_.module_id,
+            .name = model_.name,
+            .fields = fields,
+            .methods = &.{},  // interfaces don't have implementations
+            .constructor_signature = null,
+        };
+        try self.class_models.put(decl_id, synthesized);
+    }
+
+    /// Look up a field type from a class instance by name. Returns null if not found.
+    pub fn lookupClassField(self: *const TypeStore, class_id: model.TypeId, field_name: []const u8) ?model.TypeId {
+        // Find the nominal type to get declaration_id
+        const record = self.stored(class_id) orelse return null;
+        const nominal = switch (record.kind) {
+            .class => |n| n,
+            .interface => |n| n,
+            else => return null,
+        };
+        
+        // Look up stored class model by declaration_id
+        if (self.class_models.get(nominal.declaration_id)) |model_| {
+            for (model_.fields) |field| {
+                if (std.mem.eql(u8, field.name, field_name)) return field.type_id;
+            }
+        }
+        return null;
+    }
+
+    /// Look up a method signature from a class instance by name. Returns null if not found.
+    pub fn lookupClassMethod(self: *const TypeStore, class_id: model.TypeId, method_name: []const u8) ?model.FunctionSignatureId {
+        const record = self.stored(class_id) orelse return null;
+        const nominal = switch (record.kind) {
+            .class => |n| n,
+            .interface => |n| n,
+            else => return null,
+        };
+        
+        if (self.class_models.get(nominal.declaration_id)) |model_| {
+            for (model_.methods) |method| {
+                if (std.mem.eql(u8, method.name, method_name)) return method.signature_id;
+            }
+        }
+        return null;
+    }
+
+
 
     /// Reserve identity before its definition is available. References may safely
     /// point at this id; lookup starts succeeding only after defineReserved.
@@ -81,14 +155,21 @@ pub const TypeStore = struct {
         type_parameter_count: u32,
         flags: model.FunctionFlags,
     ) !model.TypeId {
+        // Check for structural equality but prevent cross-declaration sharing.
+        // Each function declaration gets its own TypeId even if signatures match structurally.
+        // Each function declaration gets its own immutable signature to prevent cross-declaration contamination
+        const new_signature: model.FunctionSignature = .{
+            .id = undefined,  // id not yet assigned; used only for comparison
+            .parameters = parameters,
+            .return_type = return_type,
+            .type_parameter_count = type_parameter_count,
+            .flags = flags,
+            .declaration_id = null,  // Not a real declaration yet
+        };
+        
         for (self.signatures.items) |signature| {
-            if (signature.return_type == return_type and
-                signature.type_parameter_count == type_parameter_count and
-                signature.flags == flags and
-                parametersEqual(signature.parameters, parameters))
-            {
-                return signature.id;
-            }
+            if (!structurallyEqualSignatures(signature, new_signature)) continue;
+            return signature.id;
         }
 
         const id = try self.reserve();
@@ -104,14 +185,14 @@ pub const TypeStore = struct {
         return id;
     }
 
-    pub fn updateFunctionReturn(self: *TypeStore, id: model.TypeId, return_type: model.TypeId) bool {
-        for (self.signatures.items) |*signature| {
-            if (signature.id != id) continue;
-            if (signature.return_type == return_type) return false;
-            signature.return_type = return_type;
-            return true;
+    /// Returns the TypeId for a function's current signature. Does NOT mutate - 
+    /// to change a function's return type, create a new signature via addFunctionDetailed
+    /// and update the symbol's declared type externally. This prevents shared-state bugs.
+    pub fn lookupFunctionSignature(self: *const TypeStore, id: model.TypeId) ?model.FunctionSignature {
+        for (self.signatures.items) |signature| {
+            if (signature.id == id) return signature;
         }
-        return false;
+        return null;
     }
 
     /// Canonical union rules: flatten, sort, deduplicate, remove never, and let
@@ -176,14 +257,14 @@ pub const TypeStore = struct {
 
     fn stored(self: *const TypeStore, id: model.TypeId) ?*const StoredType {
         if (id < model.next_user_type_id) return null;
-        const index: usize = @intCast(id - model.next_user_type_id);
+        const index: usize = @as(usize, @intCast(id - model.next_user_type_id));
         if (index >= self.records.items.len) return null;
         return &self.records.items[index];
     }
 
     fn storedMut(self: *TypeStore, id: model.TypeId) ?*StoredType {
         if (id < model.next_user_type_id) return null;
-        const index: usize = @intCast(id - model.next_user_type_id);
+        const index: usize = @as(usize, @intCast(id - model.next_user_type_id));
         if (index >= self.records.items.len) return null;
         return &self.records.items[index];
     }
@@ -252,6 +333,22 @@ fn appendSortedUnique(
     while (index < values.items.len and values.items[index] < value) : (index += 1) {}
     if (index < values.items.len and values.items[index] == value) return;
     try values.insert(allocator, index, value);
+}
+
+/// Compare two FunctionSignatures for structural equality (ignoring declaration_id).
+/// Used internally to detect duplicate signatures during interning.
+fn structurallyEqualSignatures(
+    left: model.FunctionSignature, 
+    right: model.FunctionSignature,
+) bool {
+    if (left.return_type == right.return_type and
+        left.type_parameter_count == right.type_parameter_count and
+        left.flags == right.flags and
+        parametersEqual(left.parameters, right.parameters))
+    {
+        return true;
+    }
+    return false;
 }
 
 fn parametersEqual(left: []const model.ParameterType, right: []const model.ParameterType) bool {

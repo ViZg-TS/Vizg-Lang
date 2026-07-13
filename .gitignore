@@ -29,3 +29,5 @@ main_zig
 
 local-test
 local_test/
+vendor
+AUDIT*

@@ -75,8 +75,18 @@ pub const TupleType = struct {
 };
 
 pub const NominalType = struct {
+    /// Unique identifier per class/interface/enum declaration. Prevents structural 
+    /// interning from merging distinct declarations with same name across modules.
     declaration_id: u32,
+    
+    /// Module where this type was declared - enables cross-module identity checking.
+    /// Two types are only equal if they have the same module_id AND declaration_id.
+    module_id: ?u32 = null,
+    
     name: []const u8,
+    
+    // Semantic members stored separately in TypeStore for classes/interfaces
+    // This is populated during class/interface analysis and used by member access lookup
 };
 
 pub const TypeParameterType = struct {
@@ -86,9 +96,47 @@ pub const TypeParameterType = struct {
     default: ?TypeId = null,
 };
 
+
+/// Represents a field in a class or interface declaration.
+pub const ClassField = struct {
+    name: []const u8,
+    type_id: TypeId,
+    is_public: bool = true,
+    is_readonly: bool = false,
+};
+
+/// Represents a method in a class declaration with its full signature.
+pub const ClassMethod = struct {
+    name: []const u8,
+    signature_id: FunctionSignatureId,
+    is_static: bool = false,
+};
+
+/// Complete semantic representation of a class - includes both identity and members.
+pub const ClassSemanticModel = struct {
+    declaration_id: u32,
+    module_id: ?u32,
+    name: []const u8,
+    fields: []const ClassField,
+    methods: []const ClassMethod,
+    constructor_signature: ?FunctionSignatureId = null,
+};
+
+/// Complete semantic representation of an interface - includes member signatures.
+pub const InterfaceSemanticModel = struct {
+    declaration_id: u32,
+    module_id: ?u32,
+    name: []const u8,
+    members: []const ClassField,  // Interfaces have fields/methods as properties
+};
+
 /// Complete signature of a typed function. Stored as an opaque blob; the caller
 /// (typically the binder or module graph) is responsible for its lifetime.
 pub const FunctionSignature = struct {
+    /// Unique identifier per function declaration. Prevents structural interning
+    /// from sharing TypeIds across different functions with identical initial shapes.
+    declaration_id: ?u32 = null,
+    
     id: FunctionSignatureId,
     parameters: []const ParameterType,
     return_type: TypeId,

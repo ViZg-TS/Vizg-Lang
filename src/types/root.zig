@@ -25,9 +25,6 @@ pub const TupleType = model.TupleType;
 pub const NominalType = model.NominalType;
 pub const TypeParameterType = model.TypeParameterType;
 pub const FunctionSignature = model.FunctionSignature;
-/// Alias for the store of function signatures. Re-exported from `model.zig` so that
-/// downstream consumers (e.g., type_collector) can address it as `types.FunctionSignatureStore`.
-pub const FunctionSignatureStore = model.FunctionSignatureStore;
 
 pub const Builtins = model.Builtins;
 pub const TypeStore = type_store.TypeStore;

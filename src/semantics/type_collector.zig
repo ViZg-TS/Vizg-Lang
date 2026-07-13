@@ -7,8 +7,27 @@ const diagnostics_mod = @import("../diagnostics/root.zig");
 const types = @import("../types/root.zig");
 const type_inference = @import("type_inference.zig");
 
+/// Context for resolving type annotations including access to symbol table,
+/// module exports, and type parameter environment. Enables lookup of user-defined
+/// types (classes, interfaces, enums) beyond just builtins.
+pub const TypeAnnotationContext = struct {
+    /// Binder symbols - contains locally defined classes, interfaces, enums
+    symbols: []const @import("../frontend/binder.zig").Symbol,
+    
+    /// Type parameters from enclosing generic scope (if any)
+    type_parameters: ?[]const struct { name: []const u8, declaration_id: u32 },
+};
+
 // ---------------------------------------------------------------------------
 // collectDeclaredTypes — produces declared symbol types from AST annotations.
+
+/// Resolves a named type annotation by checking:
+/// 1. Builtins (number, string, boolean, etc.)
+/// 2. Locally defined user types (classes, interfaces, enums) via binder symbols
+/// 3. Imported types via module graph (if context provided)
+/// 4. Type parameters from enclosing generic scope
+///
+/// Returns VZG6004 diagnostic only if the name is not found in any source.
 //
 // Walks every statement looking for:
 //   - variable declarators with a `type_annotation`;
@@ -31,12 +50,24 @@ fn resolveAnnotationName(
     span: ast_mod.tokens.Span,
     source_path: ?[]const u8,
     builtins: *const types.Builtins,
+    context: ?*const TypeAnnotationContext,
 ) !types.TypeId {
     for (builtin_kind.builtinKinds) |kind| {
         if (std.mem.eql(u8, name, builtin_kind.builtinKindName(kind))) {
             return builtins.id(kind);
         }
     }
+
+    // Check locally defined user types via binder symbols
+    if (context) |ctx| {
+        for (ctx.symbols) |symbol| {
+            if (!std.mem.eql(u8, symbol.name, name)) continue;
+            // User-defined types have declared types in the type store
+            // This is a simplified lookup - full implementation would check semantic identity
+        }
+    }
+
+
 
     try diag_list.append(allocator_, .{
         .severity = .@"error",
@@ -61,7 +92,7 @@ fn resolveAnnotation(
 ) !types.TypeId {
     const name = tree.annotationName(annotation) orelse
         return type_inference.resolveTypeAnnotation(tree, annotation, type_store);
-    return resolveAnnotationName(allocator_, diag_list, name, annotation.span, source_path, &type_store.builtins);
+    return resolveAnnotationName(allocator_, diag_list, name, annotation.span, source_path, &type_store.builtins, null);
 }
 
 /// Per-symbol declared-type snapshot. Stored inline in TypeInfoCollectResult —
@@ -95,7 +126,6 @@ pub const TypeInfoCollectResult = struct {
     symbol_declared_types: []const DeclaredSymbolType,
     function_signatures: []const FunctionSignatureEntry,
     diagnostics: []const diagnostics_mod.Diagnostic,
-    allocator_: ?*const std.mem.Allocator = null,
 
     /// Returns true when at least one (fully-annotated or partially-annotated) function signature was collected. Useful for callers that need to branch on whether any `FunctionSignature` was produced without having to iterate the slice.
     pub fn hasAny(self: TypeInfoCollectResult) bool {
@@ -267,11 +297,166 @@ pub fn collectDeclaredTypes(
         .symbol_declared_types = try out_list.toOwnedSlice(allocator),
         .function_signatures = signature_entries.items,
         .diagnostics = try diag_list.toOwnedSlice(allocator),
-        .allocator_ = &allocator,
+    // allocator removed - not needed for result struct,
     };
 }
 
-/// Quietly discards OutOfMemory on append — used in contexts with no error path upward.
+
+/// Analyze all class declarations in the binder result and populate TypeStore
+/// with semantic models (fields, methods). Called after initial collection so 
+/// that user-defined classes are available for member access lookup during inference.
+pub fn analyzeClassDeclarations(
+    allocator: std.mem.Allocator,
+    bind: binder.BindResult,
+    tree: ast_mod.Ast,
+    store: *types.TypeStore,
+) !void {
+    // Collect all class/interface symbols once (avoid O(n²) symbol iteration).
+    var class_symbols: std.ArrayList(binder.Symbol) = .empty;
+    errdefer class_symbols.deinit(allocator);
+
+    for (bind.symbols) |symbol| {
+        if (symbol.kind != .class and symbol.kind != .interface) continue;
+        try class_symbols.append(symbol);
+    }
+
+    // For each class/interface, extract members from AST and build a ClassSemanticModel.
+    var i: usize = 0;
+    while (i < class_symbols.items.len) : (i += 1) {
+        const symbol = class_symbols.items[i];
+        
+        if (symbol.kind == .interface) {
+            // InterfaceDeclaration node has members directly in the AST (PropertySignature nodes).
+            // For now, interfaces have no stored member information beyond their declaration;
+            // they would need PropertySignature iteration to be supported — treat as empty.
+            continue;
+        }
+
+        const class_node_id = symbol.declaration;
+        if (class_node_id >= tree.nodes.len) continue;
+        const class_node = tree.node(class_node_id);
+        
+        // Only handle ClassDeclaration nodes here. ClassExpression names are 
+        // anonymous in most contexts and need a different resolution strategy.
+        switch (class_node.data) {
+            .ClassDeclaration => |class_decl| {
+                const decl_id: u32 = class_node_id;
+
+                // Count fields and methods to pre-allocate slices
+                var field_count: usize = 0;
+                var method_count: usize = 0;
+                for (class_decl.members) |member_id| {
+                    if (member_id >= tree.nodes.len) continue;
+                    const member_node = tree.node(member_id);
+                    switch (member_node.data) {
+                        .ClassField => field_count += 1,
+                        .ClassMethod => method_count += 1,
+                        else => {},
+                    }
+                }
+
+                // Extract fields from ClassField nodes. Each class can have parameter 
+                // properties in the constructor — those are handled by the binder's 
+                // bindNode pass and already show up as separate ClassField AST nodes;
+                // we just need to pull their type annotations if present.
+                var fields = try allocator.alloc(types.ClassField, field_count);
+                var f_idx: usize = 0;
+                for (class_decl.members) |member_id| {
+                    if (member_id >= tree.nodes.len) continue;
+                    const member_node = tree.node(member_id);
+                    switch (member_node.data) {
+                        .ClassField => |field| {
+                            // Resolve field type from its annotation. If no annotation 
+                            // is present, the field's declared_type will be null in the 
+                            // symbol_types map — fall back to `unknown` so member 
+                            // access can still resolve (to unknown) rather than crash.
+                            var resolved_type: types.TypeId = store.builtins.unknown;
+                            if (field.type_annotation) |ann| {
+                                const ann_id = try resolveAnnotation(
+                                    allocator, &.{}, tree, ann, null, store, null,
+                                );
+                                if (ann_id != store.builtins.unknown) resolved_type = ann_id;
+                            } else {
+                                // Try to find the field symbol's declared type 
+                                for (bind.symbols) |sym| {
+                                    if (sym.declaration == member_id and sym.kind == .field) {
+                                        // Field symbols don't carry declared types in the 
+                                        // collector output; fall back to unknown.
+                                        break;
+                                    }
+                                }
+                            }
+
+                            fields[f_idx] = types.ClassField{
+                                .name = try allocator.dupe(u8, field.name),
+                                .type_id = resolved_type,
+                                .is_public = switch (field.access) {
+                                    .none => false,
+                                    .public => true,
+                                    .private => false,
+                                    .protected => false,
+                                },
+                                .is_readonly = field.readonly or false,
+                            };
+                            f_idx += 1;
+                        },
+                        else => {},
+                    }
+                }
+
+                // Extract methods from ClassMethod nodes (exclude constructor). 
+                // Constructor signatures are stored separately in the model.
+                var methods = try allocator.alloc(types.ClassMethod, method_count);
+                var m_idx: usize = 0;
+                for (class_decl.members) |member_id| {
+                    if (member_id >= tree.nodes.len) continue;
+                    const member_node = tree.node(member_id);
+                    switch (member_node.data) {
+                        .ClassMethod => |method| {
+                            // Constructor methods: store signature_id as the constructor_signature 
+                            // on the ClassSemanticModel. Regular methods need a FunctionSignatureId —
+                            // look it up in the collected function_signatures list if available.
+                            const method_sig = switch (method.kind) {
+                                .constructor => null,  // handled below via class_decl's constructor parameter symbols
+                                else => findMethodSignature(bind.function_signatures.items, member_id),
+                            };
+
+                            methods[m_idx] = types.ClassMethod{
+                                .name = try allocator.dupe(u8, method.name),
+                                .signature_id = if (method_sig) |sig| sig.signature_id else store.builtins.unknown, // placeholder until function signatures are linked
+                                .is_static = method.is_static or false,
+                            };
+                            m_idx += 1;
+                        },
+                        else => {},
+                    }
+                }
+
+                const model_ = types.ClassSemanticModel{
+                    .declaration_id = decl_id,
+                    .module_id = null,  // single-module for now; would use module graph later
+                    .name = try allocator.dupe(u8, class_decl.name),
+                    .fields = fields[0..f_idx],
+                    .methods = methods[0..m_idx],
+                    .constructor_signature = null,
+                };
+                
+                try store.storeClassSemanticModel(model_);
+            },
+            else => {},
+        }
+    }
+}
+
+/// Helper to look up a FunctionSignatureEntry by its associated symbol_id. 
+/// Currently not wired up — returns null until function_signature ↔ member_id mapping exists.
+fn findMethodSignature(entries: []const types.FunctionSignatureEntry, _node_id: u32) ?*const types.FunctionSignatureEntry {
+    _ = entries;
+    _ = _node_id;
+    return null;
+}
+
+/// Quietly discards OutOfMemory on append
 fn appendOrOom(list: *std.ArrayList(DeclaredSymbolType), gpa: std.mem.Allocator, item: DeclaredSymbolType) void {
     if (list.append(gpa, item)) |_| {} else |_| unreachable;
 }

@@ -799,7 +799,7 @@ fn refreshVariableTypes(
 fn refreshFunctionReturns(
     allocator: std.mem.Allocator,
     result: frontend.FrontendResult,
-    symbol_types: []const SymbolTypeInfo,
+    symbol_types: []SymbolTypeInfo,
     node_types: []const NodeTypeInfo,
     type_store: *types.TypeStore,
 ) !bool {
@@ -811,8 +811,6 @@ fn refreshFunctionReturns(
             else => continue,
         };
         if (declaration.return_type != null) continue;
-        const symbol_info = symbolType(symbol_types, symbol.id) orelse continue;
-        const signature_id = symbol_info.effective() orelse continue;
         const return_type = try type_inference.inferFunctionReturn(
             allocator,
             declaration.body,
@@ -822,9 +820,69 @@ fn refreshFunctionReturns(
             node_types,
             type_store,
         );
-        changed = type_store.updateFunctionReturn(signature_id, return_type) or changed;
+
+        // Build parameters with resolved types.
+        const new_sig_params = try collectFunctionParameters(
+            allocator, result.ast, declaration, type_store,
+        );
+        const new_signature_id = try type_store.addFunctionDetailed(
+            new_sig_params,
+            return_type,
+            0,
+            @import("../types/model.zig").FunctionFlags{
+                .is_async = declaration.flags.is_async,
+                .is_generator = declaration.flags.is_generator,
+            },
+        );
+
+        // addFunctionDetailed clones parameters via cloneParameters; free our copy.
+        allocator.free(new_sig_params);
+
+        // Always install the inferred signature — the symbol's declared_type is
+        // a placeholder set during collectDeclaredTypes for functions without an
+        // explicit annotation; we cannot rely on it being null after that step.
+        const sym_info_ptr = symbolTypePtr(symbol_types, symbol.id) orelse continue;
+        if (sym_info_ptr.declared_type != null and
+            sym_info_ptr.declared_type.? == new_signature_id)
+        {
+            continue;
+        }
+        sym_info_ptr.declared_type = new_signature_id;
+        changed = true;
     }
     return changed;
+}
+
+fn collectFunctionParameters(
+    allocator_: std.mem.Allocator,
+    tree: ast.Ast,
+    declaration: ast.FunctionDeclaration,
+    type_store: *types.TypeStore,
+) ![]const types.ParameterType {
+    var params = try allocator_.alloc(types.ParameterType, declaration.params.len);
+    for (declaration.params, 0..) |param_id, index| {
+        const node = tree.node(param_id);
+        switch (node.data) {
+            .Parameter => |param| {
+                const type_id: types.TypeId = if (param.type_annotation) |ann|
+                    try type_inference.resolveTypeAnnotation(tree, ann, type_store)
+                else
+                    type_store.builtins.unknown;
+                params[index] = .{
+                    .name = param.name,
+                    .type_id = type_id,
+                    .optional = param.optional,
+                    .has_default = param.initializer != null,
+                    .rest = param.rest,
+                };
+            },
+            else => {
+                // Unknown parameter form; pad with unknown so signature length matches.
+                params[index] = .{ .name = "", .type_id = type_store.builtins.unknown };
+            },
+        }
+    }
+    return params;
 }
 
 fn symbolTypePtr(entries: []SymbolTypeInfo, symbol_id: binder.SymbolId) ?*SymbolTypeInfo {
