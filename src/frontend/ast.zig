@@ -175,11 +175,17 @@ pub const VariableDeclarator = struct {
     type_annotation: ?TypeAnnotation = null,
 };
 
+pub const FunctionFlags = struct {
+    is_async: bool = false,
+    is_generator: bool = false,
+};
+
 pub const FunctionDeclaration = struct {
     name: []const u8,
     params: []const NodeId,
     body: NodeId,
     exported: bool = false,
+    flags: FunctionFlags = .{},
     return_type: ?TypeAnnotation = null,
 };
 
@@ -187,14 +193,14 @@ pub const FunctionExpression = struct {
     name: ?[]const u8 = null,
     params: []const NodeId,
     body: NodeId,
-    is_async: bool = false,
+    flags: FunctionFlags = .{},
     return_type: ?TypeAnnotation = null,
 };
 
 pub const ArrowFunctionExpression = struct {
     params: []const NodeId,
     body: NodeId,
-    is_async: bool = false,
+    flags: FunctionFlags = .{},
     expression_body: bool,
     return_type: ?TypeAnnotation = null,
 };
@@ -237,6 +243,7 @@ pub const ClassMethod = struct {
     is_static: bool = false,
     access: AccessModifier = .none,
     kind: ClassMethodKind = .method,
+    flags: FunctionFlags = .{},
 };
 
 pub const SpreadElement = struct {

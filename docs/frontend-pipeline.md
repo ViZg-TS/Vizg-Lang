@@ -188,6 +188,10 @@ The exact pairs `import.meta` and `new.target` use `MetaProperty` nodes rather
 than identifiers or member access. Normal postfix parsing continues afterward,
 so `import.meta.url` is a member access whose object is the meta-property.
 
+All function-like AST nodes share `FunctionFlags`. Async declarations, named or
+anonymous default exports, expressions, arrows, object methods, and class methods
+therefore preserve the same metadata contract.
+
 Example CLI shape:
 
 ```txt

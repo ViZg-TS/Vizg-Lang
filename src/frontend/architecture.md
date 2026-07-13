@@ -32,6 +32,8 @@ Los templates con interpolación se dividen en `TemplateHead`, `TemplateMiddle` 
 
 Los pares exactos `import.meta` y `new.target` usan `MetaProperty`, sin referencias de identificador para `import`, `meta`, `new` ni `target`. El postfix normal puede continuar sobre el nodo.
 
+Declaraciones, expresiones, arrows y métodos comparten `FunctionFlags`; las formas `async` conservan la misma metadata sin reinterpretar métodos de clase como fields.
+
 El scanner decide contextualmente si `/` inicia un `RegExpLiteral` o representa división. El AST conserva el patrón, las flags válidas y el span del literal completo.
 
 Las expresiones unarias prefijas (`!`, `~`, `-`, `+`, `typeof`, `void`, `delete`, `await`) se agrupan antes que los operadores multiplicativos. La aserción no nula `value!` sigue siendo una expresión postfija distinta.

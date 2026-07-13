@@ -82,7 +82,11 @@ const Parser = struct {
         if (self.atTypeAliasDeclaration()) return try self.parseTypeAliasDeclaration();
         if (self.atInterfaceDeclaration()) return try self.parseInterfaceDeclaration();
         if (self.at(.Keyword_class)) return try self.parseClassDeclaration();
-        if (self.at(.Keyword_function)) return try self.parseFunctionDeclaration(false);
+        if (self.at(.Keyword_function)) return try self.parseFunctionDeclaration(false, false);
+        if (self.atIdentifierText("async") and self.peek(1).kind == .Keyword_function) {
+            _ = self.advance();
+            return try self.parseFunctionDeclaration(false, true);
+        }
         if (self.at(.LBrace)) return try self.parseBlockStatement();
         if (self.at(.Keyword_return)) return try self.parseReturnStatement();
         if (self.at(.Keyword_throw)) return try self.parseThrowStatement();
@@ -349,8 +353,10 @@ const Parser = struct {
             });
         }
 
-        if (self.at(.Keyword_function)) {
-            const function = try self.parseFunctionDeclaration(true);
+        const async_function = self.atIdentifierText("async") and self.peek(1).kind == .Keyword_function;
+        if (self.at(.Keyword_function) or async_function) {
+            if (async_function) _ = self.advance();
+            const function = try self.parseFunctionDeclaration(true, async_function);
             return self.addNode(.{
                 .span = joinSpans(start, self.nodes.items[@intCast(function)].span),
                 .data = .{ .ExportDeclaration = .{ .kind = .declaration, .declaration = function } },
@@ -378,8 +384,20 @@ const Parser = struct {
 
             // export default function <name>() {} — parse as a named
             // FunctionDeclaration and tag the wrapper with default_name.
-            if (self.at(.Keyword_function)) {
-                const function_id = try self.parseFunctionDeclaration(true);
+            const async_default_function = self.atIdentifierText("async") and self.peek(1).kind == .Keyword_function;
+            if (self.at(.Keyword_function) or async_default_function) {
+                const async_start: ?Token = if (async_default_function) self.advance() else null;
+                const function_token = self.current();
+                if (self.peek(1).kind == .LParen) {
+                    _ = self.advance();
+                    const function_id = try self.parseFunctionExpression(async_start orelse function_token, async_default_function);
+                    const function_node = self.nodes.items[@intCast(function_id)];
+                    return self.addNode(.{
+                        .span = joinSpans(start, function_node.span),
+                        .data = .{ .ExportDeclaration = .{ .kind = .default_expression, .expression = function_id } },
+                    });
+                }
+                const function_id = try self.parseFunctionDeclaration(true, async_default_function);
                 const func_node = self.nodes.items[@intCast(function_id)];
                 return self.addNode(.{
                     .span = joinSpans(start, func_node.span),
@@ -514,7 +532,7 @@ const Parser = struct {
         return false;
     }
 
-    fn parseFunctionDeclaration(self: *Parser, exported: bool) anyerror!NodeId {
+    fn parseFunctionDeclaration(self: *Parser, exported: bool, is_async: bool) anyerror!NodeId {
         const start = self.expect(.Keyword_function, "expected function").span;
         const name = self.expectIdentifierLike("expected function name").lexeme;
         _ = self.expect(.LParen, "expected (");
@@ -537,6 +555,7 @@ const Parser = struct {
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
                 .exported = exported,
+                .flags = .{ .is_async = is_async },
                 .return_type = return_type,
             } },
         });
@@ -563,7 +582,7 @@ const Parser = struct {
                 .name = name,
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
-                .is_async = is_async,
+                .flags = .{ .is_async = is_async },
                 .return_type = return_type,
             } },
         });
@@ -616,8 +635,16 @@ const Parser = struct {
         const start = self.current().span;
         var access: ast_mod.AccessModifier = .none;
         var is_static = false;
+        var is_async = false;
         while (self.at(.Identifier)) {
             if (self.atIdentifierText("static")) is_static = true else if (self.atIdentifierText("public")) access = .public else if (self.atIdentifierText("private")) access = .private else if (self.atIdentifierText("protected")) access = .protected else break;
+            _ = self.advance();
+        }
+        if (self.atIdentifierText("async") and
+            (self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and
+            self.peek(2).kind == .LParen)
+        {
+            is_async = true;
             _ = self.advance();
         }
         const name_token = self.expectIdentifierLike("expected class member name");
@@ -641,6 +668,7 @@ const Parser = struct {
                     .is_static = is_static,
                     .access = access,
                     .kind = if (std.mem.eql(u8, name_token.lexeme, "constructor")) .constructor else .method,
+                    .flags = .{ .is_async = is_async },
                 } },
             });
         }
@@ -1409,7 +1437,7 @@ const Parser = struct {
             .data = .{ .ArrowFunctionExpression = .{
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
-                .is_async = is_async,
+                .flags = .{ .is_async = is_async },
                 .expression_body = expression_body,
                 .return_type = return_type,
             } },
@@ -1836,7 +1864,7 @@ const Parser = struct {
             .data = .{ .FunctionExpression = .{
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
-                .is_async = is_async,
+                .flags = .{ .is_async = is_async },
                 .return_type = return_type,
             } },
         });

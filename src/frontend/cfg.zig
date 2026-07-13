@@ -53,6 +53,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
                 const declaration = export_decl.declaration;
                 try collectFunctions(allocator, tree, declaration, functions);
             }
+            if (export_decl.expression != ast_mod.invalid_node) try collectFunctions(allocator, tree, export_decl.expression, functions);
         },
         .FunctionDeclaration => |function_decl| {
             try functions.append(allocator, .{
@@ -61,6 +62,31 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
                 .graph = try buildFunctionGraph(allocator, tree, function_decl.body),
             });
         },
+        .FunctionExpression => |function_expr| {
+            try functions.append(allocator, .{
+                .function = node_id,
+                .name = function_expr.name orelse "<anonymous>",
+                .graph = try buildFunctionGraph(allocator, tree, function_expr.body),
+            });
+        },
+        .ArrowFunctionExpression => |arrow| {
+            if (!arrow.expression_body) try functions.append(allocator, .{
+                .function = node_id,
+                .name = "<arrow>",
+                .graph = try buildFunctionGraph(allocator, tree, arrow.body),
+            });
+        },
+        .ClassDeclaration => |class_decl| for (class_decl.members) |member| try collectFunctions(allocator, tree, member, functions),
+        .ClassExpression => |class_expr| for (class_expr.members) |member| try collectFunctions(allocator, tree, member, functions),
+        .ClassMethod => |method| {
+            try functions.append(allocator, .{
+                .function = node_id,
+                .name = method.name,
+                .graph = try buildFunctionGraph(allocator, tree, method.body),
+            });
+        },
+        .VariableDeclaration => |declaration| for (declaration.declarations) |item| try collectFunctions(allocator, tree, item, functions),
+        .VariableDeclarator => |declarator| if (declarator.init) |init| try collectFunctions(allocator, tree, init, functions),
         .BlockStatement => |block| {
             for (block.statements) |statement| try collectFunctions(allocator, tree, statement, functions);
         },

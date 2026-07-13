@@ -1749,7 +1749,7 @@ test "frontend suite: arrow functions preserve forms annotations nesting and pre
     try std.testing.expectEqualStrings("number", parsed.ast.annotationName(arrows[2].return_type.?).?);
     try std.testing.expect(!arrows[3].expression_body);
     try expectNodeTag(parsed.ast, arrows[3].body, .BlockStatement);
-    try std.testing.expect(arrows[4].is_async);
+    try std.testing.expect(arrows[4].flags.is_async);
     try expectNodeTag(parsed.ast, arrows[5].body, .ArrowFunctionExpression);
     try expectNodeTag(parsed.ast, arrows[6].body, .BinaryExpression);
     const addition = parsed.ast.node(arrows[6].body).data.BinaryExpression;
@@ -1809,7 +1809,7 @@ test "frontend suite: function expressions preserve anonymous named async and ne
     try std.testing.expectEqualStrings("inner", named.name.?);
     try std.testing.expectEqualStrings("number", parsed.ast.annotationName(parsed.ast.node(named.params[0]).data.Parameter.type_annotation.?).?);
     try std.testing.expectEqualStrings("number", parsed.ast.annotationName(named.return_type.?).?);
-    try std.testing.expect(asynchronous.is_async);
+    try std.testing.expect(asynchronous.flags.is_async);
     try expectNodeTag(parsed.ast, nested_arg, .FunctionExpression);
 }
 
@@ -2336,8 +2336,8 @@ test "frontend suite: extended object properties preserve kinds and traversal" {
     try expectNodeTag(parsed.ast, object.properties[3].value, .SpreadElement);
 
     for (object.properties[4..]) |property| try expectNodeTag(parsed.ast, property.value, .FunctionExpression);
-    try std.testing.expect(!parsed.ast.node(object.properties[4].value).data.FunctionExpression.is_async);
-    try std.testing.expect(parsed.ast.node(object.properties[5].value).data.FunctionExpression.is_async);
+    try std.testing.expect(!parsed.ast.node(object.properties[4].value).data.FunctionExpression.flags.is_async);
+    try std.testing.expect(parsed.ast.node(object.properties[5].value).data.FunctionExpression.flags.is_async);
     try std.testing.expectEqual(@as(usize, 0), parsed.ast.node(object.properties[6].value).data.FunctionExpression.params.len);
     try std.testing.expectEqual(@as(usize, 1), parsed.ast.node(object.properties[7].value).data.FunctionExpression.params.len);
 
@@ -2871,6 +2871,39 @@ test "frontend suite: rest parameter must be last" {
         try std.testing.expectEqual(diagnostics.DiagnosticCode.unexpected_token, diagnostic.code);
         try std.testing.expectEqualStrings("rest parameter must be last", diagnostic.message);
     }
+}
+
+test "frontend suite: function flags cover async declarations exports expressions arrows and methods" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const parsed = try parseOk(allocator,
+        \\async function load() {}
+        \\export async function save() {}
+        \\export default async function named() {}
+        \\export default async function () {}
+        \\const expression = async function () {};
+        \\const arrow = async () => {};
+        \\class Worker { async run() {} async = 1; }
+    );
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expect(parsed.ast.node(statements[0]).data.FunctionDeclaration.flags.is_async);
+    try std.testing.expect(parsed.ast.node(parsed.ast.node(statements[1]).data.ExportDeclaration.declaration).data.FunctionDeclaration.flags.is_async);
+    const named_export = parsed.ast.node(statements[2]).data.ExportDeclaration;
+    try std.testing.expectEqualStrings("named", named_export.default_name.?);
+    try std.testing.expect(parsed.ast.node(named_export.declaration).data.FunctionDeclaration.flags.is_async);
+    const anonymous_export = parsed.ast.node(statements[3]).data.ExportDeclaration;
+    try std.testing.expect(anonymous_export.default_name == null);
+    try std.testing.expect(parsed.ast.node(anonymous_export.expression).data.FunctionExpression.flags.is_async);
+    const expression_decl = parsed.ast.node(statements[4]).data.VariableDeclaration;
+    const expression = parsed.ast.node(parsed.ast.node(expression_decl.declarations[0]).data.VariableDeclarator.init.?).data.FunctionExpression;
+    try std.testing.expect(expression.flags.is_async);
+    const arrow_decl = parsed.ast.node(statements[5]).data.VariableDeclaration;
+    const arrow = parsed.ast.node(parsed.ast.node(arrow_decl.declarations[0]).data.VariableDeclarator.init.?).data.ArrowFunctionExpression;
+    try std.testing.expect(arrow.flags.is_async);
+    const class = parsed.ast.node(statements[6]).data.ClassDeclaration;
+    try std.testing.expect(parsed.ast.node(class.members[0]).data.ClassMethod.flags.is_async);
+    try std.testing.expectEqualStrings("async", parsed.ast.node(class.members[1]).data.ClassField.name);
 }
 
 test "frontend suite: color_art.ts fixture — 0 diagnostics smoke test" {
