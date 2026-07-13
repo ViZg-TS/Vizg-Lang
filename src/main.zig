@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
-    const result = frontend.analyze(arena, .{
+    var semantic_result = semantics.analyzeSource(std.heap.page_allocator, .{
         .path = path,
         .text = text,
         .kind = .module,
@@ -129,22 +129,16 @@ pub fn main(init: std.process.Init) !void {
         .collect_comments = false,
         .recover_errors = true,
     }) catch |err| {
-        try stderr.print("{s}: frontend error: {s}\n", .{ path, @errorName(err) });
+        try stderr.print("{s}: semantic analysis error: {s}\n", .{ path, @errorName(err) });
         try stderr.flush();
         std.process.exit(1);
     };
+    defer semantic_result.deinit();
+    const result = semantic_result.frontend;
 
     switch (command) {
         .check => blk: {
-            // Run the type checker and merge its diagnostics with collector ones.
-            const info = semantics.analyzeFrontendResult(arena, result) catch |err| {
-                try stderr.print("{s}: type error: {s}\n", .{ result.source.path, @errorName(err) });
-                try stderr.flush();
-                std.process.exit(1);
-            };
-            const all_diags = info.diagnostics;
-            // Inline printCheck using merged diagnostics so we can keep the
-            // existing printCheck signature that takes a FrontendResult.
+            const all_diags = semantic_result.diagnostics;
             const counts = countDiagnostics(all_diags);
             try stdout.print("checked: {s}\n", .{result.source.path});
             try stdout.print("source kind: {s}\n", .{@tagName(result.source.kind)});
@@ -160,15 +154,11 @@ pub fn main(init: std.process.Init) !void {
         .references, .refs => try printReferences(stdout, result.source.path, result.bind, result.resolve, result.diagnostics),
         .cfg => try printCfg(stdout, result.ast, result.cfgs),
         .types => {
-            const info = semantics.analyzeFrontendResult(arena, result) catch |err| {
-                try stderr.print("{s}: types error: {s}\n", .{ path, @errorName(err) });
-                std.process.exit(1);
-            };
+            const info = semantic_result.type_info;
             const bind_sym = result.bind.symbols;
-            try printTypes(stdout, path, info, bind_sym, result.ast);
+            try printTypes(stdout, path, info, bind_sym, result.ast, &semantic_result.type_store.builtins);
 
-            // Exit non-zero when semantic/type diagnostics contain errors.
-            if (hasErrors(info.diagnostics)) {
+            if (hasErrors(semantic_result.diagnostics)) {
                 try stdout.flush();
                 std.process.exit(1);
             }
@@ -1235,25 +1225,10 @@ test "printModules emits deterministic shape with module ids and status labels" 
     try std.testing.expect(std.mem.indexOf(u8, out, "\nDiagnostics\n") != null);
 }
 
-/// Returns the canonical type name for a TypeId drawn from
-/// `types_pkg.builtinKinds_static`. Falls back to "<unknown>".
-fn builtinNameFromId(type_id: types_pkg.TypeId) []const u8 {
-    const kinds = types_pkg.builtinKinds_static;
-    inline for (kinds) |kind| {
-        if (types_pkg.builtinKindTypeId(kind) == type_id) {
-            return switch (kind) {
-                .number => "number",
-                .string => "string",
-                .boolean => "boolean",
-                .null_ => "null",
-                .undefined => "undefined",
-                .void => "void",
-                .unknown => "unknown",
-                .any => "any",
-            };
-        }
-    }
-    return "<unknown>";
+/// Returns the canonical builtin name for a TypeId in this semantic context.
+fn builtinNameFromId(type_id: types_pkg.TypeId, builtins: *const types_pkg.Builtins) []const u8 {
+    const kind = builtins.kindFor(type_id) orelse return "<unknown>";
+    return types_pkg.builtinKindName(kind);
 }
 
 fn printTypes(
@@ -1262,14 +1237,15 @@ fn printTypes(
     info: semantics.TypeInfo,
     bind_symbols: []const binder.Symbol,
     tree: ast_mod.Ast,
+    builtins: *const types_pkg.Builtins,
 ) !void {
     try writer.print("Types\n", .{});
 
     // Symbols — declared / inferred types per symbol.
     for (info.symbols, 0..) |sym, i| {
         const name = symbolNameFromSlice(bind_symbols, sym.symbol_id);
-        const decl_str = if (sym.declared_type) |t| builtinNameFromId(t) else "null";
-        const infer_str = if (sym.inferred_type) |t| builtinNameFromId(t) else "null";
+        const decl_str = if (sym.declared_type) |t| builtinNameFromId(t, builtins) else "null";
+        const infer_str = if (sym.inferred_type) |t| builtinNameFromId(t, builtins) else "null";
         const i_u32: u32 = @intCast(i);
         try writer.print(
             "  symbol {d} name=\"{s}\" declared={s} inferred={s}\n",
@@ -1285,7 +1261,7 @@ fn printTypes(
         for (info.nodes, 0..) |entry, i| {
             _ = i; // node_id field is the primary key.
             const kind_name = nodeKindName(tree, entry.node_id);
-            const type_str = builtinNameFromId(entry.type_id);
+            const type_str = builtinNameFromId(entry.type_id, builtins);
             try writer.print("  node {d} {s} type={s}\n", .{
                 entry.node_id, kind_name, type_str,
             });
