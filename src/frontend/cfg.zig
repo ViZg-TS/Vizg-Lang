@@ -191,6 +191,10 @@ const GraphBuilder = struct {
                 return null;
             },
             .LabeledStatement => |labeled| return self.buildLabeledStatement(current, labeled),
+            .DebuggerStatement => {
+                try self.addStatement(current, statement);
+                return current;
+            },
             .BreakStatement => |break_statement| {
                 try self.addStatement(current, statement);
                 const target = if (break_statement.label) |label|

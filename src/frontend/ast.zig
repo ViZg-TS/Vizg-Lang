@@ -263,6 +263,8 @@ pub const ThrowStatement = struct {
     argument: NodeId,
 };
 
+pub const DebuggerStatement = struct {};
+
 pub const TryStatement = struct {
     block: NodeId,
     handler: ?NodeId,
@@ -461,6 +463,7 @@ pub const NodeData = union(enum) {
     SpreadElement: SpreadElement,
     ReturnStatement: ReturnStatement,
     ThrowStatement: ThrowStatement,
+    DebuggerStatement: DebuggerStatement,
     TryStatement: TryStatement,
     CatchClause: CatchClause,
     FinallyClause: FinallyClause,

@@ -279,7 +279,7 @@ const Binder = struct {
                 try self.bindNode(catch_clause.body, catch_scope);
             },
             .FinallyClause => |finally_clause| try self.bindNode(finally_clause.body, scope),
-            .BreakStatement, .ContinueStatement => {},
+            .BreakStatement, .ContinueStatement, .DebuggerStatement => {},
             .LabeledStatement => |labeled| try self.bindNode(labeled.body, scope),
             .ExpressionStatement => |statement| try self.bindNode(statement.expression, scope),
             .TemplateExpression => |template| {

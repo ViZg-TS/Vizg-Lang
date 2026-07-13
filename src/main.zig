@@ -435,6 +435,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try writer.print("ThrowStatement #{} argument=#{} {}..{}\n", .{ node_id, statement.argument, node.span.start, node.span.end });
             if (statement.argument != ast_mod.invalid_node) try printAstNode(writer, tree, statement.argument, depth + 1);
         },
+        .DebuggerStatement => try writer.print("DebuggerStatement #{} {}..{}\n", .{ node_id, node.span.start, node.span.end }),
         .TryStatement => |statement| {
             try writer.print("TryStatement #{} block=#{}", .{ node_id, statement.block });
             if (statement.handler) |handler| try writer.print(" handler=#{}", .{handler}) else try writer.writeAll(" handler=null");
@@ -1301,6 +1302,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .SpreadElement => return "SpreadElement",
         .ReturnStatement => return "ReturnStatement",
         .ThrowStatement => return "ThrowStatement",
+        .DebuggerStatement => return "DebuggerStatement",
         .TryStatement => return "TryStatement",
         .CatchClause => return "CatchClause",
         .FinallyClause => return "FinallyClause",

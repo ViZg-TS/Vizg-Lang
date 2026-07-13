@@ -96,6 +96,8 @@ const Parser = struct {
         if (self.at(.LBrace)) return try self.parseBlockStatement();
         if (self.at(.Keyword_return)) return try self.parseReturnStatement();
         if (self.at(.Keyword_throw)) return try self.parseThrowStatement();
+        if (self.at(.Keyword_debugger)) return try self.parseDebuggerStatement();
+        if (self.at(.Keyword_with)) return try self.parseUnsupportedWithStatement();
         if (self.at(.Keyword_try)) return try self.parseTryStatement();
         if (self.at(.Keyword_break)) return try self.parseLoopControlStatement(.Keyword_break);
         if (self.at(.Keyword_continue)) return try self.parseLoopControlStatement(.Keyword_continue);
@@ -1084,6 +1086,28 @@ const Parser = struct {
             .span = joinSpans(start, end),
             .data = .{ .ThrowStatement = .{ .argument = argument } },
         });
+    }
+
+    fn parseDebuggerStatement(self: *Parser) !NodeId {
+        const start = self.expect(.Keyword_debugger, "expected debugger").span;
+        _ = self.eat(.Semicolon);
+        return self.addNode(.{
+            .span = joinSpans(start, self.previousOrCurrent().span),
+            .data = .{ .DebuggerStatement = .{} },
+        });
+    }
+
+    fn parseUnsupportedWithStatement(self: *Parser) anyerror!?NodeId {
+        const start = self.advance();
+        self.reportAt(start, "with statements are not supported", .unsupported_syntax);
+        if (self.eat(.LParen)) {
+            _ = try self.parseExpression();
+            _ = self.expect(.RParen, "expected ')' after with object");
+        } else {
+            self.report("expected '(' after with", .expected_token);
+        }
+        _ = try self.parseStatement();
+        return null;
     }
 
     fn parseTryStatement(self: *Parser) anyerror!NodeId {
@@ -3280,4 +3304,21 @@ test "parser diagnoses invalid duplicate unknown and cross-function labels" {
     try std.testing.expectEqualStrings("unknown label", parsed.diagnostics[2].message);
     try std.testing.expectEqualStrings("unknown label", parsed.diagnostics[3].message);
     try std.testing.expectEqual(@as(usize, 4), parsed.ast.node(parsed.ast.root).data.Program.statements.len);
+}
+
+test "parser builds debugger statements and rejects with precisely" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, "debugger; with (object) { action(); } after();", true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 1), parsed.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.unsupported_syntax, parsed.diagnostics[0].code);
+    try std.testing.expectEqualStrings("with statements are not supported", parsed.diagnostics[0].message);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 2), statements.len);
+    _ = parsed.ast.node(statements[0]).data.DebuggerStatement;
+    _ = parsed.ast.node(statements[1]).data.ExpressionStatement;
 }
