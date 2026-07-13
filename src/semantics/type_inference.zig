@@ -173,6 +173,13 @@ pub fn inferLiteralNodeTypes(
                 _ = try stack.append(allocator, bin.left);
                 _ = try stack.append(allocator, bin.right);
             },
+            .SequenceExpression => |sequence| {
+                var index = sequence.expressions.len;
+                while (index > 0) {
+                    index -= 1;
+                    try stack.append(allocator, sequence.expressions[index]);
+                }
+            },
             .ConditionalExpression => |conditional| {
                 _ = try stack.append(allocator, conditional.condition);
                 _ = try stack.append(allocator, conditional.consequent);

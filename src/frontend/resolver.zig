@@ -179,6 +179,9 @@ const Resolver = struct {
                 try self.resolveNode(binary.left, scope);
                 try self.resolveNode(binary.right, scope);
             },
+            .SequenceExpression => |sequence| {
+                for (sequence.expressions) |expression| try self.resolveNode(expression, scope);
+            },
             .ConditionalExpression => |conditional| {
                 try self.resolveNode(conditional.condition, scope);
                 try self.resolveNode(conditional.consequent, scope);

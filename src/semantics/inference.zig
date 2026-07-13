@@ -104,6 +104,11 @@ fn classifyInferred(expr_id: ast_mod.NodeId, tree: *const ast_mod.Ast, snapshot:
             // Resolve callee name → find function declaration → return type.
             _ = call;
         },
+        .SequenceExpression => |sequence| {
+            if (sequence.expressions.len > 0) {
+                try classifyInferred(sequence.expressions[sequence.expressions.len - 1], tree, snapshot);
+            }
+        },
         else => {},
     }
 }

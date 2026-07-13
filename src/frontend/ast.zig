@@ -304,6 +304,10 @@ pub const BinaryExpression = struct {
     right: NodeId,
 };
 
+pub const SequenceExpression = struct {
+    expressions: []const NodeId,
+};
+
 pub const AssignmentExpression = struct {
     operator: tokens.TokenType,
     left: NodeId,
@@ -429,6 +433,7 @@ pub const NodeData = union(enum) {
     NonNullExpression: NonNullExpression,
     UnaryExpression: UnaryExpression,
     BinaryExpression: BinaryExpression,
+    SequenceExpression: SequenceExpression,
     ConditionalExpression: ConditionalExpression,
     UpdateExpression: UpdateExpression,
     AssignmentExpression: AssignmentExpression,

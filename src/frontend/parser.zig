@@ -363,7 +363,7 @@ const Parser = struct {
                 });
             }
 
-            const expression = try self.parseExpression();
+            const expression = try self.parseAssignmentExpression();
             const expression_node = self.nodes.items[@intCast(expression)];
             const name: ?[]const u8 = switch (expression_node.data) {
                 .Identifier => |identifier| identifier.name,
@@ -935,7 +935,7 @@ const Parser = struct {
             const name = self.expectIdentifierLike("expected variable name");
             const type_annotation: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
             while (!self.at(.Equal) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) _ = self.advance();
-            const init = if (self.eat(.Equal)) try self.parseExpression() else null;
+            const init = if (self.eat(.Equal)) try self.parseAssignmentExpression() else null;
             try declarations.append(self.allocator, try self.addNode(.{
                 .span = joinSpans(name.span, self.previousOrCurrent().span),
                 .data = .{ .VariableDeclarator = .{ .name = name.lexeme, .init = init, .type_annotation = type_annotation } },
@@ -1238,7 +1238,21 @@ const Parser = struct {
             if (self._depth > 0) self._depth -= 1;
         }
 
-        return self.parseAssignmentExpression();
+        const first = try self.parseAssignmentExpression();
+        if (!self.eat(.Comma)) return first;
+
+        var expressions: std.ArrayList(NodeId) = .empty;
+        errdefer expressions.deinit(self.allocator);
+        try expressions.append(self.allocator, first);
+        while (true) {
+            try expressions.append(self.allocator, try self.parseAssignmentExpression());
+            if (!self.eat(.Comma)) break;
+        }
+        const last = expressions.items[expressions.items.len - 1];
+        return self.addNode(.{
+            .span = joinSpans(self.nodes.items[@intCast(first)].span, self.nodes.items[@intCast(last)].span),
+            .data = .{ .SequenceExpression = .{ .expressions = try expressions.toOwnedSlice(self.allocator) } },
+        });
     }
 
     fn binaryPrecedence(kind: TokenType) ?u8 {
@@ -1695,7 +1709,7 @@ const Parser = struct {
                 const computed_key = try self.parseExpression();
                 const key_end = self.expect(.RBracket, "expected ]");
                 _ = self.expect(.Colon, "expected :");
-                const value = try self.parseExpression();
+                const value = try self.parseAssignmentExpression();
                 try properties.append(self.allocator, .{
                     .kind = .computed,
                     .key_span = joinSpans(key_start.span, key_end.span),
@@ -1772,7 +1786,7 @@ const Parser = struct {
                 });
             } else {
                 _ = self.expect(.Colon, "expected :");
-                const value = try self.parseExpression();
+                const value = try self.parseAssignmentExpression();
                 try properties.append(self.allocator, .{
                     .kind = .key_value,
                     .key = key,
@@ -1826,7 +1840,7 @@ const Parser = struct {
             const elem = if (self.at(.Spread)) blk: {
                 const spread_token = self.advance();
                 break :blk try self.parseSpreadElement(spread_token);
-            } else try self.parseExpression();
+            } else try self.parseAssignmentExpression();
             try elements.append(self.allocator, elem);
             _ = self.eat(.Comma); // trailing comma allowed by spec
         }
@@ -2088,7 +2102,7 @@ const Parser = struct {
             const argument = if (self.at(.Spread)) blk: {
                 const spread_token = self.advance();
                 break :blk try self.parseSpreadElement(spread_token);
-            } else try self.parseExpression();
+            } else try self.parseAssignmentExpression();
             try args.append(self.allocator, argument);
             _ = self.eat(.Comma);
         }
@@ -2312,6 +2326,53 @@ test "parser builds prefix unary expressions with correct precedence" {
     const postfix_decl = parsed.ast.node(statements[10]).data.VariableDeclaration;
     const postfix_init = parsed.ast.node(postfix_decl.declarations[0]).data.VariableDeclarator.init.?;
     try std.testing.expectEqual(.NonNullExpression, std.meta.activeTag(parsed.ast.node(postfix_init).data));
+}
+
+test "parser preserves sequence expressions and structural commas" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\a = 1, b = 2, a + b;
+        \\for (i = 0, j = 10; ok; i++, j--) {}
+        \\fn(a, b);
+        \\const array = [a, b];
+        \\const object = { a: x, b: y };
+        \\let first = 1, second = 2;
+        \\const grouped = (a, b);
+    ;
+    const scan = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const top_sequence_id = parsed.ast.node(statements[0]).data.ExpressionStatement.expression;
+    const top_sequence = parsed.ast.node(top_sequence_id).data.SequenceExpression;
+    try std.testing.expectEqual(@as(usize, 3), top_sequence.expressions.len);
+
+    const loop = parsed.ast.node(statements[1]).data.ForStatement;
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(loop.init.?).data.SequenceExpression.expressions.len);
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(loop.update.?).data.SequenceExpression.expressions.len);
+
+    const call_id = parsed.ast.node(statements[2]).data.ExpressionStatement.expression;
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(call_id).data.CallExpression.arguments.len);
+
+    const array_decl = parsed.ast.node(statements[3]).data.VariableDeclaration;
+    const array_init = parsed.ast.node(array_decl.declarations[0]).data.VariableDeclarator.init.?;
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(array_init).data.ArrayExpression.elements.len);
+
+    const object_decl = parsed.ast.node(statements[4]).data.VariableDeclaration;
+    const object_init = parsed.ast.node(object_decl.declarations[0]).data.VariableDeclarator.init.?;
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(object_init).data.ObjectExpression.properties.len);
+
+    const variable_decl = parsed.ast.node(statements[5]).data.VariableDeclaration;
+    try std.testing.expectEqual(@as(usize, 2), variable_decl.declarations.len);
+
+    const grouped_decl = parsed.ast.node(statements[6]).data.VariableDeclaration;
+    const grouped_init = parsed.ast.node(grouped_decl.declarations[0]).data.VariableDeclarator.init.?;
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(grouped_init).data.SequenceExpression.expressions.len);
 }
 
 test "parser groups exponentiation shifts and bitwise operators" {

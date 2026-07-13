@@ -12,6 +12,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Added
 
+- Comma expressions now produce ordered `SequenceExpression` AST nodes in full-expression positions while preserving structural commas in arguments, arrays, objects, and declarations.
 - Targeted `VZG2004`-`VZG2006` diagnostics and bounded parser recovery for intentionally unsupported decorators, private fields, namespaces, JSX/TSX, and advanced, mapped, or conditional TypeScript types.
 - Organized valid/invalid syntax fixture corpus covering Syntax Coverage v2, with expected parser-code contracts and full-token-consumption checks integrated into `zig build test`.
 - Numeric literal scanning now validates decimal, exponent, radix, separator, and BigInt forms as complete tokens; malformed forms report one stable `VZG1004` span, and arbitrarily long spellings remain overflow-safe scan-only metadata.

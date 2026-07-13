@@ -474,6 +474,10 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, expr.left, depth + 1);
             try printAstNode(writer, tree, expr.right, depth + 1);
         },
+        .SequenceExpression => |expr| {
+            try writer.print("SequenceExpression #{} expressions={} {}..{}\n", .{ node_id, expr.expressions.len, node.span.start, node.span.end });
+            for (expr.expressions) |expression| try printAstNode(writer, tree, expression, depth + 1);
+        },
         .ConditionalExpression => |expr| {
             try writer.print("ConditionalExpression #{} condition=#{} consequent=#{} alternate=#{} {}..{}\n", .{ node_id, expr.condition, expr.consequent, expr.alternate, node.span.start, node.span.end });
             try printAstNode(writer, tree, expr.condition, depth + 1);
@@ -1279,6 +1283,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .AsExpression => return "AsExpression",
         .MemberExpression => return "MemberExpression",
         .BinaryExpression => return "BinaryExpression",
+        .SequenceExpression => return "SequenceExpression",
         .ConditionalExpression => return "ConditionalExpression",
         .UpdateExpression => return "UpdateExpression",
         .AssignmentExpression => return "AssignmentExpression",

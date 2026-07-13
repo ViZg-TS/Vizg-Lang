@@ -303,6 +303,9 @@ const Binder = struct {
                 try self.bindNode(binary.left, scope);
                 try self.bindNode(binary.right, scope);
             },
+            .SequenceExpression => |sequence| {
+                for (sequence.expressions) |expression| try self.bindNode(expression, scope);
+            },
             .ConditionalExpression => |conditional| {
                 try self.bindNode(conditional.condition, scope);
                 try self.bindNode(conditional.consequent, scope);
