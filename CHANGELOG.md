@@ -8,6 +8,18 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Added the owned Zig `SemanticResult` API with single-pass analysis, explicit teardown, stable ID lookups, partial-result metadata, and deterministic syntax/semantic diagnostic views. C ABI v1 remains unchanged.
+- Replaced competing builtin type identities with one canonical per-`SemanticResult` registry covering all primitive builtins; type equality is now direct context-local `TypeId` equality.
+- Added the owned canonical `TypeStore` with structural interning, nominal identity boundaries, recursive-type reservation, function-signature ownership, normalized unions/intersections, and stable result-backed type queries.
+- Added symbol-driven semantic typing for variables, parameters, functions, classes, interfaces, enums, and type aliases, including resolver-backed identifier types and explicit unresolved, uninitialized, and error states.
+- Added primitive expression inference with centralized unary/binary operator rules, fixed-point symbol propagation, sequence/conditional/assignment/update typing, `as` assertions, type-preserving `satisfies`, and recoverable invalid-operand diagnostics.
+- Added aggregate inference for homogeneous arrays, context-required tuples, array holes, readonly structural annotations, complete object-property forms, deterministic spread/duplicate handling, and terminating recursive object shells.
+- Added typed property and indexed access with strict union-branch lookup, nullish optional-chain recovery, tuple/array/string indexing, method receiver metadata, and distinct unknown-property and invalid-index diagnostics.
+- Added canonical function signatures and call typing with optional/default/rest parameters, deterministic return inference, method receivers, minimal constructor/async/generator categories, recursive-call stability, and targeted argument-count/type diagnostics.
+- Added CFG-backed control-flow narrowing with per-reference flow types, truthy/nullish/`typeof`/`instanceof`/`in` guards, conservative joins, invalidation on mutation and unknown calls, early-exit propagation, and expression-body arrow normalization.
+- Added one terminating structural compatibility engine for primitives, literals, unions, arrays, tuples, objects, and strict-variance functions, with explicit readonly/optional/error policies and deterministic failure paths for diagnostics.
+- Centralized Checker v2 over canonical semantic inference and compatibility data, covering initialization, assignment, returns, calls, access, operators, and `satisfies` with cascade suppression, related spans, and deterministic ordering.
+- Added owned project semantics with one shared canonical type context, qualified export identities, named/default/namespace/type-only import and re-export propagation, bounded cycle recovery, and inspectable partial links.
 - Integrated TypeScript `as` and `satisfies` into general binary precedence, including multiplicative, exponentiation, logical, coalescing, and relational grouping with full-token matrix coverage.
 
 ## [0.0.3] — 2026-07-13

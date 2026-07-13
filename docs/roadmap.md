@@ -46,17 +46,18 @@ Planned, not implemented:
 - Default import export validation.
 - Code emission, bundling, or tree shaking.
 
-## Future Milestone: Type Checker
+## Type Checker Milestone
 
-Planned, not implemented:
+Implemented for the supported syntax subset:
 
-Types and semantic mapping structures are implemented at `src/types/` and `src/semantics/`. Experimental forward-inference groundwork exists in `src/semantics/inference.zig`, but it is not wired into `src/semantics/root.zig` or the public analysis pipeline. The next work is the Type Checker pass itself:
-- Infer types via a forward/infer step.
-- Resolve type annotations beyond syntax capture.
-- Validate variable initializers, assignments, returns, and calls.
-- Resolve member accesses semantically.
-- Check exported API surfaces.
-- Reserve `VZG6xxx` diagnostics for type errors.
+- Owned single-file and project semantic results with explicit teardown.
+- One canonical `TypeStore` per result/project and context-local `TypeId` equality.
+- Declared, expression, aggregate, access, function, call, and CFG-narrowed types.
+- Central compatibility and Checker v2 diagnostics for initializers, assignments, returns, calls, access, operators, and `satisfies`.
+- Cross-module identities and type propagation for values, functions, classes, enums, interfaces, type aliases, aliases, default/namespace imports, re-exports, and type-only imports.
+- Bounded cyclic propagation and partially inspectable missing/external links.
+
+Complete TypeScript compatibility and advanced annotation forms remain out of scope.
 
 ## Future Milestone: HIR And Lowering
 
@@ -66,6 +67,15 @@ Planned, not implemented:
 - Normalize control flow and expression forms.
 - Prepare for interpretation, analysis, or code generation.
 - Reserve `VZG7xxx` diagnostics for lowering errors.
+
+HIR work may start only when all of these gates hold:
+
+- The owned `SemanticResult` and `ProjectSemanticResult` contracts are stable, including teardown and partial-result behavior.
+- One canonical `TypeStore` per result/project and context-local ID rules remain enforced.
+- Tests cover value/function/class/enum/interface/type-alias exports; aliases, default/namespace/re-export/type-only imports; missing/external links; cycles; and repeated rebuild/teardown.
+- Checker diagnostics retain stable source and related spans while recovered semantic data stays inspectable.
+- Full test, validation, cross-target, Android, and ABI gates are green.
+- HIR consumes semantic results. It must not parse, bind, infer again, or create a competing `TypeStore`.
 
 ## Future Milestone: Runtime Or Compiler Backend
 

@@ -1,16 +1,16 @@
 # Type Model v1 — Design Document
 
-**Status:** Implemented at `src/types/` and `src/semantics/`. The type checker pass itself (inference, annotation resolution, semantic checking) is still planned. Defines the shape of types and their storage in the existing frontend pipeline and module graph without changing either today.
+**Status:** Implemented at `src/types/` and `src/semantics/`. Primitive, aggregate, access, function, call, control-flow, checker, and project propagation passes run in owned semantic-result pipelines. Broader TypeScript checker behavior remains planned.
 
 ## Summary
 
-This document describes the minimal type model needed to support a future Type Checker v1 on top of `vizg`'s current frontend (scanner → parser → binder → resolver → CFG) and module graph. The type model itself is **implemented** in `src/types/`, with semantic mapping of symbols and nodes to types in `src/semantics/`. The actual Type Checker v1 pass (inference, annotation resolution, semantic checking) remains planned.
+This document describes the minimal type model used by typed semantics on top of `vizg`'s frontend (scanner → parser → binder → resolver → CFG). The model, semantic mappings, and initial inference/checking passes are implemented. Full TypeScript compatibility is not.
 
 ## Non-goals
 
 Do not implement today:
 
-- The type checker itself (no pass, no inference, no checks).
+- Complete TypeScript checker behavior beyond the implemented semantic checks.
 - Any parser support for type annotations beyond what the current grammar already accepts.
 - A full TypeScript or JavaScript runtime semantics model.
 - HIR, LLVM, native compilation, bytecodes, VMs, interpreters, or bundlers.
@@ -36,14 +36,14 @@ The initial type universe starts as a small closed set:
 | `ANY` | any | Opt-in escape hatch, see §2 policy. |
 | `FUNCTION` | function | Closed set of named signature slots, see §3. |
 
-Future additions that are **not** in v1: `symbol`, `bigint`, object types, tuple types, array types, intersection, union (other than any/unknown), enums, namespaces, decorators.
+The implemented model also includes `symbol`, `bigint`, objects, tuples, arrays, unions, intersections, callable types, nominal declarations, and type parameters. Decorator and namespace syntax remains outside the supported frontend subset.
 
 ### Node Representation
 
 The type model is now implemented at `src/types/model.zig` with builtin kinds exported via `src/types/builtin.zig`, and semantic mappings of symbols/nodes to types in `src/semantics/type_info.zig`. Types will not be mixed into the existing AST structs. A type is referenced through an opaque handle:
 
 ```zig
-pub const TypeId = usize; // index into TypeArena
+pub const TypeId = u32; // context-local index into TypeStore
 ```
 
 An initial concrete shape (pseudocode):
@@ -58,7 +58,7 @@ pub const Type = struct {
 pub const Kind = union(enum) {
     primitive: PrimitiveKind,
     function: FunctionType,
-    // future: array, object, etc.
+    // aggregate, callable, nominal, union, intersection, etc.
 };
 ```
 
@@ -73,8 +73,8 @@ Because this is a plan document and not code to run, the exact field set is open
 
 Rationale tied to the current pipeline:
 
-- The binder currently records declaration kinds and duplicate exports; the type model layer will extend this with a *defaulted* per-symbol type slot. When the resolver finishes but no type has been produced, the slot holds `undefined` — i.e., "no type known."
-- `unknown` is the explicit encoding of that state: "we have something here but do not know what." This is distinguishable from a real value type and makes it easy to flag as an error or warning in Type Checker v1 (e.g., VZG6003 `implicit_unknown`) without needing a special sentinel.
+- The binder records declaration kinds and duplicate exports. Semantic `SymbolTypeInfo`, not binder symbols, holds declared/inferred types and resolution state.
+- `unknown` encodes "a value exists but its type is not known." This stays distinct from `undefined`, which is an actual value type, and from the recovered error sentinel used to suppress cascades.
 - `any` requires a *source span* recording the annotation that granted permission to bypass checking; this matches how TypeScript surfaces `any` diagnostics today and gives users useful feedback.
 
 ## 3. Null / Undefined Policy
@@ -89,9 +89,12 @@ Rationale tied to the current pipeline:
 
 **Decision:**
 
-- A function type is a **closed signature**: parameter types, parameter names, return type, and an optional "this" type (unused in v1).
+- A function type is a **closed signature**: parameter names and types, optional/default/rest metadata, return type, type-parameter count, and async/generator/constructor flags.
 - Signatures are compared by shape for equality: `(number, string) -> boolean`.
-- Functions declared at the top level of one module will not get a structural `FunctionType` until Type Checker v1 adds that pass. For now, their type slot is a *placeholder* (`FUNCTION`) pointing to a future `FunctionSignatureId` that will resolve once the checker runs on the target module. This prevents a chicken-and-egg problem at link time (see §6).
+- Declarations, expressions, arrows, and object methods use the same interned signature representation. Annotated returns win; otherwise return statements are unioned deterministically, expression-bodied arrows contribute an implicit return, and no-value bodies return `void`.
+- Calls validate count and argument compatibility through the shared compatibility layer. Method calls retain receiver metadata. The minimal constructor policy supports implicit zero-argument class construction; constructor-signature selection remains future work.
+- Async returns are wrapped as `Promise<T>`. Generators use `Generator<unknown, T>`: yield-value inference and `next` input typing are deferred.
+- Recursive functions use their stable declaration signature. Overload sets and overload resolution are intentionally deferred; duplicate same-scope declarations retain the binder diagnostic.
 
 Pseudocode signature shape:
 
@@ -109,59 +112,54 @@ pub const FunctionSignature = struct {
 
 Closure expressions in source will be typed as an anonymous function signature whose parameter list is inferred from use sites or defaulted to `(unknown) -> unknown`.
 
-## 5. How Node Types Will Be Stored
+### Control-flow narrowing v1
 
-**Decision:**
+The semantic pipeline consumes the frontend CFG for each function and records
+flow-sensitive reference types separately from canonical symbol and expression
+types. Each `FlowTypeInfo` entry is keyed by function node, CFG block, symbol,
+and reference node, so callers can query a stable fact without mutating the AST
+or the symbol's declared type.
 
-- A future `src/frontend/type_arena.zig` owns all types and signatures via a bump allocator pattern: allocate once per analyzed file, drop at end of frontend pass.
-- AST nodes will **not** carry type information in v1. The current architecture keeps the AST pure (parser output only). Semantic mappings live in `src/semantics/type_info.zig` (per-symbol and per-node type info).
-- A future Type Checker pass owns inference, annotation resolution, and semantic checks; it consumes types from `src/types/` and writes symbol/node type mappings into `src/semantics/`.
+The first narrowing contract supports truthy/falsy tests, `typeof` comparisons,
+null/undefined equality, `instanceof`, and property-presence checks with `in`.
+Facts join conservatively at branches and loops. Assignment and update discard
+the target fact; calls through `any` or `unknown` discard all current facts.
+Early exits preserve the surviving branch for following statements, and
+expression-bodied arrows receive a normalized non-empty CFG body.
 
-Planned evolution path:
+This pass deliberately omits complete reachability, discriminated-union
+analysis, exception-edge facts, alias tracking, and interprocedural side-effect
+modeling.
 
-```txt
-src/frontend/
-  types.zig        -- type model (planned)
-  type_arena.zig   -- arena for types/signatures (planned)
-  frontend.zig     -- analyze returns FrontendResult as today; the checker will be added as a wrapper in modules/, not inside frontend/.
-```
+### Structural compatibility v1
 
-The `FrontendResult` struct grows by adding:
+`src/semantics/type_compat.zig` owns the single source-to-target compatibility
+relation used by semantic consumers. It supports primitives, literals,
+deterministic source and target unions, arrays, tuples, objects, and functions.
+Recursive structural pairs terminate through coinductive active-pair guards and
+successful-pair memoization. Incompatibilities report a stable first path through
+union members, tuple elements, properties, parameters, and return types.
 
-```zig
-pub const FrontendResult = struct {
-    // ... existing fields unchanged ...
-    types: ?TypeArena,          // allocated when type check runs
-    unresolved_count: usize,    // diagnostics aid
-};
-```
+Readonly arrays, tuples, and properties cannot flow into mutable targets.
+Optional source members cannot satisfy required target members. Array elements
+and function returns are covariant; strict v1 function parameters are
+contravariant. `any` accepts and supplies all types, `unknown` accepts all source
+types but only supplies `unknown` or `any`, `never` supplies every target, and
+the recovered error sentinel is treated as compatible to prevent cascades.
 
-Existing callers (`vizg check`, `vizg tokens`, etc.) ignore the new field until a CLI command asks for it.
+## 5. How Node Types Are Stored
 
-## 6. How Symbol Types Will Be Stored
+AST nodes remain pure parser output. `src/semantics/type_info.zig` owns value-based `NodeTypeInfo`, `SymbolTypeInfo`, and `FlowTypeInfo` mappings. The semantic checker consumes these mappings after inference and does not reparse or duplicate type inference.
 
-**Decision:**
+A single-file `SemanticResult` owns one arena, one `FrontendResult`, one canonical `TypeStore`, and its mappings. A `ProjectSemanticResult` owns its `ModuleGraph`, one project semantic arena, one canonical store shared by every module, and every cross-module semantic record. All stored slices remain valid until the owning result is deinitialized.
 
-- The binder's symbol struct gains an optional type slot:
+## 6. How Symbol Types Are Stored
 
-```zig
-pub const Symbol = struct {
-    name: []const u8,            // borrowed
-    kind: Kind,                  // unchanged from current code
-    scope_id: ScopeId,           // unchanged
-    declared_type: ?TypeId = null,  // explicit annotation
-    inferred_type: ?TypeId = null,  // type checker produced
-};
-```
+Binder symbols remain syntax/scope records and do not contain context-dependent `TypeId` values. `SymbolTypeInfo` is keyed by binder `SymbolId` and records declared type, inferred type, and resolution state. This avoids coupling the frontend to semantics and prevents a symbol from retaining an ID from a destroyed or different type context.
 
-- `declared_type` is set during a future *type annotation* pass that follows binder; it mirrors what the parser already captures for annotated declarations.
-- `inferred_type` is set by the type checker during its forward/infer step. For top-level values, inference requires the module graph because initializer expressions may reference cross-file bindings — which is exactly why a single-file frontend pass is insufficient and we need Type Checker v1 to sit above the graph layer.
+Cross-module identity is represented by `SemanticIdentity`, qualified by `ModuleId`, optional `SymbolId`, declaration `NodeId`, namespace, and `TypeId`. A project uses one shared store, so propagated IDs are canonical within that result. Repeated builds create new contexts; IDs from separate results are never comparable.
 
-### Where the Slot Lives Today (Plan Only)
-
-This document does **not** add these fields today; it records the design so that when the type checker team implements them, they slot into an existing arena + symbol model without requiring structural surgery on the binder or resolver.
-
-## 7. How Imports Will Use Linked Target Symbols
+## 7. How Imports Use Linked Target Symbols
 
 The linker in `src/modules/linker.zig` already produces cross-file links with a target module/symbol reference:
 
@@ -175,24 +173,19 @@ LinkedImport {
 }
 ```
 
-**Decision for Type Checker v1:**
-
-- When the type checker runs on file A and encounters a reference through an imported symbol, it walks `LinkedImport.target_symbol_id` to read the **target's declared_type + inferred_type**.
-- For circular or late-resolved references (top-level initializer of a module imports itself transitively), the checker records the dependency edge in a `TypeDependency` list per module and runs a fixpoint iteration. This avoids infinite recursion while keeping type information fresh as symbols get filled in.
-
-Planned data flow:
+Implemented data flow:
 
 ```txt
-linker.Linker.link() produces LinkedImport[]
-  -> TypeChecker.run(graph, linked_imports):
-      for each module_id in graph.order():
-          bind target.symbol to source.local via Link lookup
-          infer declared_type from annotation (if any)
-          iterate inferred_type until fixpoint or stable
-      emit diagnostics with VZG6xxx codes
+ModuleGraph owns FrontendResult[] and LinkedImport[]
+  -> analyzeModuleGraph consumes those snapshots without reparsing
+  -> collect direct export identities in one shared TypeStore
+  -> propagate named/default/namespace/type-only imports and re-exports
+  -> iterate to a bounded fixed point for cycles
+  -> run the checker over propagated TypeInfo
+  -> return one owned, partially inspectable ProjectSemanticResult
 ```
 
-Namespace imports are typed structurally as an object whose keys are the exported symbol names and values are those symbols' types. Default imports resolve to whichever symbol is exported as default. External imports keep their declared external type when a registration was provided (see §8); otherwise they are `unknown`.
+Aliases and re-exports preserve the target's qualified declaration identity. Namespace imports are structural objects whose keys are runtime exports. Default imports resolve the default export. Type-only imports propagate type-space identity without a runtime binding. External and missing imports remain stable `unknown`/unresolved records. Cycles terminate with known declarations preserved and incomplete links marked cyclic-partial.
 
 ## 8. Diagnostic Code Range VZG6xxx
 
@@ -200,11 +193,24 @@ Reserved for the type checker. Starting codes per current design:
 
 | Code | Name | Meaning | Status |
 | --- | --- | --- | --- |
-| `VZG6001` | `type_mismatch` | Assignment, return, or call argument does not match expected type. | Planned. Not implemented. |
+| `VZG6004` | `unknown_type_name` | A type annotation names a type that cannot be resolved. | Implemented. |
+| `VZG6005` | `type_mismatch` | Initialization, assignment, return, operator, or `satisfies` types are incompatible. | Implemented. |
 | `VZG6002` | `cannot_assign_const` | Attempt to write a declared-const binding. | Planned; may be removed before implementation in favor of binder-level VZG3001 for redeclaration — decide at v1 design review. |
 | `VZG6003` | `implicit_unknown` | Unannotated value used without inference producing a known type. | Planned. Not implemented. |
+| `VZG6006` | `unknown_property` | Property lookup failed on the receiver type. | Implemented. |
+| `VZG6007` | `invalid_index` | Indexed access used an unsupported key or index. | Implemented. |
+| `VZG6008` | `invalid_argument_count` | Call argument count does not match the signature. | Implemented. |
+| `VZG6009` | `invalid_argument_type` | Call argument is incompatible with its parameter. | Implemented. |
 
-Full set is **not** frozen here — codes will be extended by the implementation pass with names and messages reflecting actual behavior. Codes 1–5 are *out of range* for this layer; no code in `VZG6xxx` should emit diagnostics that do not reference a type.
+The set is extensible, but assigned codes and names are stable. No code in
+`VZG6xxx` should emit diagnostics that do not reference a type.
+
+Checker v2 runs over the canonical semantic result data rather than reparsing
+or maintaining its own inference map. All assignment-like checks use the shared
+structural compatibility engine. Inference records issue metadata for operators,
+accesses, calls, and `satisfies`; the checker turns it into source-ordered
+diagnostics with primary and related spans. Unresolved, unknown, and recovered
+error types suppress cascades.
 
 ## 9. Design Questions Answered
 
@@ -222,9 +228,9 @@ Both, depending on phase:
 
 The type node itself, once produced, is always a typed `TypeId`, not an identifier string.
 
-### 3. How will `let x = 1` receive type `number`?
+### 3. How does `let x = 1` receive type `number`?
 
-During Type Checker v1 forward inference:
+During semantic inference:
 
 ```txt
 for each top-level binding in declaration order:
@@ -235,59 +241,44 @@ for each top-level binding in declaration order:
     record "x:number" in a per-module type map for use by other modules after linking
 ```
 
-### 4. How will `function f(x: number)` store parameter type?
+### 4. How does `function f(x: number)` store parameter type?
 
-The parser already captures the annotation span (or will, once Type Checker v1 adds that grammar). The binder stores the parameter symbol with its declared name; the type pass records `(parameter_name → type_id)` in a per-function signature entry and sets the function's own return type. No mutation of `src/binder/binder.zig` is required beyond adding an optional `TypeId?` slot that existing tests ignore.
+The parser captures the annotation syntax and the binder creates the parameter symbol. Semantics resolves the annotation, records the parameter's `SymbolTypeInfo`, and installs the owned parameter and return records in the canonical function signature. Binder symbols do not store `TypeId` values.
 
-### 5. How will cross-file imported functions/values expose type later?
+### 5. How do cross-file imported functions/values expose types?
 
-Walk the linker link from file A to module B, read symbol B's inferred or declared type, and thread it back into A's reference resolution. If a cycle is detected at this stage, break with `unknown` for one side only, then fixpoint. Namespace imports expose their exports as an object type whose property types are the corresponding symbol types. Default imports resolve to whichever symbol is exported as default.
+Project semantics walks the linker identity from file A to module B, propagates B's canonical type and qualified identity into A's import symbol, then refreshes dependent inference to a bounded fixed point. Namespace imports expose runtime exports as an object type. Default, named, type-only, and re-export forms preserve their target identity. Missing, external, and incomplete cyclic links stay inspectable with `unknown`.
 
 ### 6. What diagnostics are reserved for Type Checker v1?
 
-VZG6xxx range exclusively: type-mismatch errors (VZG6001), implicit-unknown warnings/errors (VZG6003). VZG5002 covers missing exports today; if the type checker ever wants to *re-report* an export as "not a valid import target" that will require a discussion but is unlikely in v1 — keep it as a structural check, not a type check.
+VZG6xxx is reserved for type diagnostics. Current implemented codes are
+VZG6004–VZG6009; VZG6002 and VZG6003 remain reserved. VZG5002 continues to own
+missing exports as a structural module-graph check.
 
-## 10. Integration Points With Existing Code (Plan Only)
+## 10. Current Integration Points
 
-No changes are required to existing code by this document. The following integration points are anticipated for Type Checker v1 implementation:
-
-| Layer | File | Change at v1 time |
+| Layer | File | Contract |
 | --- | --- | --- |
-| Frontend AST | `src/frontend/ast.zig` | None in v1; keep type fields off AST nodes. |
-| Frontend pipeline | `src/frontend/frontend.zig` | Optional field addition (`types: ?TypeArena`) for when Type Checker v1 is wired in — additive, backward compatible with all current CLI commands. |
-| Module graph (plan) | `src/modules/graph.zig` | Topological order of modules passed to the type checker so cyclic files get fixpoint treatment instead of infinite recursion. |
+| Frontend AST | `src/frontend/ast.zig` | Keeps type data off syntax nodes. |
+| Frontend pipeline | `src/frontend/frontend.zig` | Produces the syntax/binding snapshot consumed exactly once by semantics. |
+| Binder/resolver | `src/frontend/binder.zig`, `src/frontend/resolver.zig` | Supply stable symbol/reference identity; never retain semantic `TypeId` values. |
+| Module graph/linker | `src/modules/graph.zig`, `src/modules/linker.zig` | Own module snapshots, edges, and cross-file target IDs consumed by project semantics. |
+| Type store | `src/types/type_store.zig` | Owns canonical, context-local types and signatures. |
+| Semantic pipeline | `src/semantics/root.zig` | Owns single-file/project results, mappings, propagation, checking, and teardown. |
+| Diagnostics | `src/diagnostics/root.zig` | Owns stable VZG6xxx codes, related spans, and `.type_checker` phase mappings. |
 
-| Binder | `src/frontend/binder.zig` | Optional `declared_type: ?TypeId` slot on Symbol; defaults to `null`. |
-| Resolver | `src/frontend/resolver.zig` | None in v1 — resolver stays identifier-only. The type checker will read symbol types directly, bypassing the resolver for lookup purposes. |
-| Module graph | `src/modules/graph.zig` | Graph returns a topological order of modules to the type checker so cyclic files get fixpoint treatment instead of infinite recursion. |
-| Linker | `src/modules/linker.zig` | No structural change — linker already produces target_symbol_id needed for cross-file type lookup. |
-| Diagnostics | `src/diagnostics/root.zig` | Add `VZG6001` (and later VZG6003, …) to the enum with phase = `.type_checker`. |
+## 11. Required Test Contract
 
-## 11. Testing Plan For Type Checker v1 Implementation (Not Part of This Goal)
+Tests cover primitives, functions, aggregates, access, calls, flow narrowing, compatibility, checker diagnostics, imported aliases, namespaces, default and star/named re-exports, type-only imports, missing exports, cyclic graphs, and repeated rebuild/teardown. Project tests assert qualified identity and `TypeId` equality only within one owning result.
 
-When Type Checker v1 is actually implemented it should be tested against:
+## 12. Remaining Limits
 
-- `test/type_model/primitives.ts` — literal types match expected primitives.
-- `test/type_model/function_signature.ts` — parameter and return types captured correctly.
-- `test/type_model/cross_file_linking.ts` — imported symbols carry target types through linker links.
-- `test/type_model/unknown_vs_any.ts` — explicit `any` vs implicit `unknown`.
-- `test/type_model/null_undefined.ts` — null and undefined typed as separate singletons.
-- `test/type_model/cycle_handling.ts` — circular imports get fixpoint resolution, not infinite recursion.
-
-These tests are **not** added in this goal — they belong to Type Checker v1 implementation. This document only records what they should cover so the design does not drift at implementation time.
-
-## 12. Open Questions for Review Before Implementation
-
-These questions must be answered by whoever implements Type Checker v1; none block this document from being published:
-
-1. Should `unknown` become an error at use sites (strict mode on), or remain silent? (Recommended: warning off, error on.)
-2. Should the type model support a future `type_aliases` form with lazy expansion, or always eagerly resolve to underlying types in v1? (Recommended: eager resolution; aliases are deferred to a later milestone.)
-3. How will generics be handled if at all in v1? (Recommended: out of scope for v1 — no generic parameters or inference.)
+Complete TypeScript compatibility, package resolution, generic inference, overload resolution, richer class member semantics, and advanced type forms remain outside v1. HIR is not implemented and must consume these semantic contracts rather than duplicate parsing, binding, inference, or type storage.
 
 ## Final Result
 
-- Design document created: `docs/type-model-v1.md` (this file).
-- Type model **implemented** at `src/types/`: pure data model with builtins, TypeId, FunctionSignature.
-- Semantic mapping **implemented** at `src/semantics/`: SymbolTypeInfo, NodeTypeInfo, TypeInfo map frontend symbols/nodes to types.
-- The actual Type Checker v1 pass (inference, annotation resolution, semantic checking) is still planned.
-- VZG6xxx diagnostic range reserved; three initial codes proposed but not yet registered in `src/diagnostics/root.zig`.
+- Type model implemented at `src/types/`: canonical builtins, structural/nominal types, `TypeId`, and signatures.
+- Semantic mapping and Checker v2 implemented at `src/semantics/`.
+- Project propagation implemented over the existing module graph with one canonical project type context.
+- VZG6xxx diagnostics are registered and emitted for the supported checker contract.
+- HIR and complete TypeScript checking remain unimplemented.

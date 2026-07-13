@@ -12,6 +12,7 @@ Each diagnostic has:
 - `message`: human-readable text.
 - `span`: source span with line, column, and byte offsets.
 - `label`: optional short label.
+- `related`: zero or more related source spans with explanatory messages.
 - `path`: optional source path for diagnostics produced outside a single-file result.
 
 The CLI prints diagnostics as:
@@ -48,6 +49,12 @@ Across the C ABI, diagnostic messages and paths are pointer/length pairs. Consum
 | `VZG5001` | `module_not_found` | module_graph | Relative import could not be resolved to a source file. |
 | `VZG5002` | `missing_export` | module_graph | Named import requested an export the target module does not provide. |
 | `VZG5003` | `circular_import` | module_graph | Static local imports formed a cycle. |
+| `VZG6004` | `unknown_type_name` | type_checker | A type annotation names a type that cannot be resolved. |
+| `VZG6005` | `type_mismatch` | type_checker | Initialization, assignment, return, operator, or `satisfies` types are incompatible. |
+| `VZG6006` | `unknown_property` | type_checker | Property lookup failed on the receiver type. |
+| `VZG6007` | `invalid_index` | type_checker | Indexed access used an unsupported key or index. |
+| `VZG6008` | `invalid_argument_count` | type_checker | Call argument count does not match the function signature. |
+| `VZG6009` | `invalid_argument_type` | type_checker | Call argument is incompatible with its parameter. |
 | `VZG9001` | `internal_error` | internal | Internal diagnostic bucket. |
 
 ## Code Ranges
@@ -59,7 +66,7 @@ Across the C ABI, diagnostic messages and paths are pointer/length pairs. Consum
 | `VZG3xxx` | binder | Implemented. |
 | `VZG4xxx` | resolver | Implemented. |
 | `VZG5xxx` | module graph | Implemented for minimal module graph errors. |
-| `VZG6xxx` | type checker | Reserved for future work. |
+| `VZG6xxx` | type checker | Implemented for current semantic checks. |
 | `VZG7xxx` | HIR/lowering | Reserved for future work. |
 | `VZG8xxx` | runtime | Reserved for future work. |
 | `VZG9xxx` | internal errors | Partially reserved; `VZG9001` exists. |
@@ -79,13 +86,20 @@ The diagnostic phase enum includes:
 - `runtime`
 - `internal`
 
-Scanner, parser, binder, resolver, and module graph currently produce normal diagnostics. Other phase names are reserved so stable diagnostic shape can survive new layers.
+Scanner, parser, binder, resolver, module graph, and type checker currently produce normal diagnostics. Other phase names are reserved so stable diagnostic shape can survive new layers.
 
 Unsupported-syntax diagnostics point at the construct that selected the
 unsupported grammar path. The parser skips to that construct's statement,
 member, or type boundary so later statements can still be analyzed without a
 cascade of generic token errors.
 
+Checker diagnostics use the offending expression or argument as the primary
+span and attach the relevant declaration, target, callee, receiver, or operand
+as a related span when available. They are emitted in deterministic source
+order. Nodes already typed as unresolved, unknown, or recovered error suppress
+derivative checker diagnostics.
+
 ## Labels, Notes, And Hints
 
-The current struct has one optional `label`. It does not yet model multi-label diagnostics, notes, or fix-it hints. Reserve those concepts for future diagnostic rendering work.
+The current struct has one optional `label` plus related spans. It does not yet
+model fix-it hints or a richer note hierarchy.

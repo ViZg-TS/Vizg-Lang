@@ -4,7 +4,7 @@
 
 ## Current Status
 
-This repository is a frontend engine prototype. It does not execute JavaScript, emit code, type-check programs, resolve packages, or bundle modules.
+This repository is a frontend engine prototype. It does not execute JavaScript, emit code, provide complete TypeScript type checking, resolve packages, or bundle modules.
 
 Implemented today:
 
@@ -16,6 +16,8 @@ Implemented today:
 - Preliminary control-flow graphs for function bodies.
 - Module graph v1 for relative static imports and re-exports, canonical-path caching, named import validation, external edges, missing modules, missing exports, and simple cycles.
 - Cross-file import linking layer that resolves local imports to their target module's exported symbols, tracks import kind (named, default, namespace, external, unresolved), and emits `VZG5001`, `VZG5002`, and `VZG5003` diagnostics alongside link records.
+- Owned Zig `SemanticResult` analysis API with stable node/symbol/scope/reference/module/type-ID lookup, split syntax/semantic diagnostics, one canonical per-result `TypeStore`, symbol/expression types, aggregate/access/function/call inference, CFG-backed flow narrowing, centralized structural compatibility and checker diagnostics, and explicit destruction.
+- Owned Zig `ProjectSemanticResult` API with one shared project `TypeStore`, qualified exported identities, named/default/namespace/type-only import and re-export propagation, bounded cycle handling, partial unresolved links, and explicit destruction.
 - CLI inspection commands for checks, tokens, AST, symbols, references, CFGs, and modules.
 - Static library `libvizg.a` with a public C header and file/in-memory analysis entry points.
 
@@ -111,7 +113,7 @@ zig build
 cc -I Lib consumer.c -L zig-out/lib -lvizg -o consumer
 ```
 
-See `example/c/hello/` and `example/zig/consumer/` for complete consumers. The ABI exposes the current single-file frontend result; it does not expose the module graph, linker, or a runtime.
+See `example/c/hello/` and `example/zig/consumer/` for complete consumers. The ABI exposes the current single-file frontend result; the owned `SemanticResult` and `ProjectSemanticResult` are Zig-only and do not alter C ABI v1. The ABI does not expose the module graph, linker, or a runtime.
 
 ## Validation
 
@@ -185,7 +187,7 @@ docs/                     Contributor and architecture documentation
 
 - No package, `node_modules`, `package.json`, or `tsconfig` resolution.
 - No runtime module loading, CommonJS, or bundling. Dynamic imports are represented syntactically.
-- No semantic type checker.
+- No complete TypeScript semantic type checker.
 - No HIR/lowering layer.
 - No code generation or native compilation.
 - No JavaScript runtime or execution engine.
