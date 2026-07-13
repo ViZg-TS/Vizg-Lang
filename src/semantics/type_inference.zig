@@ -135,7 +135,7 @@ pub fn inferPrimitiveExpressions(
             const candidate = try inferNode(allocator, id, node.data, tree, entries.items, store);
             if (candidate) |value| changed = putType(entries, id, value.type_id, value.valid, value.issue, value.receiver_type) or changed;
         }
-        changed = (try applyAggregateContexts(allocator, tree, entries, store)) or changed;
+        changed = (try applyAggregateContexts(tree, entries, store)) or changed;
         if (!changed) break;
     }
 }
@@ -741,8 +741,13 @@ fn collectReturnTypes(
     }
 }
 
+/// Store declared-annotation types as the contextual hint without overwriting
+/// the actual source-inferred expression type. Child inference proceeds from
+/// the real `type_id`; tuple holes are filled only for structural shape (so a
+/// `[number, , boolean]` annotation can still declare the third slot). The
+/// checker later compares `contextual_type` against `type_id` and emits
+/// element-level diagnostics when they diverge.
 fn applyAggregateContexts(
-    allocator: std.mem.Allocator,
     tree: ast_mod.Ast,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     store: *types.TypeStore,
@@ -752,33 +757,54 @@ fn applyAggregateContexts(
         .VariableDeclarator => |declarator| {
             const annotation = declarator.type_annotation orelse continue;
             const initializer = declarator.init orelse continue;
+            const declared_contextual = try resolveTypeAnnotation(tree, annotation, store);
+
             switch (tree.node(initializer).data) {
                 .ArrayExpression => |array| {
-                    var contextual = try resolveTypeAnnotation(tree, annotation, store);
-                    if (store.lookup(contextual)) |ty| switch (ty.kind) {
-                        .tuple => |tuple| {
-                            var elements = try allocator.dupe(types.TupleElement, tuple.elements);
+                    if (store.lookup(declared_contextual)) |ty| switch (ty.kind) {
+                        .tuple => |declared_tuple| {
+                            // For tuple annotations with holes in the source array, fill those
+                            // hole positions using the declared element type so downstream accesses
+                            // have a concrete shape to work from. Store only the merged contextual
+                            // — never overwrite `type_id` which holds actual inferred types.
+                            var merged = try store.allocator.alloc(types.TupleElement, declared_tuple.elements.len);
+                            for (declared_tuple.elements, 0..) |declared_elem, index| {
+                                merged[index] = .{
+                                    .type_id = declared_elem.type_id,
+                                    .hole = declared_elem.hole,
+                                    .optional = declared_elem.optional,
+                                };
+                            }
                             for (array.elements, 0..) |element, index| {
-                                if (index >= elements.len) break;
-                                if (element == null) {
-                                    elements[index].hole = true;
-                                    elements[index].optional = true;
+                                if (index >= merged.len) break;
+                                if (element == null and !merged[index].hole) {
+                                    merged[index].hole = true;
+                                    merged[index].optional = true;
                                 }
                             }
-                            contextual = try store.intern(.{ .tuple = .{
-                                .elements = elements,
-                                .readonly = tuple.readonly,
+                            const contextual_id = try store.intern(.{ .tuple = .{
+                                .elements = merged,
+                                .readonly = declared_tuple.readonly,
                             } });
-                            changed = putType(entries, initializer, contextual, true, .none, null) or changed;
+                            changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, contextual_id) or changed;
                         },
-                        .array => changed = putType(entries, initializer, contextual, true, .none, null) or changed,
+                        .array => {
+                            // For a declared array shape store the annotation as the contextual hint only.
+                            // Do not overwrite `type_id` so the checker can compare actual element types against
+                            // the declared element type and report per-position mismatches.
+                            changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, declared_contextual) or changed;
+                        },
                         else => {},
                     };
                 },
                 .ObjectExpression => {
-                    const contextual = try resolveTypeAnnotation(tree, annotation, store);
-                    if (store.lookup(contextual)) |ty| switch (ty.kind) {
-                        .object => changed = putType(entries, initializer, contextual, true, .none, null) or changed,
+                    if (store.lookup(declared_contextual)) |ty| switch (ty.kind) {
+                        .object => {
+                            // Store the declared object shape as contextual only — do not overwrite `type_id`.
+                            // The checker will later compare actual property types against this declared shape and
+                            // emit per-property mismatches when they diverge.
+                            changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, declared_contextual) or changed;
+                        },
                         else => {},
                     };
                 },
@@ -897,6 +923,40 @@ fn putType(
         .state = if (valid) .resolved else .@"error",
         .issue = issue,
         .receiver_type = receiver_type,
+    });
+    return true;
+}
+
+/// Variant of `putType` that also stores a contextual type slot on the entry.
+/// Used by aggregate-context typing so declared annotation shapes can be kept
+/// alongside actual inferred types for post-inference comparison.
+fn putTypeWithContextual(
+    entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
+    node_id: ast_mod.NodeId,
+    type_id: types.TypeId,
+    valid: bool,
+    issue: InferenceIssue,
+    receiver_type: ?types.TypeId,
+    contextual_type: ?types.TypeId,
+) bool {
+    for (entries.items) |*entry| {
+        if (entry.node_id != node_id) continue;
+        const state: node_type_info_mod.TypeResolutionState = if (valid) .resolved else .@"error";
+        if (entry.type_id == type_id and entry.state == state and entry.issue == issue and entry.receiver_type == receiver_type and entry.contextual_type == contextual_type) return false;
+        entry.type_id = type_id;
+        entry.state = state;
+        entry.issue = issue;
+        entry.receiver_type = receiver_type;
+        entry.contextual_type = contextual_type;
+        return true;
+    }
+    entries.appendAssumeCapacity(.{
+        .node_id = node_id,
+        .type_id = type_id,
+        .state = if (valid) .resolved else .@"error",
+        .issue = issue,
+        .receiver_type = receiver_type,
+        .contextual_type = contextual_type,
     });
     return true;
 }

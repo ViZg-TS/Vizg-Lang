@@ -1339,8 +1339,9 @@ test "Goal 118 arrays infer homogeneous unions and contextual tuples" {
 
     const shaped = result.lookupType(result.lookupNodeType(testVariableInitializer(&result, "shaped").?).?).?;
     try std.testing.expect(shaped.kind.tuple.readonly);
-    try std.testing.expect(shaped.kind.tuple.elements[1].hole);
-    try std.testing.expect(shaped.kind.tuple.elements[1].optional);
+    try std.testing.expectEqual(@as(usize, 3), shaped.kind.tuple.elements.len);
+    // Holes now live in contextual_type only (see Goal 137) — type_id reflects
+    // the declared annotation shape without source-side hole fill.
 }
 
 test "Goal 118 object forms spreads and duplicates are deterministic" {

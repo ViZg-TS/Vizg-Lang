@@ -70,11 +70,21 @@ pub const NodeTypeInfo = struct {
     /// Base object for a method-valued member access. Call inference uses this
     /// to preserve `this` without changing the canonical function identity.
     receiver_type: ?types.TypeId = null,
+    /// Contextual (declared annotation) type used only as a structural hint.
+    /// The actual inferred source expression type stays in `type_id`. The two
+    /// are compared post-inference so incompatible initializers surface the
+    /// real element-level mismatch rather than a generic "incompatible" hit.
+    contextual_type: ?types.TypeId = null,
 
     test "nodeTypeInfo stores id and type" {
         const n = NodeTypeInfo{ .node_id = 42, .type_id = 7 };
         try std.testing.expectEqual(@as(usize, 42), @as(usize, n.node_id));
         try std.testing.expectEqual(@as(types.TypeId, 7), n.type_id);
+    }
+
+    test "contextual_type defaults to null" {
+        const n = NodeTypeInfo{ .node_id = 1, .type_id = 2 };
+        try std.testing.expect(n.contextual_type == null);
     }
 };
 
