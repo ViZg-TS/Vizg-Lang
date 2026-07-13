@@ -37,10 +37,10 @@ const max_fixpoint_rounds: u32 = 10;
 // FixpointIteration.
 // ---------------------------------------------------------------------------
 
-pub fn forwardInfer(allocator_: std.mem.Allocator, tree: *const ast_mod.Ast) !TypeInfoSnapshot {
+pub fn forwardInfer(allocator_: std.mem.Allocator, tree: *const ast_mod.Ast, builtins: *const types.Builtins) !TypeInfoSnapshot {
     var inferred = TypeInfoSnapshot.init(allocator_);
     // First pass: classify every declaration (variable + function).
-    try walkDeclarations(tree.root, tree, &inferred);
+    try walkDeclarations(tree.root, tree, &inferred, builtins);
     return inferred;
 }
 
@@ -49,11 +49,11 @@ pub fn forwardInfer(allocator_: std.mem.Allocator, tree: *const ast_mod.Ast) !Ty
 // declared_type for each symbol from type annotations. Then classify RHS literal
 // expressions to produce an initial inferred_type.
 // ---------------------------------------------------------------------------
-fn walkDeclarations(node_id: ast_mod.NodeId, tree: *const ast_mod.Ast, snapshot: *TypeInfoSnapshot) !void {
+fn walkDeclarations(node_id: ast_mod.NodeId, tree: *const ast_mod.Ast, snapshot: *TypeInfoSnapshot, builtins: *const types.Builtins) !void {
     if (node_id == ast_mod.invalid_node) return;
     const node = tree.node(node_id);
     switch (node.data) {
-        .Program => |p| for (p.statements) |s| try walkDeclarations(s, tree, snapshot),
+        .Program => |p| for (p.statements) |s| try walkDeclarations(s, tree, snapshot, builtins),
         .FunctionDeclaration => |f| {
             // Function signatures are classified by their return_type annotation
             // (if any) — this is what the checker later reads to infer call sites.
@@ -65,19 +65,19 @@ fn walkDeclarations(node_id: ast_mod.NodeId, tree: *const ast_mod.Ast, snapshot:
                 .VariableDeclarator => |d| {
                     if (d.type_annotation == null or d.name.len == 0) continue;
                     const ann_name = tree.annotationName(d.type_annotation.?) orelse continue;
-                    const type_id = lookupBuiltinIdByName(ann_name) orelse continue;
+                    const type_id = lookupBuiltinIdByName(ann_name, builtins) orelse continue;
 
                     snapshot.addDeclared(d.name, type_id);
 
                     // Classify the initializer if present (forward-pass).
                     if (d.init != null) {
-                        try classifyInferred(d.init.?, tree, snapshot);
+                        try classifyInferred(d.init.?, tree, snapshot, builtins);
                     }
                 },
                 else => {},
             }
         },
-        .BlockStatement => |bs| for (bs.statements) |s| try walkDeclarations(s, tree, snapshot),
+        .BlockStatement => |bs| for (bs.statements) |s| try walkDeclarations(s, tree, snapshot, builtins),
         // VariableDeclarator is the leaf — no recursion needed.
         else => {},
     }
@@ -89,14 +89,14 @@ fn walkDeclarations(node_id: ast_mod.NodeId, tree: *const ast_mod.Ast, snapshot:
 // (2) function call return type, (3) imported symbol's declared type. Mirrors
 // V8 TypeSpecialization's per-expression classification.
 // ---------------------------------------------------------------------------
-fn classifyInferred(expr_id: ast_mod.NodeId, tree: *const ast_mod.Ast, snapshot: *TypeInfoSnapshot) !void {
+fn classifyInferred(expr_id: ast_mod.NodeId, tree: *const ast_mod.Ast, snapshot: *TypeInfoSnapshot, builtins: *const types.Builtins) !void {
     const expr = tree.node(expr_id);
     switch (expr.data) {
         .Literal => |lit| {
             if (lit.value.len > 0) {
                 const kind = classifyLiteralValue(lit.value);
                 if (kind != null) {
-                    snapshot.addInferredFromType(kind.?);
+                    try snapshot.addInferredFromType(expr_id, builtins.id(kind.?));
                 }
             }
         },
@@ -106,7 +106,7 @@ fn classifyInferred(expr_id: ast_mod.NodeId, tree: *const ast_mod.Ast, snapshot:
         },
         .SequenceExpression => |sequence| {
             if (sequence.expressions.len > 0) {
-                try classifyInferred(sequence.expressions[sequence.expressions.len - 1], tree, snapshot);
+                try classifyInferred(sequence.expressions[sequence.expressions.len - 1], tree, snapshot, builtins);
             }
         },
         else => {},
@@ -131,37 +131,11 @@ fn classifyLiteralValue(value: []const u8) ?builtin_kind.BuiltinKind {
 // builtin kind table. Mirrors TypeScript's `getBuiltInTypeName` approach of
 // iterating over known primitive names.
 // ---------------------------------------------------------------------------
-fn lookupBuiltinIdByName(name: []const u8) ?types.TypeId {
-    inline for (builtin_kind.builtinKinds_static) |kind| {
-        if (std.mem.eql(u8, name, builtinKindNameStatic(kind))) return builtinKindTypeIdFromKind(kind);
+fn lookupBuiltinIdByName(name: []const u8, builtins: *const types.Builtins) ?types.TypeId {
+    inline for (builtin_kind.builtinKinds) |kind| {
+        if (std.mem.eql(u8, name, builtin_kind.builtinKindName(kind))) return builtins.id(kind);
     }
     return null;
-}
-
-fn builtinKindTypeIdFromKind(kind: builtin_kind.BuiltinKind) types.TypeId {
-    return switch (kind) {
-        .number => @intCast(@as(u32, 100)),
-        .string => @intCast(@as(u32, 101)),
-        .boolean => @intCast(@as(u32, 102)),
-        .null_ => @intCast(@as(u32, 103)),
-        .undefined => @intCast(@as(u32, 104)),
-        .void => @intCast(@as(u32, 105)),
-        .unknown => @intCast(@as(u32, 106)),
-        .any => @intCast(@as(u32, 107)),
-    };
-}
-
-fn builtinKindNameStatic(kind: builtin_kind.BuiltinKind) []const u8 {
-    return switch (kind) {
-        .number => "number",
-        .string => "string",
-        .boolean => "boolean",
-        .null_ => "null",
-        .undefined => "undefined",
-        .void => "void",
-        .unknown => "unknown",
-        .any => "any",
-    };
 }
 
 // ---------------------------------------------------------------------------

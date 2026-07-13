@@ -3,10 +3,12 @@ const frontend = @import("../frontend/frontend.zig");
 const types = @import("../types/root.zig");
 const type_collector = @import("type_collector.zig");
 const testing = std.testing;
+const test_builtins = types.Builtins.init();
 
 test "variable declared type is collected from source annotation" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
 
     const src = "let x: number = 1;\n";
     const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
@@ -16,7 +18,7 @@ test "variable declared type is collected from source annotation" {
         result.source,
         result.ast,
         result.bind,
-        types.builtin_instance,
+        &type_store,
     );
 
     // We rely on collectDeclaredTypes to build its output with the same allocator — the
@@ -26,7 +28,7 @@ test "variable declared type is collected from source annotation" {
 
     const symbol_entry = &collected.symbol_declared_types[0];
     if (symbol_entry.declared_type) |t| {
-        try testing.expectEqual(types.builtinKindTypeId(.number), t);
+        try testing.expectEqual(test_builtins.number, t);
     } else {
         std.debug.panic("expected declared type to be set for variable with annotation", .{});
     }
@@ -38,6 +40,7 @@ test "variable declared type is collected from source annotation" {
 test "parameter declared type is collected from function" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
 
     const src = "function f(x: string) {}\n";
     const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
@@ -47,7 +50,7 @@ test "parameter declared type is collected from function" {
         result.source,
         result.ast,
         result.bind,
-        types.builtin_instance,
+        &type_store,
     );
 
     // We expect the parameter symbol to appear in collected.symbol_declared_types with declared_type == builtin string id.
@@ -62,13 +65,14 @@ test "parameter declared type is collected from function" {
 
     try testing.expect(found_param != null);
     if (found_param) |fp| {
-        try testing.expectEqual(types.builtinKindTypeId(.string), fp.declared_type.?);
+        try testing.expectEqual(test_builtins.string, fp.declared_type.?);
     } else unreachable;
 }
 
 test "unknown type name emits VZG6004 and falls back to unknown" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
 
     const src = "let x: Foo = 1;\n";
     const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
@@ -78,7 +82,7 @@ test "unknown type name emits VZG6004 and falls back to unknown" {
         result.source,
         result.ast,
         result.bind,
-        types.builtin_instance,
+        &type_store,
     );
 
     try testing.expect(collected.symbol_declared_types.len > 0);
@@ -98,6 +102,7 @@ test "unknown type name emits VZG6004 and falls back to unknown" {
 test "untyped variable is omitted from declared types" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
 
     const src = "let x = 1;\n";
     const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
@@ -107,7 +112,7 @@ test "untyped variable is omitted from declared types" {
         result.source,
         result.ast,
         result.bind,
-        types.builtin_instance,
+        &type_store,
     );
 
     // Untyped symbol has no entry — the pass should return an empty list (or at least nothing with a non-null declared_type).
@@ -121,6 +126,7 @@ test "untyped variable is omitted from declared types" {
 test "declared type in for-loop init is collected" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
 
     // The `i` declared as `number` inside the for-loop init sits in a local
     // (function) scope rather than the global module body, so this test
@@ -134,7 +140,7 @@ test "declared type in for-loop init is collected" {
         result.source,
         result.ast,
         result.bind,
-        types.builtin_instance,
+        &type_store,
     );
 
     // We expect exactly one symbol with a declared_type set: `i` as number.
@@ -142,7 +148,7 @@ test "declared type in for-loop init is collected" {
     const entry = &collected.symbol_declared_types[0];
     if (entry.declared_type) |t| {
         try testing.expectEqual(
-            types.builtinKindTypeId(.number),
+            test_builtins.number,
             t,
         );
     } else unreachable;
@@ -153,6 +159,7 @@ test "declared type in for-loop init is collected" {
 test "fully-annotated function produces a signature entry" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
 
     const src = "function f(a: number, b: string): void {}\n";
     const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
@@ -162,7 +169,7 @@ test "fully-annotated function produces a signature entry" {
         result.source,
         result.ast,
         result.bind,
-        types.builtin_instance,
+        &type_store,
     );
 
     // hasAny() confirms at least one signature was produced; length check proves
@@ -174,6 +181,7 @@ test "fully-annotated function produces a signature entry" {
 test "multi-parameter function collects each parameter declared type" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
 
     const src = "function f(x: number, y: string) {}\n";
     const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
@@ -183,7 +191,7 @@ test "multi-parameter function collects each parameter declared type" {
         result.source,
         result.ast,
         result.bind,
-        types.builtin_instance,
+        &type_store,
     );
 
     // Both parameters should appear in symbol_declared_types with the right ids.
@@ -194,9 +202,9 @@ test "multi-parameter function collects each parameter declared type" {
     for (collected.symbol_declared_types) |entry| {
         if (entry.declared_type) |t| {
             const id: u32 = t;
-            if (id == types.builtinKindTypeId(.number)) {
+            if (id == test_builtins.number) {
                 found_number = true;
-            } else if (id == types.builtinKindTypeId(.string)) {
+            } else if (id == test_builtins.string) {
                 found_string = true;
             }
         }
@@ -208,6 +216,7 @@ test "multi-parameter function collects each parameter declared type" {
 test "function without return annotation falls back to unknown" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
 
     const src = "function f() {}\n";
     const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
@@ -217,7 +226,7 @@ test "function without return annotation falls back to unknown" {
         result.source,
         result.ast,
         result.bind,
-        types.builtin_instance,
+        &type_store,
     );
 
     // Signature was produced (else the unannotated branch wouldn't have fired).
@@ -225,7 +234,7 @@ test "function without return annotation falls back to unknown" {
     const entry = &collected.function_signatures[0];
     if (entry.resolved_return_type) |rt| {
         // Verify inline return type is the builtin unknown id.
-        try testing.expectEqual(types.builtinKindTypeId(.unknown), @as(u32, rt));
+        try testing.expectEqual(test_builtins.unknown, @as(u32, rt));
     } else unreachable;
 
     // Unknown fallback must not emit an "unknown_type_name" diagnostic — there was
@@ -238,6 +247,7 @@ test "function without return annotation falls back to unknown" {
 test "unknown parameter type name emits VZG6004 diagnostic" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
 
     const src = "function f(x: Foo) {}\n";
     const result = try frontend.analyze(arena.allocator(), .{ .text = src }, .{});
@@ -247,7 +257,7 @@ test "unknown parameter type name emits VZG6004 diagnostic" {
         result.source,
         result.ast,
         result.bind,
-        types.builtin_instance,
+        &type_store,
     );
 
     // A diagnostic for the unknown parameter type must be present.

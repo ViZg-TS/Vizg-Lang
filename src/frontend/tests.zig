@@ -3050,7 +3050,8 @@ test "frontend suite: malformed recovered nodes survive full analysis" {
     const allocator = arena.allocator();
     const result = try frontend.analyze(allocator, .{ .text = "function f() { label:; throw }" }, .{});
     try std.testing.expect(result.diagnostics.len > 0);
-    _ = try @import("../semantics/type_inference.zig").inferLiteralNodeTypes(allocator, result.ast);
+    const builtins = @import("../types/root.zig").Builtins.init();
+    _ = try @import("../semantics/type_inference.zig").inferLiteralNodeTypes(allocator, result.ast, &builtins);
 }
 
 test "frontend suite: color_art.ts fixture — 0 diagnostics smoke test" {

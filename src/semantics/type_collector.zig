@@ -5,6 +5,7 @@ const binder = @import("../frontend/binder.zig");
 const builtin_kind = @import("../types/builtin.zig");
 const diagnostics_mod = @import("../diagnostics/root.zig");
 const types = @import("../types/root.zig");
+const type_inference = @import("type_inference.zig");
 
 // ---------------------------------------------------------------------------
 // collectDeclaredTypes — produces declared symbol types from AST annotations.
@@ -29,10 +30,11 @@ fn resolveAnnotationName(
     name: []const u8,
     span: ast_mod.tokens.Span,
     source_path: ?[]const u8,
+    builtins: *const types.Builtins,
 ) !types.TypeId {
-    inline for (builtin_kind.builtinKinds_static) |kind| {
+    for (builtin_kind.builtinKinds) |kind| {
         if (std.mem.eql(u8, name, builtin_kind.builtinKindName(kind))) {
-            return builtin_kind.builtinKindTypeId(kind);
+            return builtins.id(kind);
         }
     }
 
@@ -46,7 +48,7 @@ fn resolveAnnotationName(
         .path = source_path,
     });
 
-    return types.builtin_instance.unknown;
+    return builtins.unknown;
 }
 
 fn resolveAnnotation(
@@ -55,9 +57,11 @@ fn resolveAnnotation(
     tree: ast_mod.Ast,
     annotation: ast_mod.TypeAnnotation,
     source_path: ?[]const u8,
+    type_store: *types.TypeStore,
 ) !types.TypeId {
-    const name = tree.annotationName(annotation) orelse return types.builtin_instance.unknown;
-    return resolveAnnotationName(allocator_, diag_list, name, annotation.span, source_path);
+    const name = tree.annotationName(annotation) orelse
+        return type_inference.resolveTypeAnnotation(tree, annotation, type_store);
+    return resolveAnnotationName(allocator_, diag_list, name, annotation.span, source_path, &type_store.builtins);
 }
 
 /// Per-symbol declared-type snapshot. Stored inline in TypeInfoCollectResult —
@@ -75,9 +79,9 @@ pub const DeclaredSymbolType = struct {
 /// later use by the type checker).
 pub const FunctionSignatureEntry = struct {
     symbol_id: binder.SymbolId,
-    /// Id of the signature — corresponds to a `Type{ .kind = .function = sig_id }` that can be looked up in any downstream FunctionSignatureStore. The id is reserved within the user range so it never collides with builtin ids (100-199).
+    /// Id of the signature in the owning semantic TypeStore.
     signature_id: types.FunctionSignatureId,
-    /// Inline snapshot of the resolved return type. May be `unknown` when no annotation was present (per goal policy: prefer unknown unless checker can distinguish no-return from void). Lets tests and diagnostics inspect without walking FunctionSignatureStore.
+    /// Inline snapshot of the resolved return type. May be `unknown` when no annotation was present.
     resolved_return_type: ?types.TypeId = null,
 };
 
@@ -105,10 +109,9 @@ pub fn collectDeclaredTypes(
     source: frontend.SourceFile,
     tree: ast_mod.Ast,
     bind: binder.BindResult,
-    builtins: types.Builtins,
+    type_store: *types.TypeStore,
 ) !TypeInfoCollectResult {
-    _ = builtins; // reserved — kept for API compatibility with the existing plan
-
+    const builtins = &type_store.builtins;
     var diag_list: std.ArrayList(diagnostics_mod.Diagnostic) = .empty;
     errdefer diag_list.deinit(allocator);
     {
@@ -116,10 +119,7 @@ pub fn collectDeclaredTypes(
         while (i < diag_list.items.len) : (i += 1) {} // diagnostics are non-owning — nothing to destroy on error
     }
 
-    // Arena-owned FunctionSignatureStore captures every parameter-and-return signature produced by the function declaration branch below. The store is populated as we walk scopes and exposed through `signature_entries` after collection. The allocator used here (typically an arena) backs both this store's internal storage and the result's returned slices.
-    var sig_store: types.FunctionSignatureStore = types.FunctionSignatureStore.init(allocator);
-
-    // Per-function pairing of symbol_id with the FunctionSignatureId built for it. Lives on allocator so tests can inspect individual entries without allocating per-call — keep this in sync with `sig_store.add()`.
+    // Pair each function symbol with the canonical signature owned by TypeStore.
     var signature_entries: std.ArrayList(FunctionSignatureEntry) = .empty;
     errdefer signature_entries.deinit(allocator);
 
@@ -149,7 +149,7 @@ pub fn collectDeclaredTypes(
                             .VariableDeclarator => |vd| {
                                 if (vd.type_annotation == null) continue;
                                 const ann = vd.type_annotation.?;
-                                const t = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path);
+                                const t = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path, type_store);
                                 _ = appendOrOom(&out_list, allocator, .{ .symbol_id = symbol.id, .declared_type = t });
                             },
                             else => {},
@@ -159,7 +159,7 @@ pub fn collectDeclaredTypes(
                 .VariableDeclarator => |vd| {
                     if (vd.type_annotation == null) continue;
                     const ann = vd.type_annotation.?;
-                    const t = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path);
+                    const t = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path, type_store);
                     _ = appendOrOom(&out_list, allocator, .{
                         .symbol_id = symbol.id,
                         .declared_type = t,
@@ -181,12 +181,18 @@ pub fn collectDeclaredTypes(
                                 .Parameter => |param| {
                                     // Untyped parameters carry no annotation and are added to the signature under `unknown` so callers can see them. Annotated-but-unknown names still route through resolveAnnotation, which emits VZG6004 on unknown types — preserving that diagnostic even when the declaration is a function param.
                                     const type_id: types.TypeId = if (param.type_annotation) |ann|
-                                        try resolveAnnotation(allocator, &diag_list, tree, ann, source.path)
+                                        try resolveAnnotation(allocator, &diag_list, tree, ann, source.path, type_store)
                                     else
-                                        types.builtin_instance.unknown;
+                                        builtins.unknown;
 
                                     // Track the parameter for signature construction. The name comes directly from the AST (which is still live on the binder's arena), so we don't need a copy.
-                                    if (local_params.append(allocator, .{ .name = param.name, .type_id = type_id })) |_| {} else |err| {
+                                    if (local_params.append(allocator, .{
+                                        .name = param.name,
+                                        .type_id = type_id,
+                                        .optional = param.optional,
+                                        .has_default = param.initializer != null,
+                                        .rest = param.rest,
+                                    })) |_| {} else |err| {
                                         return err;
                                     }
                                 },
@@ -198,13 +204,22 @@ pub fn collectDeclaredTypes(
                     // Resolve the declared return type per goal policy: use `unknown` when no annotation is present (i.e. "no return" cannot be distinguished from "return void") and fall through to resolveAnnotation for annotated names, which emits VZG6004 on unknown types. The final type_id is always a valid builtin or `unknown`.
                     var return_type: types.TypeId = undefined;
                     if (decl.return_type) |ann| {
-                        return_type = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path);
+                        return_type = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path, type_store);
                     } else {
-                        return_type = types.builtin_instance.unknown;
+                        return_type = builtins.unknown;
                     }
+                    return_type = try type_inference.wrapFunctionReturn(return_type, decl.flags, type_store);
 
                     // Build a function signature from the collected parameter list and resolved return type. The FunctionSignature is allocated by an arena-owned store — each call to `add()` appends into a shared ArrayList on the collector's allocator so lifetime remains tied to the enclosing analysis pass (typically a binder-level arena). The resulting signature_id is paired with the function's symbol_id in `signature_entries` for downstream consumption.
-                    const sig = try sig_store.add(local_params.items, return_type);
+                    const sig = try type_store.addFunctionDetailed(
+                        local_params.items,
+                        return_type,
+                        @intCast(decl.type_parameters.len),
+                        .{
+                            .is_async = decl.flags.is_async,
+                            .is_generator = decl.flags.is_generator,
+                        },
+                    );
 
                     for (bind.node_symbols) |ns| {
                         if (ns.node == node_id) {
@@ -218,13 +233,24 @@ pub fn collectDeclaredTypes(
                     }
                 },
                 .Parameter => |param| {
-                    // Per-goal policy: unannotated parameters use `unknown` as a safe fallback; annotated-but-unknown names still flow through resolveAnnotation which emits VZG6004 for invalid type names. Each parameter gets its own DeclaredSymbolType entry so downstream passes can inspect the per-symbol declared-type map without re-walking signatures.
-                    const type_id: types.TypeId = if (param.type_annotation) |ann|
-                        try resolveAnnotation(allocator, &diag_list, tree, ann, source.path)
-                    else
-                        types.builtin_instance.unknown;
+                    const ann = param.type_annotation orelse continue;
+                    const type_id = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path, type_store);
 
                     // The binder declared this parameter with `symbol.declaration == param_id` and `symbol.kind == .parameter`. Each symbol appears exactly once in the enclosing scope's symbols slice during collection.
+                    _ = appendOrOom(&out_list, allocator, .{
+                        .symbol_id = symbol.id,
+                        .declared_type = type_id,
+                    });
+                },
+                .TypeAliasDeclaration => |decl| {
+                    const type_id = try resolveAnnotation(
+                        allocator,
+                        &diag_list,
+                        tree,
+                        decl.type_annotation,
+                        source.path,
+                        type_store,
+                    );
                     _ = appendOrOom(&out_list, allocator, .{
                         .symbol_id = symbol.id,
                         .declared_type = type_id,
