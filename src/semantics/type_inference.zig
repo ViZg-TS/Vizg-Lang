@@ -123,6 +123,11 @@ pub fn inferLiteralNodeTypes(
             .ExpressionStatement => |expr_stmt| _ = try stack.append(allocator, expr_stmt.expression),
             .VariableDeclaration => |decl| for (decl.declarations) |d| try stack.append(allocator, d),
             .TypeAliasDeclaration, .InterfaceDeclaration => {},
+            .EnumDeclaration => |decl| for (decl.members) |member| try stack.append(allocator, member),
+            .EnumMember => |member| {
+                if (member.computed_name) |computed| try stack.append(allocator, computed);
+                if (member.initializer) |initializer| try stack.append(allocator, initializer);
+            },
             .VariableDeclarator => |vd| if (vd.init) |i| try stack.append(allocator, i),
             .FunctionDeclaration => |fn_decl| try stack.append(allocator, fn_decl.body),
             .FunctionExpression => |fn_expr| try stack.append(allocator, fn_expr.body),

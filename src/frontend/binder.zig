@@ -12,6 +12,7 @@ pub const ScopeKind = enum {
     global,
     function,
     class,
+    enum_,
     block,
 };
 
@@ -23,6 +24,8 @@ pub const SymbolKind = enum {
     type_alias,
     interface,
     class,
+    enum_,
+    enum_member,
     field,
     method,
 };
@@ -253,6 +256,22 @@ const Binder = struct {
                 const symbol_id = try self.declareInNamespace(scope, decl.name, .interface, .type, node_id, node.span);
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
             },
+            .EnumDeclaration => |decl| {
+                const value_symbol = try self.declareInNamespace(scope, decl.name, .enum_, .value, node_id, node.span);
+                const type_symbol = try self.declareInNamespace(scope, decl.name, .enum_, .type, node_id, node.span);
+                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = value_symbol });
+                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = type_symbol });
+                const enum_scope = try self.addScope(.enum_, scope);
+                for (decl.members) |member| try self.bindNode(member, enum_scope);
+            },
+            .EnumMember => |member| {
+                if (member.name.len != 0) {
+                    const symbol_id = try self.declare(scope, member.name, .enum_member, node_id, node.span);
+                    try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                }
+                if (member.computed_name) |computed| try self.bindNode(computed, scope);
+                if (member.initializer) |initializer| try self.bindNode(initializer, scope);
+            },
             .VariableDeclarator => |declarator| {
                 const symbol_id = try self.declare(scope, declarator.name, .variable, node_id, node.span);
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
@@ -421,6 +440,7 @@ const Binder = struct {
             .VariableDeclarator => |declarator| try self.appendExport(declarator.name, declarator.name, node_id),
             .TypeAliasDeclaration => |decl| try self.appendExportDetails(decl.name, decl.name, node_id, .declaration, true, ""),
             .InterfaceDeclaration => |decl| try self.appendExportDetails(decl.name, decl.name, node_id, .declaration, true, ""),
+            .EnumDeclaration => |decl| try self.appendExport(decl.name, decl.name, node_id),
             .ClassDeclaration => |decl| try self.appendExport(decl.name, decl.name, node_id),
             else => {},
         }
@@ -625,4 +645,35 @@ test "classes bind dual declarations member and function scopes" {
     try std.testing.expectEqual(ast_mod.ClassMethodKind.constructor, parsed.ast.node(user.members[1]).data.ClassMethod.kind);
     try std.testing.expect(parsed.ast.node(user.members[3]).data.ClassField.is_static);
     try std.testing.expect(parsed.ast.node(statements[1]).data.ClassDeclaration.super_class != null);
+}
+
+test "enums bind value type and member namespaces" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator, "export enum Direction { Up, Down = Up }", true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    const bound = try bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
+    var value = false;
+    var type_symbol = false;
+    var enum_scope = false;
+    for (bound.symbols) |symbol| if (std.mem.eql(u8, symbol.name, "Direction")) {
+        value = value or symbol.namespace == .value;
+        type_symbol = type_symbol or symbol.namespace == .type;
+    };
+    for (bound.scopes) |scope| {
+        if (scope.kind == .enum_) enum_scope = true;
+    }
+    try std.testing.expect(value and type_symbol and enum_scope);
+    try std.testing.expectEqual(@as(usize, 1), bound.module.exports.len);
+
+    const duplicate_scan = try scanner.scanAll(allocator, "enum E { Same, Same }", true);
+    const duplicate_parse = try parser.parse(allocator, duplicate_scan.tokens, .{});
+    const duplicate_bound = try bind(allocator, duplicate_parse.ast);
+    try std.testing.expectEqual(@as(usize, 1), duplicate_bound.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.duplicate_declaration, duplicate_bound.diagnostics[0].code);
 }

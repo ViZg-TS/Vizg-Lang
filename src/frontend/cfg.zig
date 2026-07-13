@@ -78,6 +78,11 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
         },
         .ClassDeclaration => |class_decl| for (class_decl.members) |member| try collectFunctions(allocator, tree, member, functions),
         .ClassExpression => |class_expr| for (class_expr.members) |member| try collectFunctions(allocator, tree, member, functions),
+        .EnumDeclaration => |decl| for (decl.members) |member| try collectFunctions(allocator, tree, member, functions),
+        .EnumMember => |member| {
+            if (member.computed_name) |computed| try collectFunctions(allocator, tree, computed, functions);
+            if (member.initializer) |initializer| try collectFunctions(allocator, tree, initializer, functions);
+        },
         .ClassMethod => |method| {
             try functions.append(allocator, .{
                 .function = node_id,

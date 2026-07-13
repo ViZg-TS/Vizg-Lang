@@ -87,6 +87,7 @@ const Parser = struct {
         if (self.at(.Keyword_export)) return try self.parseExportDeclaration();
         if (self.atTypeAliasDeclaration()) return try self.parseTypeAliasDeclaration();
         if (self.atInterfaceDeclaration()) return try self.parseInterfaceDeclaration();
+        if (self.at(.Keyword_enum)) return try self.parseEnumDeclaration();
         if (self.at(.Keyword_class)) return try self.parseClassDeclaration();
         if (self.at(.Keyword_function)) return try self.parseFunctionDeclaration(false, false);
         if (self.atIdentifierText("async") and self.peek(1).kind == .Keyword_function) {
@@ -194,6 +195,64 @@ const Parser = struct {
                 .extends = try heritage.toOwnedSlice(self.allocator),
                 .body = body,
             } },
+        });
+    }
+
+    fn parseEnumDeclaration(self: *Parser) anyerror!NodeId {
+        const start = self.expect(.Keyword_enum, "expected enum");
+        const name = self.expect(.Identifier, "expected enum name");
+        _ = self.expect(.LBrace, "expected '{' after enum name");
+        var members: std.ArrayList(NodeId) = .empty;
+        errdefer members.deinit(self.allocator);
+        while (!self.at(.RBrace) and !self.at(.EOF)) {
+            const before = self.index;
+            if (try self.parseEnumMember()) |member| try members.append(self.allocator, member);
+            if (self.eat(.Comma)) continue;
+            if (!self.at(.RBrace)) {
+                self.report("expected ',' or '}' after enum member", .expected_token);
+                while (!self.at(.Comma) and !self.at(.RBrace) and !self.at(.EOF)) _ = self.advance();
+                _ = self.eat(.Comma);
+            }
+            if (self.index == before) _ = self.advance();
+        }
+        const end = self.expect(.RBrace, "expected '}' after enum members");
+        return self.addNode(.{
+            .span = joinSpans(start.span, end.span),
+            .data = .{ .EnumDeclaration = .{ .name = name.lexeme, .members = try members.toOwnedSlice(self.allocator) } },
+        });
+    }
+
+    fn parseEnumMember(self: *Parser) anyerror!?NodeId {
+        const start = self.current();
+        var name: []const u8 = "";
+        var computed_name: ?NodeId = null;
+        var end = start.span;
+        switch (start.kind) {
+            .Identifier, .NumberLiteral => {
+                name = self.advance().lexeme;
+                end = start.span;
+            },
+            .StringLiteral => {
+                const token = self.advance();
+                name = if (token.lexeme.len >= 2) token.lexeme[1 .. token.lexeme.len - 1] else token.lexeme;
+                end = token.span;
+            },
+            .LBracket => {
+                _ = self.advance();
+                computed_name = try self.parseExpression();
+                end = self.expect(.RBracket, "expected ']' after computed enum member name").span;
+            },
+            else => {
+                self.report("expected enum member name", .expected_token);
+                while (!self.at(.Comma) and !self.at(.RBrace) and !self.at(.EOF)) _ = self.advance();
+                return null;
+            },
+        }
+        const initializer = if (self.eat(.Equal)) try self.parseAssignmentExpression() else null;
+        if (initializer) |id| end = self.nodes.items[@intCast(id)].span;
+        return try self.addNode(.{
+            .span = joinSpans(start.span, end),
+            .data = .{ .EnumMember = .{ .name = name, .computed_name = computed_name, .initializer = initializer } },
         });
     }
 
@@ -406,6 +465,14 @@ const Parser = struct {
             });
         }
 
+        if (self.at(.Keyword_enum)) {
+            const declaration = try self.parseEnumDeclaration();
+            return self.addNode(.{
+                .span = joinSpans(start, self.nodes.items[@intCast(declaration)].span),
+                .data = .{ .ExportDeclaration = .{ .kind = .declaration, .declaration = declaration } },
+            });
+        }
+
         if (self.isVariableKeyword(self.current().kind)) {
             const declaration = try self.parseVariableDeclarationStatement();
             return self.addNode(.{
@@ -416,6 +483,15 @@ const Parser = struct {
 
         if (self.at(.Keyword_default)) {
             _ = self.advance();
+
+            if (self.at(.Keyword_enum)) {
+                const declaration = try self.parseEnumDeclaration();
+                const enum_node = self.nodes.items[@intCast(declaration)];
+                return self.addNode(.{
+                    .span = joinSpans(start, enum_node.span),
+                    .data = .{ .ExportDeclaration = .{ .kind = .declaration, .declaration = declaration, .default_name = enum_node.data.EnumDeclaration.name } },
+                });
+            }
 
             // export default function <name>() {} — parse as a named
             // FunctionDeclaration and tag the wrapper with default_name.
@@ -3321,4 +3397,30 @@ test "parser builds debugger statements and rejects with precisely" {
     try std.testing.expectEqual(@as(usize, 2), statements.len);
     _ = parsed.ast.node(statements[0]).data.DebuggerStatement;
     _ = parsed.ast.node(statements[1]).data.ExpressionStatement;
+}
+
+test "parser builds TypeScript enum members and recovers invalid members" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, "enum Direction { Up, Down = 4, 'side', [key] = value }", true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const declaration = parsed.ast.node(parsed.ast.node(parsed.ast.root).data.Program.statements[0]).data.EnumDeclaration;
+    try std.testing.expectEqualStrings("Direction", declaration.name);
+    try std.testing.expectEqual(@as(usize, 4), declaration.members.len);
+    try std.testing.expectEqualStrings("Up", parsed.ast.node(declaration.members[0]).data.EnumMember.name);
+    const down = parsed.ast.node(declaration.members[1]).data.EnumMember;
+    try std.testing.expectEqualStrings("4", parsed.ast.node(down.initializer.?).data.Literal.value);
+    try std.testing.expectEqualStrings("side", parsed.ast.node(declaration.members[2]).data.EnumMember.name);
+    try std.testing.expect(parsed.ast.node(declaration.members[3]).data.EnumMember.computed_name != null);
+
+    const invalid_scan = try scanner.scanAll(allocator, "enum E { A, @, B = value } let recovered = 1;", true);
+    const invalid_parse = try parse(allocator, invalid_scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 1), invalid_parse.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 2), invalid_parse.ast.node(invalid_parse.ast.root).data.Program.statements.len);
+    const recovered_enum = invalid_parse.ast.node(invalid_parse.ast.node(invalid_parse.ast.root).data.Program.statements[0]).data.EnumDeclaration;
+    try std.testing.expectEqual(@as(usize, 2), recovered_enum.members.len);
 }

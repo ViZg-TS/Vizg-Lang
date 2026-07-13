@@ -358,6 +358,15 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             for (decl.extends) |heritage| try printTypeNode(writer, tree, heritage, depth + 1);
             try printTypeNode(writer, tree, decl.body, depth + 1);
         },
+        .EnumDeclaration => |decl| {
+            try writer.print("EnumDeclaration #{} name=\"{s}\" members={} {}..{}\n", .{ node_id, decl.name, decl.members.len, node.span.start, node.span.end });
+            for (decl.members) |member| try printAstNode(writer, tree, member, depth + 1);
+        },
+        .EnumMember => |member| {
+            try writer.print("EnumMember #{} name=\"{s}\" {}..{}\n", .{ node_id, member.name, node.span.start, node.span.end });
+            if (member.computed_name) |computed| try printAstNode(writer, tree, computed, depth + 1);
+            if (member.initializer) |initializer| try printAstNode(writer, tree, initializer, depth + 1);
+        },
         .VariableDeclarator => |decl| {
             try writer.print("VariableDeclarator #{} name=\"{s}\"", .{ node_id, decl.name });
             if (decl.type_annotation) |annotation| try writer.print(" type=#{}", .{annotation.root});
@@ -1289,6 +1298,8 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .VariableDeclaration => return "VariableDeclaration",
         .TypeAliasDeclaration => return "TypeAliasDeclaration",
         .InterfaceDeclaration => return "InterfaceDeclaration",
+        .EnumDeclaration => return "EnumDeclaration",
+        .EnumMember => return "EnumMember",
         .VariableDeclarator => return "VariableDeclarator",
         .FunctionDeclaration => return "FunctionDeclaration",
         .FunctionExpression => return "FunctionExpression",

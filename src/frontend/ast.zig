@@ -164,6 +164,17 @@ pub const InterfaceDeclaration = struct {
     body: TypeNodeId,
 };
 
+pub const EnumDeclaration = struct {
+    name: []const u8,
+    members: []const NodeId,
+};
+
+pub const EnumMember = struct {
+    name: []const u8 = "",
+    computed_name: ?NodeId = null,
+    initializer: ?NodeId = null,
+};
+
 pub const VariableDeclaration = struct {
     kind: tokens.TokenType,
     declarations: []const NodeId,
@@ -449,6 +460,8 @@ pub const NodeData = union(enum) {
     MetaProperty: MetaProperty,
     TypeAliasDeclaration: TypeAliasDeclaration,
     InterfaceDeclaration: InterfaceDeclaration,
+    EnumDeclaration: EnumDeclaration,
+    EnumMember: EnumMember,
     VariableDeclaration: VariableDeclaration,
     VariableDeclarator: VariableDeclarator,
     FunctionDeclaration: FunctionDeclaration,

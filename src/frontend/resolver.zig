@@ -125,6 +125,14 @@ const Resolver = struct {
                 for (var_decl.declarations) |declaration| try self.resolveNode(declaration, scope);
             },
             .TypeAliasDeclaration, .InterfaceDeclaration => {},
+            .EnumDeclaration => |decl| {
+                const enum_scope = self.takeScope();
+                for (decl.members) |member| try self.resolveNode(member, enum_scope);
+            },
+            .EnumMember => |member| {
+                if (member.computed_name) |computed| try self.resolveNode(computed, scope);
+                if (member.initializer) |initializer| try self.resolveNode(initializer, scope);
+            },
             .VariableDeclarator => |declarator| {
                 if (declarator.init) |initializer| try self.resolveNode(initializer, scope);
             },
@@ -654,4 +662,27 @@ test "resolver keeps catch binding inside catch scope" {
     }
     try std.testing.expectEqual(@as(usize, 1), bound_reads);
     try std.testing.expectEqual(@as(usize, 1), unresolved_reads);
+}
+
+test "resolver visits enum computed names and initializers" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, "let key = 'K'; let value = 1; enum E { First = value, [key] = First }", true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+    var value_seen = false;
+    var key_seen = false;
+    var first_seen = false;
+    for (resolved.references) |reference| {
+        value_seen = value_seen or std.mem.eql(u8, reference.name, "value");
+        key_seen = key_seen or std.mem.eql(u8, reference.name, "key");
+        first_seen = first_seen or std.mem.eql(u8, reference.name, "First");
+    }
+    try std.testing.expect(value_seen and key_seen and first_seen);
 }
