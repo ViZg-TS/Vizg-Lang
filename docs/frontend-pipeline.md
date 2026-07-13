@@ -63,9 +63,12 @@ The parser consumes scanner tokens and builds `ast.Ast`. The AST supports the cu
 - identifiers and literals
 - RegExp literals with pattern, flags, and full-literal spans
 - import declarations
-- export declarations and specifiers
+- declaration, default-expression, local, star, named re-export, and type-only export forms
 - variable declarations and declarators
 - function declarations, ordinary parameters, and final rest parameters
+- structured type annotations with generic, array, readonly, union, intersection, object, function, tuple, and parenthesized nodes
+- type alias declarations and interfaces whose members reuse the structured type AST; interface `extends` lists are preserved
+- class declarations and expressions with optional `extends`, typed fields, constructors, methods, `static`, and `public`/`private`/`protected` syntax
 - return, throw, try/catch/finally, break, continue, and expression statements
 - call, member, binary, conditional, assignment, and prefix unary expressions
 - spread elements in calls, arrays, and object literals
@@ -87,12 +90,16 @@ Parser diagnostics use `VZG2xxx` codes.
 The binder walks the AST and builds:
 
 - global, function, and block scopes
-- variable, function, parameter, and import symbols
+- variable, function, parameter, import, type-alias, interface, class, field, and method symbols
+- separate value and type namespaces, so a type declaration can share a name with a value declaration
 - AST node to symbol links
 - module import records
 - module export records
 
 It reports duplicate declarations and duplicate exports with `VZG3xxx` codes.
+Interfaces do not merge; a repeated interface or type alias in the same type namespace is a duplicate declaration.
+
+Classes bind in both value and type namespaces. Each class has a member scope; each method or constructor has a nested function scope. `this` and `super` are syntax nodes traversed within those scopes. Decorators, private fields, abstract semantics, and class type checking are deferred.
 
 `symbols <file>` prints output shaped like:
 
@@ -168,7 +175,7 @@ The type model and semantic mapping do **not** live inside `src/frontend/`. They
 - Type model (primitives, function signatures): `src/types/root.zig`.
 - Semantic mappings (per-symbol, per-node types): `src/semantics/type_info.zig`.
 
-The frontend pipeline (`frontend.analyze`) produces syntax-level output only. Any type annotation syntax the parser captures remains AST structure; it does not trigger semantic analysis within this layer. Semantic typing is a future pass that sits above the module graph and consumes both types from `src/types/` and symbol/node mappings from `src/semantics/`.
+The frontend pipeline (`frontend.analyze`) produces syntax-level output only. Type annotations are a structured, span-preserving syntax tree with dedicated union, intersection, function, and array precedence. This syntax tree is distinct from semantic `TypeId` values. Primitive named annotations remain compatible with the current semantic collector; composite interpretation remains a later semantic pass above the module graph.
 
 
 ## Module Graph And Linker (Cross-File Resolution)
@@ -179,9 +186,9 @@ The multi-file flow lives in `src/modules/`:
 entry path
   -> read source
   -> frontend.analyze per file (single-file pipeline above)
-  -> collect static imports from each file's binder
+  -> collect static imports and re-export sources from each file's AST
   -> resolve relative imports by canonical path
-  -> recursively analyze imported files
+  -> recursively analyze imported and re-exported files
   -> cache by canonical path
   -> build import edges
   -> link named/default/namespace imports to target symbols via linker.Linker
@@ -195,6 +202,8 @@ The module graph layer exposes `ModuleGraph.linked_imports`, which is a snapshot
 - the kind (`named`, `default`, `namespace`, `external`, or `unresolved`)
 - the target module id (for resolved imports) and symbol id (when exported by the target)
 
+Each import edge also preserves source specifier, declaration kind (`named`, `default`, `namespace`, `side_effect`, or `mixed`), and declaration-level `type_only` marker. Mixed imports retain per-specifier default/named kinds in AST and binder records.
+
 `vizg modules <file>` renders these links as a "Links" section after Imports in CLI output:
 
 ```txt
@@ -203,7 +212,7 @@ Modules
   module 1 path="..."
 
 Imports
-  module 0 -> module 1 specifier="./dep" status=local
+  module 0 -> module 1 specifier="./dep" kind=named type_only=false status=local
 
 Links
   link 0 local="value" imported="value" from="./dep" status=local -> module 1 name="value"

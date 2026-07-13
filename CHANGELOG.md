@@ -12,6 +12,13 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Added
 
+- Type aliases and interfaces now have declaration AST nodes, structured type members, preserved interface `extends` lists, type-namespace binder symbols, export metadata, and AST/symbol output.
+- Classes now have declaration/expression and member AST nodes, `extends`, fields, constructors, methods, static/access-modifier metadata, class/member binding scopes, resolver traversal, and AST output.
+- Type annotations now use a span-preserving structured AST and parse generic, array, readonly, union, intersection, object, function, tuple, and parenthesized forms with stable malformed-member recovery.
+- Export syntax now distinguishes declaration exports, default expressions, local exports, named re-exports, star re-exports, and type-only exports; re-export sources are traversed and retained on module graph edges.
+- Static imports now support default, namespace, side-effect, declaration-level type-only, and mixed default-plus-named forms, with explicit AST/binder kinds and module-edge kind/type metadata.
+- Array literals now preserve elisions as nullable AST element slots while keeping spread elements explicit and excluding trailing commas from the element count.
+- Object literals now preserve shorthand, computed, spread, method, async method, getter, and setter property kinds, with computed-key traversal and method function scopes.
 - `try` statements now support binding and bindingless `catch` clauses plus `finally`, with explicit AST branches, isolated catch bindings, resolver/type traversal, structural CFG paths, diagnostics for a missing clause, and AST output.
 - `throw expression;` statements now have AST, binder/resolver traversal, same-line expression diagnostics, terminating CFG edges, and AST output.
 - `switch` statements now preserve ordered `case`/`default` clauses in the AST, diagnose duplicate defaults, bind and resolve clause contents, and model dispatch, fallthrough, and `break` exits in CFGs.
