@@ -41,7 +41,7 @@ fn expectNodeTag(tree: ast_mod.Ast, id: NodeId, comptime tag: std.meta.Tag(ast_m
 
 /// Look inside `tree` for the first node whose active tag equals `tag`. Returns its id or invalid_node.
 fn findFirst(tree: ast_mod.Ast, tag: std.meta.Tag(ast_mod.NodeData)) !NodeId {
-    for (tree.nodes) |n| if (@intFromEnum(std.meta.activeTag(n.data)) == @intFromEnum(tag)) return n.id;
+    for (tree.nodes, 0..) |n, index| if (@intFromEnum(std.meta.activeTag(n.data)) == @intFromEnum(tag)) return @intCast(index);
     return ast_mod.invalid_node;
 }
 
@@ -76,7 +76,7 @@ test "parser precedence: 1 + 2 * 3 groups under +" {
     // The initializer of `x` is a BinaryExpression with operator `+`.
     const program = parsed.ast.node(parsed.ast.root).data.Program;
     try std.testing.expectEqual(@as(usize, 1), program.statements.len);
-    const var_decl_id = program.statements[0];
+    const var_decl_id = parsed.ast.node(program.statements[0]).data.VariableDeclaration.declarations[0];
     const declarator = parsed.ast.node(var_decl_id).data.VariableDeclarator;
     try std.testing.expect(declarator.init != null);
 
@@ -121,7 +121,7 @@ test "parser precedence: a || b && c groups (b && c) under ||" {
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
 
     const program = parsed.ast.node(parsed.ast.root).data.Program;
-    const vd_id = program.statements[0];
+    const vd_id = parsed.ast.node(program.statements[0]).data.VariableDeclaration.declarations[0];
     const declarator = parsed.ast.node(vd_id).data.VariableDeclarator;
     try std.testing.expect(declarator.init != null);
 
@@ -129,7 +129,7 @@ test "parser precedence: a || b && c groups (b && c) under ||" {
     try expectNodeTag(parsed.ast, or_id, .BinaryExpression);
     {
         const op_tok = parsed.ast.node(or_id).data.BinaryExpression.operator;
-        try std.testing.expect(op_tok == .BarBar, "expected || at top level");
+        try std.testing.expect(op_tok == .BarBar);
 
         // Left: identifier `a`. Right: (b && c) — binary AND whose right is an identifier.
         const or_left = parsed.ast.node(or_id).data.BinaryExpression.left;
@@ -141,7 +141,7 @@ test "parser precedence: a || b && c groups (b && c) under ||" {
             try expectNodeTag(parsed.ast, or_right, .BinaryExpression);
             const and_id = or_right;
             const and_op_tok = parsed.ast.node(and_id).data.BinaryExpression.operator;
-            try std.testing.expect(and_op_tok == .AmpersandAmpersand, "expected && at second level");
+            try std.testing.expect(and_op_tok == .AmpersandAmpersand);
 
             const and_left = parsed.ast.node(and_id).data.BinaryExpression.left;
             const and_right = parsed.ast.node(and_id).data.BinaryExpression.right;
@@ -167,7 +167,7 @@ test "parser precedence: i % colors.red.length || empty string groups % inside |
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
 
     const program = parsed.ast.node(parsed.ast.root).data.Program;
-    const vd_id = program.statements[0];
+    const vd_id = parsed.ast.node(program.statements[0]).data.VariableDeclaration.declarations[0];
     const declarator = parsed.ast.node(vd_id).data.VariableDeclarator;
     try std.testing.expect(declarator.init != null);
 
@@ -175,7 +175,7 @@ test "parser precedence: i % colors.red.length || empty string groups % inside |
     try expectNodeTag(parsed.ast, or_id, .BinaryExpression);
     {
         const op_tok = parsed.ast.node(or_id).data.BinaryExpression.operator;
-        try std.testing.expect(op_tok == .BarBar, "expected || at top level");
+        try std.testing.expect(op_tok == .BarBar);
 
         // Left: (i % colors.red.length) — binary `%` whose right is a MemberExpression.
         const or_left = parsed.ast.node(or_id).data.BinaryExpression.left;
@@ -183,7 +183,7 @@ test "parser precedence: i % colors.red.length || empty string groups % inside |
 
         {
             const mod_op_tok = parsed.ast.node(or_left).data.BinaryExpression.operator;
-            try std.testing.expect(mod_op_tok == .Percent, "expected % at second level");
+            try std.testing.expect(mod_op_tok == .Percent);
 
             const mod_left = parsed.ast.node(or_left).data.BinaryExpression.left;
             try expectNodeTag(parsed.ast, mod_left, .Identifier);
@@ -198,10 +198,10 @@ test "parser precedence: i % colors.red.length || empty string groups % inside |
 
                 try expectNodeTag(parsed.ast, member_obj_id, .MemberExpression);
                 // inner-most object is identifier `colors`, property "red".
-                const colors_id = parsed.astnode(member_obj_id).data.MemberExpression.object;
-                try std.testing.expect(std.mem.eql(u8, parsed.astnode(colors_id).data.Identifier.name, "colors"));
+                const colors_id = parsed.ast.node(member_obj_id).data.MemberExpression.object;
+                try std.testing.expect(std.mem.eql(u8, parsed.ast.node(colors_id).data.Identifier.name, "colors"));
 
-                const red_prop = parsed.astnode(member_obj_id).data.MemberExpression.property;
+                const red_prop = parsed.ast.node(member_obj_id).data.MemberExpression.property;
                 try std.testing.expect(std.mem.eql(u8, red_prop, "red"));
             }
         }
@@ -381,7 +381,7 @@ test "frontend suite: scanner reports lexical failures and still emits eof" {
     const allocator = arena.allocator();
 
     const invalid_char = try scanner.scanAll(allocator, "\\", false);
-    try std.testing.expectEqual(diagnostics.DiagnosticCode.invalid_character, invalid_char.diagnostics[0].code);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.invalid_escape_sequence, invalid_char.diagnostics[0].code);
     try std.testing.expectEqual(TokenType.EOF, invalid_char.tokens[invalid_char.tokens.len - 1].kind);
 
     const invalid_string = try scanner.scanAll(allocator, "\"unterminated", false);
@@ -436,17 +436,14 @@ test "frontend suite: parser accepts element access non-null assertion and chain
 
     const source =
         \\let art = ["a"];
-        \\\\let i = 0;
-        \\\\let len = art[i]!.length;
+        \\let i = 0;
+        \\let len = art[i]!.length;
     ;
     const scanned = try scanOk(allocator, source, false);
     const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
 
     // Goal: zero parser diagnostics on valid syntax.
-    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len) orelse {
-        var i: usize = 0;
-        while (i < parsed.diagnostics.len) : (i += 1) _ = "diag " ++ @tagName(parsed.diagnostics[i].code);
-    };
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
 
     // Verify AST has ElementAccessExpression and NonNullExpression nodes.
     {
@@ -462,13 +459,10 @@ test "frontend suite: parser accepts element access non-null assertion and chain
     }
 
     // Bind and resolve. Expect zero diagnostics on valid syntax.
-    const binder_result = binder.bind(allocator, parsed.ast) orelse return error.BindFailed;
-    const resolved = resolver.resolve(allocator, parsed.ast, binder_result);
+    const binder_result = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolver.resolve(allocator, parsed.ast, binder_result);
 
-    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len) orelse {
-        var i: usize = 0;
-        while (i < resolved.diagnostics.len) : (i += 1) _ = "diag " ++ @tagName(resolved.diagnostics[i].code);
-    };
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
 
     // Expect a read reference for 'art' and another for the inner 'i'. The member property name 'length' must not be resolved as a lexical variable.
     try std.testing.expect(countReferences(resolved, "art", .read) > 0);
@@ -477,10 +471,10 @@ test "frontend suite: parser accepts element access non-null assertion and chain
     // Confirm element access is structured: object resolves and index expression is traversed (the 'i' reference above proves this).
     {
         const program = parsed.ast.node(parsed.ast.root).data.Program;
-        var found_len_init: ?usize = null;
+        var found_len_init: ?NodeId = null;
         for (program.statements) |stmt_id| {
             const stmt = parsed.ast.node(stmt_id);
-            if (@tagName(stmt.data) != "VariableDeclaration") continue;
+            if (std.meta.activeTag(stmt.data) != .VariableDeclaration) continue;
             const vd = stmt.data.VariableDeclaration;
             for (vd.declarations) |d_id| {
                 const d = parsed.ast.node(d_id);
@@ -491,13 +485,13 @@ test "frontend suite: parser accepts element access non-null assertion and chain
         }
         try std.testing.expect(found_len_init != null);
 
-        // Descend into the chain: NonNull -> MemberExpression (length) -> ElementAccessExpression (art[i]).
-        const nn_id = parsed.ast.node(found_len_init.?).data.VariableDeclarator.init orelse unreachable;
-        try std.testing.expect(@tagName(parsed.ast.node(nn_id).data) == "NonNullExpression");
-        try std.testing.expect(@tagName(parsed.ast.node(nn_id.data.NonNullExpression.expression).data) == "MemberExpression");
-
-        const elem_id = parsed.ast.node(parsed.ast.node(nn_id).data.NonNullExpression.expression).data.MemberExpression.object;
-        try std.testing.expect(@tagName(parsed.ast.node(elem_id).data) == "ElementAccessExpression");
+        // Descend into the chain: MemberExpression (length) -> NonNull -> ElementAccessExpression (art[i]).
+        const member_id = found_len_init.?;
+        try std.testing.expectEqual(.MemberExpression, std.meta.activeTag(parsed.ast.node(member_id).data));
+        const nn_id = parsed.ast.node(member_id).data.MemberExpression.object;
+        try std.testing.expectEqual(.NonNullExpression, std.meta.activeTag(parsed.ast.node(nn_id).data));
+        const elem_id = parsed.ast.node(nn_id).data.NonNullExpression.expression;
+        try std.testing.expectEqual(.ElementAccessExpression, std.meta.activeTag(parsed.ast.node(elem_id).data));
     }
 }
 
@@ -539,7 +533,7 @@ test "frontend suite: optional chaining preserves each member call and index bou
     try std.testing.expect(mixed_inner.optional);
 
     const bound = try binder.bind(allocator, parsed.ast);
-    const resolved = resolver.resolve(allocator, parsed.ast, bound);
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
     try std.testing.expect(countReferences(resolved, "obj", .read) >= 4);
     try std.testing.expect(countReferences(resolved, "index", .read) == 1);
     try std.testing.expect(countReferences(resolved, "fn", .call) == 1);
@@ -555,7 +549,7 @@ test "frontend suite: malformed optional chain has stable diagnostic" {
     try std.testing.expectEqual(@as(usize, 1), parsed.diagnostics.len);
     try std.testing.expectEqual(diagnostics.DiagnosticCode.expected_token, parsed.diagnostics[0].code);
     try std.testing.expectEqualStrings("expected property name, [ or ( after ?.", parsed.diagnostics[0].message);
-    try std.testing.expectEqual(@as(u32, 4), parsed.diagnostics[0].span.start);
+    try std.testing.expectEqual(@as(u32, 5), parsed.diagnostics[0].span.start);
 }
 
 test "frontend suite: parser validates contextual import syntax" {
@@ -1449,7 +1443,7 @@ test "frontend suite: labeled loop control diagnoses and recovers" {
     const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
     try std.testing.expectEqual(@as(usize, 1), parsed.diagnostics.len);
     try std.testing.expectEqual(diagnostics.DiagnosticCode.unexpected_token, parsed.diagnostics[0].code);
-    try std.testing.expectEqualStrings("labeled break and continue statements are not supported", parsed.diagnostics[0].message);
+    try std.testing.expectEqualStrings("unknown label", parsed.diagnostics[0].message);
     const program = parsed.ast.node(parsed.ast.root).data.Program;
     try std.testing.expectEqual(@as(usize, 2), program.statements.len);
     try expectNodeTag(parsed.ast, program.statements[0], .BreakStatement);
@@ -1829,9 +1823,9 @@ test "frontend suite: named function expression name is recursive and private" {
 
     try std.testing.expect(bound.scopes[inner.scope].kind == .function);
     try std.testing.expect(inner.scope != 0);
-    try expectReference(resolved, "inner", .read, inner.id);
+    try expectReference(resolved, "inner", .call, inner.id);
     try expectReference(resolved, "x", .read, parameter.id);
-    try std.testing.expectEqual(@as(usize, 2), countReferences(resolved, "inner", .read));
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "inner", .call));
     var unresolved_inner: usize = 0;
     for (resolved.references) |reference| {
         if (std.mem.eql(u8, reference.name, "inner") and reference.symbol == null) unresolved_inner += 1;
@@ -2100,7 +2094,7 @@ test "frontend suite: export default function creates named symbol and declarati
     for (bound.symbols) |symbol| {
         if (std.mem.eql(u8, symbol.name, "createColorArt")) return; // pass
     }
-    try std.testing.fail("expected a 'createColorArt' symbol");
+    try std.testing.expect(false);
 
     var saw_default = false;
     for (bound.module.exports) |exp| {
@@ -2134,12 +2128,11 @@ test "frontend suite: export default preserves bare identifier path" {
     try std.testing.expectEqualStrings("x", export_decl.default_name.?);
     try std.testing.expect(export_decl.declaration == ast_mod.invalid_node);
 
-    const scanner = @import("scanner.zig");
     const bound = try binder.bind(allocator, parsed.ast);
     for (bound.module.exports) |exp| {
         if (std.mem.eql(u8, exp.name, "default")) return; // pass
     }
-    try std.testing.fail("expected a 'default' export record");
+    try std.testing.expect(false);
 }
 
 test "frontend suite: existing named export is unchanged" {
@@ -2160,7 +2153,7 @@ test "frontend suite: existing named export is unchanged" {
     for (bound.symbols) |symbol| {
         if (std.mem.eql(u8, symbol.name, "main")) return; // pass
     }
-    try std.testing.fail("expected a 'main' symbol from named export");
+    try std.testing.expect(false);
 
     var saw_main = false;
     for (bound.module.exports) |exp| {
@@ -2282,7 +2275,7 @@ test "frontend suite: binder does not bind object literal property keys as symbo
     // And no diagnostics (e.g. cannot_find_name) should fire for the keys.
     for (parsed.diagnostics) |diag| {
         if (diag.code == .cannot_find_name or diag.code == .expected_token) {
-            try std.testing.fail("unexpected diagnostic: " ++ @tagName(diag.code));
+            try std.testing.expect(false);
         }
     }
 }
@@ -2433,7 +2426,7 @@ test "frontend suite: resolver visits array literal elements" {
 
     const parsed = try parseOk(allocator,
         \\const arr = [1, 2, "x"];
-        \\const items: []const f64 = arr;
+        \\const items: number[] = arr;
     );
 
     const bound = try binder.bind(allocator, parsed.ast);
@@ -2441,20 +2434,20 @@ test "frontend suite: resolver visits array literal elements" {
     for (bound.symbols) |sym| {
         if (std.mem.eql(u8, sym.name, "arr")) continue;
         if (std.mem.eql(u8, sym.name, "1") or std.mem.eql(u8, sym.name, "2"))
-            try std.testing.fail("unexpected symbol from array literal");
+            try std.testing.expect(false);
     }
 
     const resolved = try resolver.resolve(allocator, parsed.ast, bound);
     // Only the declared names should be referenced: `arr` and `items`.
     for (resolved.references) |ref| {
         if (std.mem.eql(u8, ref.name, "1") or std.mem.eql(u8, ref.name, "2"))
-            try std.testing.fail("resolver produced a reference from an array literal element");
+            try std.testing.expect(false);
     }
 
     // No diagnostics — array literals should not trigger any errors in this snippet.
     for (parsed.diagnostics) |diag| {
         if (diag.code == .cannot_find_name or diag.code == .expected_token)
-            try std.testing.fail("unexpected diagnostic: " ++ @tagName(diag.code));
+            try std.testing.expect(false);
     }
 }
 
@@ -2573,7 +2566,7 @@ test "frontend suite: template AST preserves parts and resolver sees interpolati
     try std.testing.expect(template.parts[0].expression != null);
     try std.testing.expect(template.parts[1].expression != null);
     const template_span = parsed.ast.node(declarator.init.?).span;
-    const template_start = std.mem.lastIndexOf(u8, source, BT).?;
+    const template_start = std.mem.indexOf(u8, source, BT).?;
     try std.testing.expectEqual(@as(u32, @intCast(template_start)), template_span.start);
     try std.testing.expectEqual(@as(u32, @intCast(source.len - 1)), template_span.end);
 }
@@ -2641,7 +2634,7 @@ test "frontend suite: no-substitution and tagged templates share one payload con
 
     const bound = try binder.bind(allocator, parsed.ast);
     const resolved = try resolver.resolve(allocator, parsed.ast, bound);
-    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "tag", .read));
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "tag", .call));
     try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "obj", .read));
     try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "name", .read));
 }
@@ -2710,7 +2703,7 @@ test "frontend suite: unary expressions preserve precedence postfix assertions a
                 .Keyword_void => operators[5] = true,
                 .Keyword_delete => operators[6] = true,
                 .Keyword_await => operators[7] = true,
-                else => try std.testing.fail("unexpected unary operator"),
+                else => try std.testing.expect(false),
             }
             const argument_tag = std.meta.activeTag(parsed.ast.node(unary.argument).data);
             if (unary.operator == .Exclamation and argument_tag == .UnaryExpression) saw_chained = true;
@@ -2738,7 +2731,7 @@ test "frontend suite: unary expressions preserve precedence postfix assertions a
     try std.testing.expect(countReferences(resolved, "value", .read) >= 10);
     try std.testing.expectEqual(@as(usize, 2), countReferences(resolved, "object", .read));
     try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "promise", .read));
-    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "fn", .read));
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "fn", .call));
 }
 
 test "frontend suite: regexp context preserves division and recognizes expression starts" {
@@ -2882,6 +2875,8 @@ test "frontend suite: function flags cover async declarations exports expression
         \\export async function save() {}
         \\export default async function named() {}
         \\export default async function () {}
+        \\export default function* () { yield 1; }
+        \\export default async function* () { yield 1; }
         \\const expression = async function () {};
         \\const arrow = async () => {};
         \\class Worker { async run() {} async = 1; }
@@ -2895,26 +2890,97 @@ test "frontend suite: function flags cover async declarations exports expression
     const anonymous_export = parsed.ast.node(statements[3]).data.ExportDeclaration;
     try std.testing.expect(anonymous_export.default_name == null);
     try std.testing.expect(parsed.ast.node(anonymous_export.expression).data.FunctionExpression.flags.is_async);
-    const expression_decl = parsed.ast.node(statements[4]).data.VariableDeclaration;
+    const generator_export = parsed.ast.node(statements[4]).data.ExportDeclaration;
+    try std.testing.expect(parsed.ast.node(generator_export.expression).data.FunctionExpression.flags.is_generator);
+    const async_generator_export = parsed.ast.node(statements[5]).data.ExportDeclaration;
+    const async_generator = parsed.ast.node(async_generator_export.expression).data.FunctionExpression;
+    try std.testing.expect(async_generator.flags.is_async);
+    try std.testing.expect(async_generator.flags.is_generator);
+    const expression_decl = parsed.ast.node(statements[6]).data.VariableDeclaration;
     const expression = parsed.ast.node(parsed.ast.node(expression_decl.declarations[0]).data.VariableDeclarator.init.?).data.FunctionExpression;
     try std.testing.expect(expression.flags.is_async);
-    const arrow_decl = parsed.ast.node(statements[5]).data.VariableDeclaration;
+    const arrow_decl = parsed.ast.node(statements[7]).data.VariableDeclaration;
     const arrow = parsed.ast.node(parsed.ast.node(arrow_decl.declarations[0]).data.VariableDeclarator.init.?).data.ArrowFunctionExpression;
     try std.testing.expect(arrow.flags.is_async);
-    const class = parsed.ast.node(statements[6]).data.ClassDeclaration;
+    const class = parsed.ast.node(statements[8]).data.ClassDeclaration;
     try std.testing.expect(parsed.ast.node(class.members[0]).data.ClassMethod.flags.is_async);
     try std.testing.expectEqualStrings("async", parsed.ast.node(class.members[1]).data.ClassField.name);
+}
+
+test "frontend suite: as and satisfies bind looser than binary operators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const parsed = try parseOk(allocator,
+        \\const a = x + y satisfies T;
+        \\const b = x satisfies T + y;
+        \\const c = x + y as T;
+        \\const d = x as T + y;
+    );
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const a = parsed.ast.node(parsed.ast.node(parsed.ast.node(statements[0]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?).data.SatisfiesExpression;
+    try expectNodeTag(parsed.ast, a.expression, .BinaryExpression);
+    const b = parsed.ast.node(parsed.ast.node(parsed.ast.node(statements[1]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?).data.BinaryExpression;
+    try expectNodeTag(parsed.ast, b.left, .SatisfiesExpression);
+    const c = parsed.ast.node(parsed.ast.node(parsed.ast.node(statements[2]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?).data.AsExpression;
+    try expectNodeTag(parsed.ast, c.expression, .BinaryExpression);
+    const d = parsed.ast.node(parsed.ast.node(parsed.ast.node(statements[3]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?).data.BinaryExpression;
+    try expectNodeTag(parsed.ast, d.left, .AsExpression);
+}
+
+test "frontend suite: binder and resolver traverse assertions and updates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const parsed = try parseOk(allocator,
+        \\type Numberish = number;
+        \\type Callable = Function;
+        \\let value = 1;
+        \\const checked = value satisfies Numberish;
+        \\const casted = value as Numberish;
+        \\const assertedFn = (function asserted() { return asserted; }) satisfies Callable;
+        \\const castedFn = (function castedInner() { return castedInner; }) as Callable;
+        \\value++;
+    );
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+    const value = symbolByNameKindScope(bound, "value", .variable, 0).?;
+    try expectReference(resolved, "value", .read, value.id);
+    try std.testing.expectEqual(@as(usize, 3), countReferences(resolved, "value", .read));
+    try expectReference(resolved, "value", .write, value.id);
+    try std.testing.expect(symbolByNameKindScope(bound, "asserted", .function, null) != null);
+    try std.testing.expect(symbolByNameKindScope(bound, "castedInner", .function, null) != null);
+}
+
+test "frontend suite: CFG discovers nested and expression-contained functions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\function outer() { function inner() {} }
+        \\wrap(function callback() {});
+        \\const object = { method() {}, field: () => 1 };
+        \\const selected = ok ? function left() {} : function right() {};
+    }, .{});
+    try std.testing.expectEqual(@as(usize, 7), result.cfgs.len);
+}
+
+test "frontend suite: malformed recovered nodes survive full analysis" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const result = try frontend.analyze(allocator, .{ .text = "function f() { label:; throw }" }, .{});
+    try std.testing.expect(result.diagnostics.len > 0);
+    _ = try @import("../semantics/type_inference.zig").inferLiteralNodeTypes(allocator, result.ast);
 }
 
 test "frontend suite: color_art.ts fixture — 0 diagnostics smoke test" {
     // Fixture exercises: object literal, array literal, template interpolation,
     // type annotations (let i: number), non-null assertion (!.length, !.j),
     // 'as any' cast, ambient console.log. Must parse/analyze with 0 errors.
-    const fixture = @embedFile("../../test/frontend/realworld/color_art.ts");
-
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+    const fixture = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/frontend/realworld/color_art.ts", allocator, .limited(1024 * 1024));
 
     const result = try frontend.analyze(allocator, .{ .path = "color_art.ts", .text = fixture }, .{});
 

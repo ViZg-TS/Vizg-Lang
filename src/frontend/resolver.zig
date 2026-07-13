@@ -65,7 +65,7 @@ const Resolver = struct {
     }
 
     fn resolveNode(self: *Resolver, node_id: NodeId, scope: binder.ScopeId) anyerror!void {
-        if (node_id == ast_mod.invalid_node) return;
+        if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= self.ast.nodes.len) return;
         const node = self.ast.node(node_id);
         switch (node.data) {
             .Program => |program| {

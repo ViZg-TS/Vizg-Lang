@@ -783,29 +783,27 @@ pub const Scanner = struct {
                 // are also accepted because they delimit literal content and interpolation expressions; any other
                 // unknown character after a backslash surfaces InvalidEscapeSequence rather than silently kept.
                 const esc = self.peek().?;
-                switch (esc) {
-                    'n', 't', 'r', 'a', 'b', 'f', 'v' => {},
-                    '\x27' => {}, // escaped single quote
-                    '"' => {}, // escaped double-quote
-                    '`' => {}, // escaped backtick — literal backtick inside template (escape sequence)
-                    '$' => {}, // escaped dollar sign — escapes the interpolation trigger $
-                    '\\' => {}, // escaped backslash itself
-                    '\x30' => {}, // escape code 0 (always valid in templates)
-                    '\x78' => { // \xNN — require exactly 2 hex digits following 'x'.
+                const escape_len: usize = switch (esc) {
+                    'n', 't', 'r', 'a', 'b', 'f', 'v' => 1,
+                    '\x27', '"', '`', '$', '\\', '\x30' => 1,
+                    '\x78' => blk: { // \xNN — require exactly 2 hex digits following 'x'.
                         const p1 = self.index + 1;
                         const p2 = self.index + 2;
                         if (p1 >= self.source.len or !tokens.isHexDigit(self.source[p1])) return LexicalError.InvalidEscapeSequence;
                         if (p2 >= self.source.len or !tokens.isHexDigit(self.source[p2])) return LexicalError.InvalidEscapeSequence;
+                        break :blk 3;
                     },
-                    '\x75' => { // \uNNNN — require exactly 4 hex digits following 'u' (v1 form).
+                    '\x75' => blk: { // \uNNNN — require exactly 4 hex digits following 'u' (v1 form).
                         var i: usize = 1;
                         while (i <= 4) : (i += 1) {
                             const pos = self.index + i;
                             if (pos >= self.source.len or !tokens.isHexDigit(self.source[pos])) return LexicalError.InvalidEscapeSequence;
                         }
+                        break :blk 5;
                     },
                     else => return LexicalError.InvalidEscapeSequence,
-                }
+                };
+                self.advanceN(escape_len);
                 continue;
             }
 

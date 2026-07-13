@@ -81,6 +81,8 @@ pub fn inferLiteralNodeTypes(
         const id = stack.items[stack.items.len - 1];
         _ = stack.shrinkRetainingCapacity(stack.items.len - 1);
 
+        if (id == ast_mod.invalid_node or @as(usize, @intCast(id)) >= tree.nodes.len) continue;
+
         const node = tree.node(id);
         switch (node.data) {
             .Literal => |lit| {

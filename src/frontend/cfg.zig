@@ -42,7 +42,7 @@ pub fn build(allocator: std.mem.Allocator, tree: ast_mod.Ast) ![]const FunctionC
 }
 
 fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: NodeId, functions: *std.ArrayList(FunctionCfg)) anyerror!void {
-    if (node_id == ast_mod.invalid_node) return;
+    if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= tree.nodes.len) return;
     const node = tree.node(node_id);
     switch (node.data) {
         .Program => |program| {
@@ -61,6 +61,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
                 .name = function_decl.name,
                 .graph = try buildFunctionGraph(allocator, tree, function_decl.body),
             });
+            try collectFunctions(allocator, tree, function_decl.body, functions);
         },
         .FunctionExpression => |function_expr| {
             try functions.append(allocator, .{
@@ -68,13 +69,15 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
                 .name = function_expr.name orelse "<anonymous>",
                 .graph = try buildFunctionGraph(allocator, tree, function_expr.body),
             });
+            try collectFunctions(allocator, tree, function_expr.body, functions);
         },
         .ArrowFunctionExpression => |arrow| {
-            if (!arrow.expression_body) try functions.append(allocator, .{
+            try functions.append(allocator, .{
                 .function = node_id,
                 .name = "<arrow>",
                 .graph = try buildFunctionGraph(allocator, tree, arrow.body),
             });
+            try collectFunctions(allocator, tree, arrow.body, functions);
         },
         .ClassDeclaration => |class_decl| for (class_decl.members) |member| try collectFunctions(allocator, tree, member, functions),
         .ClassExpression => |class_expr| for (class_expr.members) |member| try collectFunctions(allocator, tree, member, functions),
@@ -89,7 +92,10 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
                 .name = method.name,
                 .graph = try buildFunctionGraph(allocator, tree, method.body),
             });
+            try collectFunctions(allocator, tree, method.body, functions);
         },
+        .ClassField => |field| if (field.initializer) |initializer| try collectFunctions(allocator, tree, initializer, functions),
+        .Parameter => |parameter| if (parameter.initializer) |initializer| try collectFunctions(allocator, tree, initializer, functions),
         .VariableDeclaration => |declaration| for (declaration.declarations) |item| try collectFunctions(allocator, tree, item, functions),
         .VariableDeclarator => |declarator| if (declarator.init) |init| try collectFunctions(allocator, tree, init, functions),
         .BlockStatement => |block| {
@@ -104,11 +110,84 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
         .FinallyClause => |finally_clause| try collectFunctions(allocator, tree, finally_clause.body, functions),
         .LabeledStatement => |labeled| try collectFunctions(allocator, tree, labeled.body, functions),
         .SwitchStatement => |switch_stmt| {
+            try collectFunctions(allocator, tree, switch_stmt.discriminant, functions);
             for (switch_stmt.cases) |case| try collectFunctions(allocator, tree, case, functions);
         },
         .SwitchCase => |switch_case| {
+            if (switch_case.condition) |condition| try collectFunctions(allocator, tree, condition, functions);
             for (switch_case.consequent) |statement| try collectFunctions(allocator, tree, statement, functions);
         },
+        .ExpressionStatement => |statement| try collectFunctions(allocator, tree, statement.expression, functions),
+        .ReturnStatement => |statement| if (statement.argument) |argument| try collectFunctions(allocator, tree, argument, functions),
+        .ThrowStatement => |statement| try collectFunctions(allocator, tree, statement.argument, functions),
+        .IfStatement => |statement| {
+            try collectFunctions(allocator, tree, statement.condition, functions);
+            try collectFunctions(allocator, tree, statement.consequent, functions);
+            if (statement.alternate) |alternate| try collectFunctions(allocator, tree, alternate, functions);
+        },
+        .WhileStatement => |statement| {
+            try collectFunctions(allocator, tree, statement.condition, functions);
+            try collectFunctions(allocator, tree, statement.body, functions);
+        },
+        .DoWhileStatement => |statement| {
+            try collectFunctions(allocator, tree, statement.body, functions);
+            try collectFunctions(allocator, tree, statement.condition, functions);
+        },
+        .ForStatement => |statement| {
+            if (statement.init) |child| try collectFunctions(allocator, tree, child, functions);
+            if (statement.condition) |child| try collectFunctions(allocator, tree, child, functions);
+            if (statement.update) |child| try collectFunctions(allocator, tree, child, functions);
+            if (statement.right) |child| try collectFunctions(allocator, tree, child, functions);
+            try collectFunctions(allocator, tree, statement.body, functions);
+        },
+        .CallExpression => |expression| {
+            try collectFunctions(allocator, tree, expression.callee, functions);
+            for (expression.arguments) |argument| try collectFunctions(allocator, tree, argument, functions);
+        },
+        .NewExpression => |expression| {
+            try collectFunctions(allocator, tree, expression.callee, functions);
+            for (expression.arguments) |argument| try collectFunctions(allocator, tree, argument, functions);
+        },
+        .ObjectExpression => |expression| for (expression.properties) |property| {
+            if (property.computed_key) |key| try collectFunctions(allocator, tree, key, functions);
+            try collectFunctions(allocator, tree, property.value, functions);
+        },
+        .ArrayExpression => |expression| for (expression.elements) |element| if (element) |child| try collectFunctions(allocator, tree, child, functions),
+        .TemplateExpression => |expression| for (expression.parts) |part| if (part.expression) |child| try collectFunctions(allocator, tree, child, functions),
+        .TaggedTemplateExpression => |expression| {
+            try collectFunctions(allocator, tree, expression.tag, functions);
+            try collectFunctions(allocator, tree, expression.template, functions);
+        },
+        .ImportExpression => |expression| {
+            try collectFunctions(allocator, tree, expression.source, functions);
+            if (expression.options) |options| try collectFunctions(allocator, tree, options, functions);
+        },
+        .MemberExpression => |expression| try collectFunctions(allocator, tree, expression.object, functions),
+        .ElementAccessExpression => |expression| {
+            try collectFunctions(allocator, tree, expression.object, functions);
+            try collectFunctions(allocator, tree, expression.index, functions);
+        },
+        .AsExpression => |expression| try collectFunctions(allocator, tree, expression.expression, functions),
+        .SatisfiesExpression => |expression| try collectFunctions(allocator, tree, expression.expression, functions),
+        .NonNullExpression => |expression| try collectFunctions(allocator, tree, expression.expression, functions),
+        .UnaryExpression => |expression| try collectFunctions(allocator, tree, expression.argument, functions),
+        .UpdateExpression => |expression| try collectFunctions(allocator, tree, expression.argument, functions),
+        .SpreadElement => |expression| try collectFunctions(allocator, tree, expression.argument, functions),
+        .YieldExpression => |expression| if (expression.argument) |argument| try collectFunctions(allocator, tree, argument, functions),
+        .BinaryExpression => |expression| {
+            try collectFunctions(allocator, tree, expression.left, functions);
+            try collectFunctions(allocator, tree, expression.right, functions);
+        },
+        .AssignmentExpression => |expression| {
+            try collectFunctions(allocator, tree, expression.left, functions);
+            try collectFunctions(allocator, tree, expression.right, functions);
+        },
+        .ConditionalExpression => |expression| {
+            try collectFunctions(allocator, tree, expression.condition, functions);
+            try collectFunctions(allocator, tree, expression.consequent, functions);
+            try collectFunctions(allocator, tree, expression.alternate, functions);
+        },
+        .SequenceExpression => |expression| for (expression.expressions) |child| try collectFunctions(allocator, tree, child, functions),
         else => {},
     }
 }
@@ -186,7 +265,7 @@ const GraphBuilder = struct {
     }
 
     fn buildStatement(self: *GraphBuilder, current: BasicBlockId, statement: NodeId) anyerror!?BasicBlockId {
-        if (statement == ast_mod.invalid_node) return current;
+        if (statement == ast_mod.invalid_node or @as(usize, @intCast(statement)) >= self.tree.nodes.len) return current;
         const node = self.tree.node(statement);
         switch (node.data) {
             .BlockStatement => |block| return self.buildStatementList(current, block.statements),
@@ -243,6 +322,10 @@ const GraphBuilder = struct {
 
     fn buildLabeledStatement(self: *GraphBuilder, current: BasicBlockId, labeled: ast_mod.LabeledStatement) anyerror!?BasicBlockId {
         const after = try self.createBlock(.normal);
+        if (labeled.body == ast_mod.invalid_node or @as(usize, @intCast(labeled.body)) >= self.tree.nodes.len) {
+            try self.addEdge(current, after);
+            return after;
+        }
         const body_node = self.tree.node(labeled.body);
         const fallthrough = switch (body_node.data) {
             .WhileStatement => |value| try self.buildWhileStatementLabeled(current, labeled.body, value, labeled.label, after),
@@ -259,6 +342,7 @@ const GraphBuilder = struct {
     }
 
     fn isIterationLabelBody(self: *GraphBuilder, node_id: NodeId) bool {
+        if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= self.tree.nodes.len) return false;
         return switch (self.tree.node(node_id).data) {
             .WhileStatement, .DoWhileStatement, .ForStatement => true,
             .LabeledStatement => |nested| self.isIterationLabelBody(nested.body),
@@ -521,7 +605,7 @@ const GraphBuilder = struct {
 };
 
 fn blockStatements(tree: ast_mod.Ast, body_id: NodeId) []const NodeId {
-    if (body_id == ast_mod.invalid_node) return &.{};
+    if (body_id == ast_mod.invalid_node or @as(usize, @intCast(body_id)) >= tree.nodes.len) return &.{};
     return switch (tree.node(body_id).data) {
         .BlockStatement => |block| block.statements,
         else => &.{},

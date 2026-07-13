@@ -569,8 +569,9 @@ const Parser = struct {
             if (self.at(.Keyword_function) or async_default_function) {
                 const async_start: ?Token = if (async_default_function) self.advance() else null;
                 const function_token = self.current();
-                if (self.peek(1).kind == .LParen) {
-                    _ = self.advance();
+                const after_function: usize = if (self.peek(1).kind == .Asterisk) 2 else 1;
+                if (self.peek(after_function).kind == .LParen) {
+                    if (!async_default_function) _ = self.advance();
                     const function_id = try self.parseFunctionExpression(async_start orelse function_token, async_default_function);
                     const function_node = self.nodes.items[@intCast(function_id)];
                     return self.addNode(.{
@@ -978,7 +979,17 @@ const Parser = struct {
             if (self.at(.Keyword_import)) {
                 const unsupported = self.advance();
                 self.reportAt(unsupported, "typeof import() types are not supported", .unsupported_ts_syntax);
-                return self.addTypeNode(.{ .span = joinSpans(start.span, unsupported.span), .data = .{ .TypeQuery = "<unsupported-import>" } });
+                var end = unsupported.span;
+                if (self.eat(.LParen)) {
+                    var depth: usize = 1;
+                    while (depth != 0 and !self.at(.EOF)) {
+                        const token = self.advance();
+                        end = token.span;
+                        if (token.kind == .LParen) depth += 1;
+                        if (token.kind == .RParen) depth -= 1;
+                    }
+                }
+                return self.addTypeNode(.{ .span = joinSpans(start.span, end), .data = .{ .TypeQuery = "<unsupported-import>" } });
             }
             const name = self.expectIdentifierLike("expected value name after 'typeof'");
             return self.addTypeNode(.{ .span = joinSpans(start.span, name.span), .data = .{ .TypeQuery = name.lexeme } });
@@ -1809,7 +1820,7 @@ const Parser = struct {
     }
 
     fn parseConditionalExpression(self: *Parser) anyerror!NodeId {
-        const condition = try self.parseCoalescingExpression();
+        const condition = try self.parseTypeAssertionExpression();
         if (!self.eat(.Question)) return condition;
 
         const consequent = try self.parseAssignmentExpression();
@@ -1822,6 +1833,32 @@ const Parser = struct {
                 .consequent = consequent,
                 .alternate = alternate,
             } },
+        });
+    }
+
+    fn parseTypeAssertionExpression(self: *Parser) anyerror!NodeId {
+        var expression = try self.parseCoalescingExpression();
+        while (self.atIdentifierText("as") or self.atIdentifierText("satisfies")) {
+            expression = try self.parseTypeAssertionSuffix(expression);
+        }
+        return expression;
+    }
+
+    fn parseTypeAssertionSuffix(self: *Parser, expression: NodeId) anyerror!NodeId {
+        const operator = self.advance();
+        const type_root = try self.parseType();
+        if (type_root == ast_mod.invalid_type_node) {
+            self.reportAt(operator, if (std.mem.eql(u8, operator.lexeme, "as")) "expected type after 'as'" else "expected type after 'satisfies'", .expected_token);
+            return expression;
+        }
+        const type_span = self.typeSpan(type_root);
+        const annotation: ast_mod.TypeAnnotation = .{ .root = type_root, .span = type_span };
+        return self.addNode(.{
+            .span = joinSpans(self.nodes.items[@intCast(expression)].span, type_span),
+            .data = if (std.mem.eql(u8, operator.lexeme, "as"))
+                .{ .AsExpression = .{ .expression = expression, .type_annotation = annotation } }
+            else
+                .{ .SatisfiesExpression = .{ .expression = expression, .type_annotation = annotation } },
         });
     }
 
@@ -1975,6 +2012,10 @@ const Parser = struct {
     fn parseAdditiveExpression(self: *Parser) anyerror!NodeId {
         var left = try self.parseMultiplicativeExpression();
         while (true) {
+            if (self.atIdentifierText("as") or self.atIdentifierText("satisfies")) {
+                left = try self.parseTypeAssertionSuffix(left);
+                continue;
+            }
             left = switch (self.current().kind) {
                 .Plus => blk: {
                     _ = self.advance();
@@ -2409,45 +2450,6 @@ const Parser = struct {
                     .data = .{ .UpdateExpression = .{ .operator = op_tok.kind, .argument = node, .prefix = false } },
                 });
                 continue;
-            }
-            // TypeScript `as` assertion uses the same structured type grammar as declarations.
-            if (self.atIdentifierText("as")) {
-                const as_tok = self.advance();
-                const type_root = try self.parseType();
-                if (type_root != ast_mod.invalid_type_node) {
-                    const type_span = self.typeSpan(type_root);
-                    const span = joinSpans(as_tok.span, type_span);
-                    node = try self.addNode(.{
-                        .span = joinSpans(self.nodes.items[@intCast(node)].span, span),
-                        .data = .{ .AsExpression = .{
-                            .expression = node,
-                            .type_annotation = .{ .root = type_root, .span = type_span },
-                        } },
-                    });
-                    continue;
-                } else {
-                    self.reportAt(as_tok, "expected type after 'as'", .expected_token);
-                    break;
-                }
-            }
-            // TypeScript `satisfies` shares `as` precedence but remains a distinct node.
-            if (self.atIdentifierText("satisfies")) {
-                const satisfies_tok = self.advance();
-                const type_root = try self.parseType();
-                if (type_root != ast_mod.invalid_type_node) {
-                    const type_span = self.typeSpan(type_root);
-                    node = try self.addNode(.{
-                        .span = joinSpans(self.nodes.items[@intCast(node)].span, type_span),
-                        .data = .{ .SatisfiesExpression = .{
-                            .expression = node,
-                            .type_annotation = .{ .root = type_root, .span = type_span },
-                        } },
-                    });
-                    continue;
-                } else {
-                    self.reportAt(satisfies_tok, "expected type after 'satisfies'", .expected_token);
-                    break;
-                }
             }
             break;
         }
@@ -3825,6 +3827,14 @@ test "parser preserves indexed access keyof and type queries" {
     try std.testing.expectEqualStrings("User", parsed.ast.typeNode(keys).data.Named.name);
     const query = parsed.ast.typeNode(parsed.ast.node(statements[3]).data.TypeAliasDeclaration.type_annotation.root).data.TypeQuery;
     try std.testing.expectEqualStrings("value", query);
+
+    const import_scan = try scanner.scanAll(allocator, "type Module = typeof import(\"pkg\"); const after = 1;", true);
+    const import_parsed = try parse(allocator, import_scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 1), import_parsed.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.unsupported_ts_syntax, import_parsed.diagnostics[0].code);
+    try std.testing.expectEqualStrings("typeof import() types are not supported", import_parsed.diagnostics[0].message);
+    try std.testing.expectEqual(@as(usize, 2), import_parsed.ast.node(import_parsed.ast.root).data.Program.statements.len);
+    try std.testing.expectEqual(import_scan.tokens.len - 1, import_parsed.consumed_tokens);
 }
 
 test "advanced type diagnostics apply in every annotation context" {

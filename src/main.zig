@@ -302,7 +302,7 @@ fn printGenericTypeParameters(writer: *Io.Writer, tree: ast_mod.Ast, parameters:
 }
 
 fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, depth: usize) !void {
-    if (node_id == ast_mod.invalid_node) return;
+    if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= tree.nodes.len) return;
 
     const node = tree.node(node_id);
     try printIndent(writer, depth);

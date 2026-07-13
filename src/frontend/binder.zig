@@ -133,7 +133,7 @@ const Binder = struct {
     }
 
     fn bindNode(self: *Binder, node_id: NodeId, scope: ScopeId) anyerror!void {
-        if (node_id == ast_mod.invalid_node) return;
+        if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= self.ast.nodes.len) return;
         const node = self.ast.node(node_id);
         switch (node.data) {
             .Program => |program| {
@@ -345,7 +345,10 @@ const Binder = struct {
                 try self.bindNode(elem_access.index, scope);
             },
             .NonNullExpression => |nonnull| try self.bindNode(nonnull.expression, scope),
+            .AsExpression => |as_expr| try self.bindNode(as_expr.expression, scope),
+            .SatisfiesExpression => |satisfies_expr| try self.bindNode(satisfies_expr.expression, scope),
             .UnaryExpression => |unary| try self.bindNode(unary.argument, scope),
+            .UpdateExpression => |update| try self.bindNode(update.argument, scope),
             .MemberExpression => |member| try self.bindNode(member.object, scope),
             .BinaryExpression => |binary| {
                 try self.bindNode(binary.left, scope);
