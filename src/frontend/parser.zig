@@ -22,6 +22,7 @@ const Parser = struct {
     type_nodes: std.ArrayList(ast_mod.TypeNode) = .empty,
     diagnostics: std.ArrayList(diagnostics.Diagnostic) = .empty,
     parenthesized_nodes: std.ArrayList(NodeId) = .empty,
+    allow_in: bool = true,
     recover_errors: bool = true,
     allocation_error: ?anyerror = null,
     // H4 — current recursion depth during descent. Bumped per recursive parse call;
@@ -1116,12 +1117,7 @@ const Parser = struct {
         const is_await = self.eat(.Keyword_await);
         _ = self.expect(.LParen, "expected (");
 
-        const init: ?NodeId = if (self.at(.Semicolon))
-            null
-        else if (self.isVariableKeyword(self.current().kind))
-            try self.parseVariableDeclaration(true)
-        else
-            try self.parseExpression();
+        const init = try self.parseForInitializer();
 
         const iteration_kind: ?ast_mod.ForStatementKind = if (self.eat(.Keyword_in))
             .in
@@ -1173,6 +1169,17 @@ const Parser = struct {
             .span = joinSpans(start, self.previousOrCurrent().span),
             .data = .{ .ForStatement = .{ .init = init, .condition = condition, .update = update, .body = body } },
         });
+    }
+
+    fn parseForInitializer(self: *Parser) anyerror!?NodeId {
+        if (self.at(.Semicolon)) return null;
+
+        const previous_allow_in = self.allow_in;
+        self.allow_in = false;
+        defer self.allow_in = previous_allow_in;
+
+        if (self.isVariableKeyword(self.current().kind)) return try self.parseVariableDeclaration(true);
+        return try self.parseExpression();
     }
 
     fn parseSwitchStatement(self: *Parser) anyerror!NodeId {
@@ -1266,7 +1273,7 @@ const Parser = struct {
             .Caret => @as(u8, 6),
             .Ampersand => @as(u8, 7),
             .EqualsEquals, .ExclamationEquals, .EqualsEqualsEquals, .ExclamationEqualsEquals => @as(u8, 8),
-            .LessThan, .LessThanEquals, .GreaterThan, .GreaterThanEquals => @as(u8, 9),
+            .LessThan, .LessThanEquals, .GreaterThan, .GreaterThanEquals, .Keyword_in, .Keyword_instanceof => @as(u8, 9),
             .LessThanLessThan, .GreaterThanGreaterThan, .GreaterThanGreaterThanGreaterThan => @as(u8, 10),
             .Plus, .Minus => @as(u8, 11),
             .Asterisk, .Slash, .Percent => @as(u8, 12),
@@ -1520,41 +1527,13 @@ const Parser = struct {
     fn parseRelationalExpression(self: *Parser) anyerror!NodeId {
         var left = try self.parseShiftExpression();
         while (true) {
-            left = switch (self.current().kind) {
-                .LessThan => blk: {
-                    _ = self.advance();
-                    const right = try self.parseShiftExpression();
-                    break :blk try self.addNode(.{
-                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
-                        .data = .{ .BinaryExpression = .{ .operator = .LessThan, .left = left, .right = right } },
-                    });
-                },
-                .LessThanEquals => blk: {
-                    _ = self.advance();
-                    const right = try self.parseShiftExpression();
-                    break :blk try self.addNode(.{
-                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
-                        .data = .{ .BinaryExpression = .{ .operator = .LessThanEquals, .left = left, .right = right } },
-                    });
-                },
-                .GreaterThan => blk: {
-                    _ = self.advance();
-                    const right = try self.parseShiftExpression();
-                    break :blk try self.addNode(.{
-                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
-                        .data = .{ .BinaryExpression = .{ .operator = .GreaterThan, .left = left, .right = right } },
-                    });
-                },
-                .GreaterThanEquals => blk: {
-                    _ = self.advance();
-                    const right = try self.parseShiftExpression();
-                    break :blk try self.addNode(.{
-                        .span = joinSpans(self.nodes.items[@intCast(left)].span, self.nodes.items[@intCast(right)].span),
-                        .data = .{ .BinaryExpression = .{ .operator = .GreaterThanEquals, .left = left, .right = right } },
-                    });
-                },
+            const operator = switch (self.current().kind) {
+                .LessThan, .LessThanEquals, .GreaterThan, .GreaterThanEquals, .Keyword_instanceof => self.advance(),
+                .Keyword_in => if (self.allow_in) self.advance() else break,
                 else => break,
             };
+            const right = try self.parseShiftExpression();
+            left = try self.addBinaryExpression(operator.kind, left, right);
         }
         return left;
     }
@@ -2032,6 +2011,9 @@ const Parser = struct {
             },
             .TemplateHead => node = try self.parseTemplateExpression(token),
             .LParen => {
+                const previous_allow_in = self.allow_in;
+                self.allow_in = true;
+                defer self.allow_in = previous_allow_in;
                 node = try self.parseExpression();
                 _ = self.expect(.RParen, "expected )");
                 try self.parenthesized_nodes.append(self.allocator, node);
@@ -2373,6 +2355,43 @@ test "parser preserves sequence expressions and structural commas" {
     const grouped_decl = parsed.ast.node(statements[6]).data.VariableDeclaration;
     const grouped_init = parsed.ast.node(grouped_decl.declarations[0]).data.VariableDeclarator.init.?;
     try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(grouped_init).data.SequenceExpression.expressions.len);
+}
+
+test "parser distinguishes relational keywords from for loop separators" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\const contained = "name" in object;
+        \\const matched = value instanceof Constructor;
+        \\for (key in object) {}
+        \\for (const item of values) {}
+        \\for (let index = 0; index < 10; index++) {}
+        \\for ((key in object); ready; step()) {}
+    ;
+    const scan = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    try std.testing.expectEqual(scan.tokens.len - 1, parsed.consumed_tokens);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const contained_declaration = parsed.ast.node(statements[0]).data.VariableDeclaration;
+    const contained_init = parsed.ast.node(contained_declaration.declarations[0]).data.VariableDeclarator.init.?;
+    try std.testing.expectEqual(TokenType.Keyword_in, parsed.ast.node(contained_init).data.BinaryExpression.operator);
+
+    const matched_declaration = parsed.ast.node(statements[1]).data.VariableDeclaration;
+    const matched_init = parsed.ast.node(matched_declaration.declarations[0]).data.VariableDeclarator.init.?;
+    try std.testing.expectEqual(TokenType.Keyword_instanceof, parsed.ast.node(matched_init).data.BinaryExpression.operator);
+
+    try std.testing.expectEqual(ast_mod.ForStatementKind.in, parsed.ast.node(statements[2]).data.ForStatement.kind);
+    try std.testing.expectEqual(ast_mod.ForStatementKind.of, parsed.ast.node(statements[3]).data.ForStatement.kind);
+    try std.testing.expectEqual(ast_mod.ForStatementKind.classic, parsed.ast.node(statements[4]).data.ForStatement.kind);
+
+    const parenthesized = parsed.ast.node(statements[5]).data.ForStatement;
+    try std.testing.expectEqual(ast_mod.ForStatementKind.classic, parenthesized.kind);
+    try std.testing.expectEqual(TokenType.Keyword_in, parsed.ast.node(parenthesized.init.?).data.BinaryExpression.operator);
 }
 
 test "parser groups exponentiation shifts and bitwise operators" {
