@@ -1731,3 +1731,104 @@ test "Goal 124 repeated project rebuilds do not retain stale semantic storage" {
     try std.testing.expectEqual(second.type_store.builtins.string, second_export.identity.type_id);
     try std.testing.expectEqual(second_export.identity, second_import.target.?);
 }
+
+// ---------------------------------------------------------------------------
+// Goal 134 regression tests — immutable function signatures.
+// ---------------------------------------------------------------------------
+
+fn goal134FunctionSymbol(result: *const SemanticResult, name: []const u8) ?binder.SymbolId {
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind != .function or !std.mem.eql(u8, symbol.name, name)) continue;
+        return symbol.id;
+    }
+    return null;
+}
+
+test "Goal 134 two unannotated functions with different inferred returns retain distinct effective signatures" {
+    // Two zero-argument functions that happen to have identical parameter shapes
+    // but differ in their inferred return types (number vs string). Each must
+    // keep its own immutable signature TypeId and keep declared_type == null.
+    var result = try analyze(std.testing.allocator,
+        \\function first() { return 1; }
+        \\function second() { return "hello"; }
+    );
+    defer result.deinit();
+
+    const a = goal134FunctionSymbol(&result, "first").?;
+    const b = goal134FunctionSymbol(&result, "second").?;
+
+    // declared_type must remain null for unannotated functions.
+    try std.testing.expectEqual(@as(?types.TypeId, null), result.lookupSymbolType(a).?.declared_type);
+    try std.testing.expectEqual(@as(?types.TypeId, null), result.lookupSymbolType(b).?.declared_type);
+
+    // Both must have a non-null inferred_type holding an immutable signature.
+    const sig_a = result.lookupSymbolType(a).?.inferred_type orelse return error.TestFailed;
+    const sig_b = result.lookupSymbolType(b).?.inferred_type orelse return error.TestFailed;
+
+    try std.testing.expect(sig_a != sig_b);
+
+    // effective() picks declared first (null), then inferred — both resolve to distinct IDs.
+    try std.testing.expectEqual(sig_a, result.lookupSymbolType(a).?.effective());
+    try std.testing.expectEqual(sig_b, result.lookupSymbolType(b).?.effective());
+
+    // The signatures themselves are structurally unequal in return_type.
+    const sa = result.lookupFunctionType(sig_a).?;
+    const sb = result.lookupFunctionType(sig_b).?;
+    try std.testing.expect(sa.parameters.len == 0);
+    try std.testing.expect(sb.parameters.len == 0);
+    try std.testing.expectEqual(result.type_store.builtins.number, sa.return_type);
+    try std.testing.expectEqual(result.type_store.builtins.string, sb.return_type);
+}
+
+test "Goal 134 unannotated and annotated functions keep separate signature slots" {
+    // Even when both are analysed in the same pass, each symbol gets exactly one
+    // non-null slot: inferred_type for unannotated, either declared or inferred
+    // (depending on whether an annotation is present) for annotated. The two
+    // must never be co-mingled into declared_type for an unannotated function.
+    var result = try analyze(std.testing.allocator,
+        \\function annotated(): number { return 1; }
+        \\function unannotated() { return "x"; }
+    );
+    defer result.deinit();
+
+    const ann = goal134FunctionSymbol(&result, "annotated").?;
+    const unn = goal134FunctionSymbol(&result, "unannotated").?;
+
+    // Both must have an effective signature (declared or inferred).
+    try std.testing.expect(result.lookupSymbolType(ann).?.effective() != null);
+    try std.testing.expect(result.lookupSymbolType(unn).?.inferred_type != null);
+
+    const ann_sig_id = result.lookupSymbolType(ann).?.effective().?;
+    const unn_sig_id = result.lookupSymbolType(unn).?.inferred_type.?;
+    try std.testing.expect(ann_sig_id != unn_sig_id);
+
+    // The annotated function returns number in its effective slot.
+    const ann_sig = result.lookupFunctionType(ann_sig_id).?;
+    try std.testing.expectEqual(result.type_store.builtins.number, ann_sig.return_type);
+
+    // The unannotated one is inferred to return string.
+    const unn_sig = result.lookupFunctionType(unn_sig_id).?;
+    try std.testing.expectEqual(result.type_store.builtins.string, unn_sig.return_type);
+}
+
+test "Goal 134 inference loop converges across repeated analysis rounds" {
+    var first = try analyze(std.testing.allocator, "function a() { return 1; }\nfunction b(a: number): string { return \"x\"; }\nconst c = a(b(2));");
+    defer first.deinit();
+
+    const fa = goal134FunctionSymbol(&first, "a").?;
+    const fb = goal134FunctionSymbol(&first, "b").?;
+    const idA_a = first.lookupSymbolType(fa).?.inferred_type.?;
+    const idA_b = first.lookupSymbolType(fb).?.inferred_type.?;
+
+    // Run a second and third round — convergence must be stable across three.
+    var k: usize = 0;
+    while (k < 3) : (k += 1) {
+        var r2 = try analyze(std.testing.allocator, "function a() { return 1; }\nfunction b(a: number): string { return \"x\"; }\nconst c = a(b(2));");
+        defer r2.deinit();
+        const fa2 = goal134FunctionSymbol(&r2, "a").?;
+        const fb2 = goal134FunctionSymbol(&r2, "b").?;
+        try std.testing.expectEqual(idA_a, r2.lookupSymbolType(fa2).?.inferred_type.?);
+        try std.testing.expectEqual(idA_b, r2.lookupSymbolType(fb2).?.inferred_type.?);
+    }
+}
+
