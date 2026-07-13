@@ -157,14 +157,7 @@ const Parser = struct {
         const name = self.expect(.Identifier, "expected type alias name");
         const type_parameters = try self.parseGenericTypeParameters();
         _ = self.expect(.Equal, "expected '=' after type alias name");
-        const type_node = if (self.findUnsupportedTypeSyntax()) |unsupported| blk: {
-            self.reportAt(unsupported.token, unsupported.message, .unsupported_ts_syntax);
-            self.recoverUnsupportedType();
-            break :blk try self.addTypeNode(.{
-                .span = unsupported.token.span,
-                .data = .{ .Named = .{ .name = "<unsupported>" } },
-            });
-        } else try self.parseType();
+        const type_node = try self.parseType();
         _ = self.eat(.Semicolon);
         return self.addNode(.{
             .span = joinSpans(start.span, self.previousOrCurrent().span),
@@ -840,6 +833,14 @@ const Parser = struct {
     }
 
     fn parseType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        if (self.findUnsupportedTypeSyntax()) |unsupported| {
+            self.reportAt(unsupported.token, unsupported.message, .unsupported_ts_syntax);
+            self.recoverUnsupportedType();
+            return self.addTypeNode(.{
+                .span = unsupported.token.span,
+                .data = .{ .Named = .{ .name = "<unsupported>" } },
+            });
+        }
         if (self.looksLikeFunctionType()) return self.parseFunctionType();
         return self.parseUnionType();
     }
@@ -877,17 +878,38 @@ const Parser = struct {
             const start = self.advance().span;
             const inner = try self.parsePostfixType();
             break :blk try self.addTypeNode(.{ .span = joinSpans(start, self.typeSpan(inner)), .data = .{ .Readonly = inner } });
+        } else if (self.current().contextualKeyword() == .Contextual_keyof) blk: {
+            const start = self.advance().span;
+            const inner = try self.parsePostfixType();
+            break :blk try self.addTypeNode(.{ .span = joinSpans(start, self.typeSpan(inner)), .data = .{ .KeyOf = inner } });
         } else try self.parsePrimaryType();
 
-        while (self.at(.LBracket) and self.peek(1).kind == .RBracket) {
-            _ = self.advance();
-            const close = self.advance();
-            node = try self.addTypeNode(.{ .span = joinSpans(self.typeSpan(node), close.span), .data = .{ .Array = node } });
+        while (self.eat(.LBracket)) {
+            if (self.eat(.RBracket)) {
+                node = try self.addTypeNode(.{ .span = joinSpans(self.typeSpan(node), self.previousOrCurrent().span), .data = .{ .Array = node } });
+                continue;
+            }
+            const index_type = try self.parseType();
+            const close = self.expect(.RBracket, "expected ']' after indexed-access type");
+            node = try self.addTypeNode(.{
+                .span = joinSpans(self.typeSpan(node), close.span),
+                .data = .{ .IndexedAccess = .{ .object_type = node, .index_type = index_type } },
+            });
         }
         return node;
     }
 
     fn parsePrimaryType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        if (self.eat(.Keyword_typeof)) {
+            const start = self.previousOrCurrent();
+            if (self.at(.Keyword_import)) {
+                const unsupported = self.advance();
+                self.reportAt(unsupported, "typeof import() types are not supported", .unsupported_ts_syntax);
+                return self.addTypeNode(.{ .span = joinSpans(start.span, unsupported.span), .data = .{ .TypeQuery = "<unsupported-import>" } });
+            }
+            const name = self.expectIdentifierLike("expected value name after 'typeof'");
+            return self.addTypeNode(.{ .span = joinSpans(start.span, name.span), .data = .{ .TypeQuery = name.lexeme } });
+        }
         const literal_kind: ?ast_mod.LiteralTypeKind = switch (self.current().kind) {
             .StringLiteral => .string,
             .NumberLiteral => .number,
@@ -1049,7 +1071,8 @@ const Parser = struct {
         var i = self.index;
         while (i < self.tokens.len) : (i += 1) {
             const token = self.tokens[i];
-            if (token.kind == .EOF or (token.kind == .Semicolon and bracket_depth == 0)) break;
+            if (i != self.index and bracket_depth == 0 and token.kind == .LBrace) break;
+            if (token.kind == .EOF or (bracket_depth == 0 and self.isTypeBoundary(token.kind))) break;
             if (token.kind == .LBrace or token.kind == .LParen or token.kind == .LBracket) bracket_depth += 1;
             if ((token.kind == .RBrace or token.kind == .RParen or token.kind == .RBracket) and bracket_depth > 0) bracket_depth -= 1;
 
@@ -1064,7 +1087,7 @@ const Parser = struct {
             }
             if (conditional == null and token.kind == .Keyword_extends) conditional = token;
             if (advanced == null and token.kind == .Identifier and
-                (std.mem.eql(u8, token.lexeme, "keyof") or std.mem.eql(u8, token.lexeme, "infer") or
+                (std.mem.eql(u8, token.lexeme, "infer") or
                     std.mem.eql(u8, token.lexeme, "unique") or std.mem.eql(u8, token.lexeme, "abstract")))
             {
                 advanced = token;
@@ -1077,7 +1100,14 @@ const Parser = struct {
     }
 
     fn recoverUnsupportedType(self: *Parser) void {
-        while (!self.at(.Semicolon) and !self.at(.EOF)) _ = self.advance();
+        var depth: usize = 0;
+        while (!self.at(.EOF)) {
+            const kind = self.current().kind;
+            if (depth == 0 and self.isTypeBoundary(kind)) return;
+            _ = self.advance();
+            if (kind == .LBrace or kind == .LParen or kind == .LBracket) depth += 1;
+            if ((kind == .RBrace or kind == .RParen or kind == .RBracket) and depth > 0) depth -= 1;
+        }
     }
 
     fn recoverUnsupportedStatement(self: *Parser) void {
@@ -1109,7 +1139,7 @@ const Parser = struct {
     fn isTypeBoundary(self: *const Parser, kind: TokenType) bool {
         _ = self;
         return switch (kind) {
-            .Comma, .Semicolon, .RParen, .RBracket, .RBrace, .Equal, .EqualsGreaterThan, .EOF => true,
+            .Comma, .Semicolon, .RParen, .RBracket, .RBrace, .GreaterThan, .Equal, .EqualsGreaterThan, .EOF => true,
             else => false,
         };
     }
@@ -3625,4 +3655,48 @@ test "parser preserves literal types separately from literal expressions" {
     try std.testing.expectEqual(@as(usize, 2), unsupported.diagnostics.len);
     try std.testing.expectEqualStrings("negative literal types are not supported", unsupported.diagnostics[0].message);
     try std.testing.expectEqualStrings("template literal types are not supported", unsupported.diagnostics[1].message);
+}
+
+test "parser preserves indexed access keyof and type queries" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\type Name = User['name'];
+        \\type Items = Box<string>[number][];
+        \\type Keys = keyof User;
+        \\type Query = typeof value;
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const name = parsed.ast.typeNode(parsed.ast.node(statements[0]).data.TypeAliasDeclaration.type_annotation.root).data.IndexedAccess;
+    try std.testing.expectEqualStrings("User", parsed.ast.typeNode(name.object_type).data.Named.name);
+    try std.testing.expectEqualStrings("'name'", parsed.ast.typeNode(name.index_type).data.Literal.spelling);
+    const items = parsed.ast.typeNode(parsed.ast.node(statements[1]).data.TypeAliasDeclaration.type_annotation.root).data.Array;
+    const indexed = parsed.ast.typeNode(items).data.IndexedAccess;
+    try std.testing.expectEqualStrings("Box", parsed.ast.typeNode(indexed.object_type).data.Named.name);
+    const keys = parsed.ast.typeNode(parsed.ast.node(statements[2]).data.TypeAliasDeclaration.type_annotation.root).data.KeyOf;
+    try std.testing.expectEqualStrings("User", parsed.ast.typeNode(keys).data.Named.name);
+    const query = parsed.ast.typeNode(parsed.ast.node(statements[3]).data.TypeAliasDeclaration.type_annotation.root).data.TypeQuery;
+    try std.testing.expectEqualStrings("value", query);
+}
+
+test "advanced type diagnostics apply in every annotation context" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\function mapped(value: { [K in Keys]: boolean }, after: string) {}
+        \\class C { field: Value extends string ? number : boolean; next: string; }
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 2), parsed.diagnostics.len);
+    try std.testing.expectEqualStrings("mapped types are not supported", parsed.diagnostics[0].message);
+    try std.testing.expectEqualStrings("conditional types are not supported", parsed.diagnostics[1].message);
+    try std.testing.expectEqual(scanned.tokens.len - 1, parsed.consumed_tokens);
 }

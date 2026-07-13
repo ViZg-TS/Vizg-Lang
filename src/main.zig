@@ -258,10 +258,16 @@ fn printTypeNode(writer: *Io.Writer, tree: ast_mod.Ast, type_id: ast_mod.TypeNod
             for (named.type_arguments) |child| try printTypeNode(writer, tree, child, depth + 1);
         },
         .Literal => |literal| try writer.print(" kind={s} spelling=\"{s}\"\n", .{ @tagName(literal.kind), literal.spelling }),
-        .Array, .Readonly, .Parenthesized => |child| {
+        .Array, .Readonly, .KeyOf, .Parenthesized => |child| {
             try writer.writeByte('\n');
             try printTypeNode(writer, tree, child, depth + 1);
         },
+        .IndexedAccess => |indexed| {
+            try writer.writeByte('\n');
+            try printTypeNode(writer, tree, indexed.object_type, depth + 1);
+            try printTypeNode(writer, tree, indexed.index_type, depth + 1);
+        },
+        .TypeQuery => |name| try writer.print(" name=\"{s}\"\n", .{name}),
         .Union, .Intersection, .Tuple => |children| {
             try writer.writeByte('\n');
             for (children) |child| try printTypeNode(writer, tree, child, depth + 1);

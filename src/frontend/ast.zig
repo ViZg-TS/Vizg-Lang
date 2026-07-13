@@ -54,6 +54,12 @@ pub const TypeNodeData = union(enum) {
     Literal: LiteralType,
     Array: TypeNodeId,
     Readonly: TypeNodeId,
+    IndexedAccess: struct {
+        object_type: TypeNodeId,
+        index_type: TypeNodeId,
+    },
+    KeyOf: TypeNodeId,
+    TypeQuery: []const u8,
     Union: []const TypeNodeId,
     Intersection: []const TypeNodeId,
     Object: []const TypeMember,
