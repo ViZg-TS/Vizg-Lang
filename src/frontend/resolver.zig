@@ -150,6 +150,10 @@ const Resolver = struct {
             .TemplateExpression => |template| {
                 for (template.parts) |part| if (part.expression) |expression| try self.resolveNode(expression, scope);
             },
+            .TaggedTemplateExpression => |tagged| {
+                try self.resolveCallee(tagged.tag, scope);
+                try self.resolveNode(tagged.template, scope);
+            },
             .CallExpression => |call| {
                 _ = call.optional; // Syntax metadata only; resolution traverses both call forms identically.
                 try self.resolveCallee(call.callee, scope);
@@ -412,6 +416,35 @@ test "resolver visits only the value side of satisfies expressions" {
         try std.testing.expect(!std.mem.eql(u8, reference.name, "MissingType"));
     }
     try std.testing.expectEqual(@as(usize, 1), value_reads);
+}
+
+test "resolver visits tagged template tag and interpolations" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\let name = "x";
+        \\tag`<p>${name}</p>`;
+        \\obj.tag`text`;
+    , true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+
+    var tag_calls: usize = 0;
+    var name_reads: usize = 0;
+    var obj_reads: usize = 0;
+    for (resolved.references) |reference| {
+        if (std.mem.eql(u8, reference.name, "tag") and reference.kind == .call) tag_calls += 1;
+        if (std.mem.eql(u8, reference.name, "name") and reference.kind == .read) name_reads += 1;
+        if (std.mem.eql(u8, reference.name, "obj") and reference.kind == .read) obj_reads += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), tag_calls);
+    try std.testing.expectEqual(@as(usize, 1), name_reads);
+    try std.testing.expectEqual(@as(usize, 1), obj_reads);
 }
 
 test "resolver visits prefix unary operands" {

@@ -327,8 +327,17 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
         .TemplateExpression => |template| {
             try writer.print("TemplateExpression #{} parts={} {}..{}\n", .{ node_id, template.parts.len, node.span.start, node.span.end });
             for (template.parts) |part| {
+                try printIndent(writer, depth + 1);
+                try writer.writeAll("TemplatePart raw=\"");
+                try printEscaped(writer, part.raw);
+                try writer.print("\" cooked_available={} {}..{}\n", .{ part.cooked != null, part.span.start, part.span.end });
                 if (part.expression) |expression| try printAstNode(writer, tree, expression, depth + 1);
             }
+        },
+        .TaggedTemplateExpression => |tagged| {
+            try writer.print("TaggedTemplateExpression #{} tag=#{} template=#{} {}..{}\n", .{ node_id, tagged.tag, tagged.template, node.span.start, node.span.end });
+            try printAstNode(writer, tree, tagged.tag, depth + 1);
+            try printAstNode(writer, tree, tagged.template, depth + 1);
         },
         .VariableDeclaration => |decl| {
             try writer.print("VariableDeclaration #{} kind={s} {}..{}\n", .{ node_id, @tagName(decl.kind), node.span.start, node.span.end });
@@ -1257,6 +1266,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .Literal => return "Literal",
         .RegExpLiteral => return "RegExpLiteral",
         .TemplateExpression => return "TemplateExpression",
+        .TaggedTemplateExpression => return "TaggedTemplateExpression",
         .VariableDeclaration => return "VariableDeclaration",
         .TypeAliasDeclaration => return "TypeAliasDeclaration",
         .InterfaceDeclaration => return "InterfaceDeclaration",

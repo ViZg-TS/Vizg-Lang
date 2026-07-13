@@ -2566,9 +2566,10 @@ test "frontend suite: template AST preserves parts and resolver sees interpolati
     try expectNodeTag(parsed.ast, declarator.init.?, .TemplateExpression);
     const template = parsed.ast.node(declarator.init.?).data.TemplateExpression;
     try std.testing.expectEqual(@as(usize, 3), template.parts.len);
-    try std.testing.expectEqualStrings("hello ", template.parts[0].text);
-    try std.testing.expectEqualStrings(" ", template.parts[1].text);
-    try std.testing.expectEqualStrings("", template.parts[2].text);
+    try std.testing.expectEqualStrings("hello ", template.parts[0].raw);
+    try std.testing.expectEqualStrings(" ", template.parts[1].raw);
+    try std.testing.expectEqualStrings("", template.parts[2].raw);
+    try std.testing.expect(template.parts[0].cooked == null);
     try std.testing.expect(template.parts[0].expression != null);
     try std.testing.expect(template.parts[1].expression != null);
     const template_span = parsed.ast.node(declarator.init.?).span;
@@ -2592,10 +2593,57 @@ test "frontend suite: template AST supports one interpolation" {
     const declarator = parsed.ast.node(declaration.declarations[0]).data.VariableDeclarator;
     const template = parsed.ast.node(declarator.init.?).data.TemplateExpression;
     try std.testing.expectEqual(@as(usize, 2), template.parts.len);
-    try std.testing.expectEqualStrings("hello ", template.parts[0].text);
+    try std.testing.expectEqualStrings("hello ", template.parts[0].raw);
     try std.testing.expect(template.parts[0].expression != null);
-    try std.testing.expectEqualStrings("!", template.parts[1].text);
+    try std.testing.expectEqualStrings("!", template.parts[1].raw);
     try std.testing.expect(template.parts[1].expression == null);
+}
+
+test "frontend suite: no-substitution and tagged templates share one payload contract" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const BT = "\x60";
+    const source: []const u8 =
+        "let name = 'x'; let html = tag" ++ BT ++ "<p>${name}</p>" ++ BT ++
+        "; let plain = obj.tag" ++ BT ++ "text\\n" ++ BT ++
+        "; let untagged = " ++ BT ++ "raw" ++ BT ++ ";";
+    const parsed = try parseOk(allocator, source);
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    const html_decl = parsed.ast.node(program.statements[1]).data.VariableDeclaration;
+    const html_init = parsed.ast.node(html_decl.declarations[0]).data.VariableDeclarator.init.?;
+    try expectNodeTag(parsed.ast, html_init, .TaggedTemplateExpression);
+    const html = parsed.ast.node(html_init).data.TaggedTemplateExpression;
+    try expectNodeTag(parsed.ast, html.tag, .Identifier);
+    const html_template = parsed.ast.node(html.template).data.TemplateExpression;
+    try std.testing.expectEqual(@as(usize, 2), html_template.parts.len);
+    try std.testing.expectEqualStrings("<p>", html_template.parts[0].raw);
+    try std.testing.expectEqualStrings("</p>", html_template.parts[1].raw);
+    try std.testing.expect(html_template.parts[0].cooked == null);
+
+    const plain_decl = parsed.ast.node(program.statements[2]).data.VariableDeclaration;
+    const plain_init = parsed.ast.node(plain_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const plain = parsed.ast.node(plain_init).data.TaggedTemplateExpression;
+    try expectNodeTag(parsed.ast, plain.tag, .MemberExpression);
+    const plain_template = parsed.ast.node(plain.template).data.TemplateExpression;
+    try std.testing.expectEqual(@as(usize, 1), plain_template.parts.len);
+    try std.testing.expectEqualStrings("text\\n", plain_template.parts[0].raw);
+    try std.testing.expect(plain_template.parts[0].cooked == null);
+
+    const untagged_decl = parsed.ast.node(program.statements[3]).data.VariableDeclaration;
+    const untagged_init = parsed.ast.node(untagged_decl.declarations[0]).data.VariableDeclarator.init.?;
+    try expectNodeTag(parsed.ast, untagged_init, .TemplateExpression);
+    const untagged = parsed.ast.node(untagged_init).data.TemplateExpression;
+    try std.testing.expectEqualStrings("raw", untagged.parts[0].raw);
+
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "tag", .read));
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "obj", .read));
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "name", .read));
 }
 
 test "frontend suite: scanner reports unterminated template literal" {

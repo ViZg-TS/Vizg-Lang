@@ -70,13 +70,19 @@ pub const Literal = struct {
 pub const RegExpLiteral = tokens.RegExpValue;
 
 pub const TemplatePart = struct {
-    text: []const u8,
+    raw: []const u8,
+    cooked: ?[]const u8,
     expression: ?NodeId,
     span: tokens.Span,
 };
 
 pub const TemplateExpression = struct {
     parts: []const TemplatePart,
+};
+
+pub const TaggedTemplateExpression = struct {
+    tag: NodeId,
+    template: NodeId,
 };
 
 pub const ImportDeclaration = struct {
@@ -408,6 +414,7 @@ pub const NodeData = union(enum) {
     Literal: Literal,
     RegExpLiteral: RegExpLiteral,
     TemplateExpression: TemplateExpression,
+    TaggedTemplateExpression: TaggedTemplateExpression,
     TypeAliasDeclaration: TypeAliasDeclaration,
     InterfaceDeclaration: InterfaceDeclaration,
     VariableDeclaration: VariableDeclaration,

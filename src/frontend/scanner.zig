@@ -1258,6 +1258,21 @@ test "template accepts valid escapes" {
     _ = try scanner.nextToken(); // Equal
     const tok = try scanner.nextToken(); // NoSubstitutionTemplate — would fail with InvalidEscapeSequence if broken.
     try std.testing.expectEqual(TokenType.NoSubstitutionTemplate, tok.kind);
+    try std.testing.expectEqualStrings("`a\\nb`", tok.lexeme);
+    try std.testing.expect(tok.flags.has_escape);
+}
+
+test "scanner preserves raw tagged template segment lexemes" {
+    var scanner = Scanner.init("tag`<p>${name}</p>`", .{});
+    _ = try scanner.nextToken();
+    const head = try scanner.nextToken();
+    _ = try scanner.nextToken();
+    const tail = try scanner.nextToken();
+
+    try std.testing.expectEqual(TokenType.TemplateHead, head.kind);
+    try std.testing.expectEqualStrings("`<p>${", head.lexeme);
+    try std.testing.expectEqual(TokenType.TemplateTail, tail.kind);
+    try std.testing.expectEqualStrings("}</p>`", tail.lexeme);
 }
 
 test "template rejects invalid escape sequences" {

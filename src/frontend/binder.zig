@@ -281,6 +281,10 @@ const Binder = struct {
             .TemplateExpression => |template| {
                 for (template.parts) |part| if (part.expression) |expression| try self.bindNode(expression, scope);
             },
+            .TaggedTemplateExpression => |tagged| {
+                try self.bindNode(tagged.tag, scope);
+                try self.bindNode(tagged.template, scope);
+            },
             .RegExpLiteral => {},
             .SpreadElement => |spread| try self.bindNode(spread.argument, scope),
             .ThisExpression, .SuperExpression => {},

@@ -96,7 +96,7 @@ Recognized but intentionally deferred syntax uses targeted parser diagnostics:
 conditional types, and `VZG2006 unsupported_jsx` for JSX/TSX. Recovery consumes
 the unsupported construct and resumes at its enclosing boundary.
 - deterministic parser diagnostics for unparenthesized mixing of `??` with `&&` or `||`
-- template expressions with traversable interpolation expressions
+- tagged and untagged template expressions with traversable interpolation expressions
 - `if`, `switch`/`case`/`default`, `while`, `do`/`while`, classic `for`, `for-in`, `for-of`, and syntax-only `for await...of` statements
 
 `break` and `continue` are currently unlabeled. A following label produces a stable parser diagnostic and parsing resumes after the statement.
@@ -170,6 +170,14 @@ right. Both `value as Input satisfies Output` and
 `value satisfies Input as Output` preserve their nested node identities. The
 value resolver visits only the expression side; type syntax remains for later
 semantic passes.
+
+All template literals use `TemplateExpression`, including no-substitution
+forms. Each payload part exposes `raw` as a borrowed slice of the original
+source, an optional `cooked` slice, an optional interpolation expression, and
+its source span. `cooked` is currently `null`: the scanner validates supported
+escapes but does not decode them, so the AST does not claim unavailable cooked
+text. Tagged forms use `TaggedTemplateExpression { tag, template }`; the tag
+and interpolation expressions participate in normal binding and resolution.
 
 Example CLI shape:
 

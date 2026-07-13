@@ -99,6 +99,10 @@ pub fn inferLiteralNodeTypes(
                 });
                 for (template.parts) |part| if (part.expression) |expression| try stack.append(allocator, expression);
             },
+            .TaggedTemplateExpression => |tagged| {
+                try stack.append(allocator, tagged.tag);
+                try stack.append(allocator, tagged.template);
+            },
             .Identifier => |ident| {
                 if (classifyIdentifier(ident.name)) |kind| {
                     try out_list.append(allocator, .{

@@ -1844,12 +1844,32 @@ const Parser = struct {
     fn parseTemplateExpression(self: *Parser, head: Token) anyerror!NodeId {
         var parts: std.ArrayList(ast_mod.TemplatePart) = .empty;
         errdefer parts.deinit(self.allocator);
+
+        if (head.kind == .NoSubstitutionTemplate) {
+            try parts.append(self.allocator, .{
+                .raw = head.lexeme[1 .. head.lexeme.len - 1],
+                .cooked = null,
+                .expression = null,
+                .span = .{
+                    .start = head.span.start + 1,
+                    .end = head.span.end - 1,
+                    .line = head.span.line,
+                    .column = head.span.column + 1,
+                },
+            });
+            return self.addNode(.{
+                .span = head.span,
+                .data = .{ .TemplateExpression = .{ .parts = try parts.toOwnedSlice(self.allocator) } },
+            });
+        }
+
         var chunk = head;
 
         while (true) {
             const expression = try self.parseExpression();
             try parts.append(self.allocator, .{
-                .text = chunk.lexeme[1 .. chunk.lexeme.len - 2],
+                .raw = chunk.lexeme[1 .. chunk.lexeme.len - 2],
+                .cooked = null,
                 .expression = expression,
                 .span = .{
                     .start = chunk.span.start + 1,
@@ -1866,7 +1886,8 @@ const Parser = struct {
             chunk = self.advance();
             if (chunk.kind == .TemplateTail) {
                 try parts.append(self.allocator, .{
-                    .text = chunk.lexeme[1 .. chunk.lexeme.len - 1],
+                    .raw = chunk.lexeme[1 .. chunk.lexeme.len - 1],
+                    .cooked = null,
                     .expression = null,
                     .span = .{
                         .start = chunk.span.start + 1,
@@ -1940,6 +1961,14 @@ const Parser = struct {
                 node = try self.addNode(.{
                     .span = joinSpans(self.nodes.items[@intCast(node)].span, self.previousOrCurrent().span),
                     .data = .{ .ElementAccessExpression = .{ .object = node, .index = index_expr } },
+                });
+                continue;
+            }
+            if (self.at(.NoSubstitutionTemplate) or self.at(.TemplateHead)) {
+                const template = try self.parseTemplateExpression(self.advance());
+                node = try self.addNode(.{
+                    .span = joinSpans(self.nodes.items[@intCast(node)].span, self.nodes.items[@intCast(template)].span),
+                    .data = .{ .TaggedTemplateExpression = .{ .tag = node, .template = template } },
                 });
                 continue;
             }
@@ -2022,7 +2051,7 @@ const Parser = struct {
             .Keyword_this => node = try self.addNode(.{ .span = token.span, .data = .{ .ThisExpression = .{} } }),
             .Keyword_super => node = try self.addNode(.{ .span = token.span, .data = .{ .SuperExpression = .{} } }),
             .Keyword_new => node = try self.parseNewExpression(token),
-            .StringLiteral, .NoSubstitutionTemplate, .NumberLiteral, .BigIntLiteral, .TrueLiteral, .FalseLiteral, .NullLiteral => node = try self.addNode(.{
+            .StringLiteral, .NumberLiteral, .BigIntLiteral, .TrueLiteral, .FalseLiteral, .NullLiteral => node = try self.addNode(.{
                 .span = token.span,
                 .data = .{ .Literal = .{ .value = token.lexeme } },
             }),
@@ -2038,7 +2067,7 @@ const Parser = struct {
                     } },
                 });
             },
-            .TemplateHead => node = try self.parseTemplateExpression(token),
+            .NoSubstitutionTemplate, .TemplateHead => node = try self.parseTemplateExpression(token),
             .LParen => {
                 const previous_allow_in = self.allow_in;
                 self.allow_in = true;
@@ -2336,6 +2365,51 @@ test "parser preserves satisfies expressions precedence and as chains" {
 
     const identifier_expression = parsed.ast.node(statements[5]).data.ExpressionStatement.expression;
     try std.testing.expectEqualStrings("satisfies", parsed.ast.node(identifier_expression).data.Identifier.name);
+}
+
+test "parser preserves tagged template tags and raw payload availability" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\const html = tag`<p>${name}</p>`;
+        \\const member = obj.tag`text\n`;
+        \\const plain = `untagged`;
+        \\const called = factory()`value`;
+    ;
+    const scan = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const html_decl = parsed.ast.node(statements[0]).data.VariableDeclaration;
+    const html_id = parsed.ast.node(html_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const html = parsed.ast.node(html_id).data.TaggedTemplateExpression;
+    try std.testing.expectEqual(.Identifier, std.meta.activeTag(parsed.ast.node(html.tag).data));
+    const html_template = parsed.ast.node(html.template).data.TemplateExpression;
+    try std.testing.expectEqualStrings("<p>", html_template.parts[0].raw);
+    try std.testing.expectEqualStrings("</p>", html_template.parts[1].raw);
+    try std.testing.expect(html_template.parts[0].cooked == null);
+
+    const member_decl = parsed.ast.node(statements[1]).data.VariableDeclaration;
+    const member_id = parsed.ast.node(member_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const member = parsed.ast.node(member_id).data.TaggedTemplateExpression;
+    try std.testing.expectEqual(.MemberExpression, std.meta.activeTag(parsed.ast.node(member.tag).data));
+    const member_template = parsed.ast.node(member.template).data.TemplateExpression;
+    try std.testing.expectEqualStrings("text\\n", member_template.parts[0].raw);
+    try std.testing.expect(member_template.parts[0].cooked == null);
+
+    const plain_decl = parsed.ast.node(statements[2]).data.VariableDeclaration;
+    const plain_id = parsed.ast.node(plain_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const plain = parsed.ast.node(plain_id).data.TemplateExpression;
+    try std.testing.expectEqualStrings("untagged", plain.parts[0].raw);
+
+    const called_decl = parsed.ast.node(statements[3]).data.VariableDeclaration;
+    const called_id = parsed.ast.node(called_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const called = parsed.ast.node(called_id).data.TaggedTemplateExpression;
+    try std.testing.expectEqual(.CallExpression, std.meta.activeTag(parsed.ast.node(called.tag).data));
 }
 
 fn joinSpans(a: tokens.Span, b: tokens.Span) tokens.Span {

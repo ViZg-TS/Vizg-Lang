@@ -26,7 +26,7 @@ control_flow`
 
 tokens.zig define el vocabulario léxico completo: keywords, literales, operadores, símbolos, comentarios, regex, EOF/EOL y templates.
 
-Los templates con interpolación se dividen en `TemplateHead`, `TemplateMiddle` y `TemplateTail`. El parser los representa como `TemplateExpression`, con texto literal y expresiones AST recorribles. Los templates sin interpolación conservan `NoSubstitutionTemplate` como literal opaco.
+Los templates con interpolación se dividen en `TemplateHead`, `TemplateMiddle` y `TemplateTail`. El parser representa todos los templates, incluso `NoSubstitutionTemplate`, como `TemplateExpression`. Cada parte conserva `raw` prestado del source, `cooked` opcional (actualmente `null`, porque el scanner valida escapes pero no los decodifica), expresión interpolada opcional y span. Los tags usan `TaggedTemplateExpression` sin degradarse a llamadas.
 
 El scanner decide contextualmente si `/` inicia un `RegExpLiteral` o representa división. El AST conserva el patrón, las flags válidas y el span del literal completo.
 
