@@ -145,7 +145,7 @@ const Parser = struct {
     fn atTypeAliasDeclaration(self: *const Parser) bool {
         return self.atIdentifierText("type") and
             self.peek(1).kind == .Identifier and
-            self.peek(2).kind == .Equal;
+            (self.peek(2).kind == .Equal or self.peek(2).kind == .LessThan);
     }
 
     fn atInterfaceDeclaration(self: *const Parser) bool {
@@ -155,6 +155,7 @@ const Parser = struct {
     fn parseTypeAliasDeclaration(self: *Parser) anyerror!NodeId {
         const start = self.advance();
         const name = self.expect(.Identifier, "expected type alias name");
+        const type_parameters = try self.parseGenericTypeParameters();
         _ = self.expect(.Equal, "expected '=' after type alias name");
         const type_node = if (self.findUnsupportedTypeSyntax()) |unsupported| blk: {
             self.reportAt(unsupported.token, unsupported.message, .unsupported_ts_syntax);
@@ -169,6 +170,7 @@ const Parser = struct {
             .span = joinSpans(start.span, self.previousOrCurrent().span),
             .data = .{ .TypeAliasDeclaration = .{
                 .name = name.lexeme,
+                .type_parameters = type_parameters,
                 .type_annotation = .{ .root = type_node, .span = self.typeSpan(type_node) },
             } },
         });
@@ -177,6 +179,7 @@ const Parser = struct {
     fn parseInterfaceDeclaration(self: *Parser) anyerror!NodeId {
         const start = self.advance();
         const name = self.expect(.Identifier, "expected interface name");
+        const type_parameters = try self.parseGenericTypeParameters();
         var heritage: std.ArrayList(ast_mod.TypeNodeId) = .empty;
         errdefer heritage.deinit(self.allocator);
         if (self.eat(.Keyword_extends)) {
@@ -192,6 +195,7 @@ const Parser = struct {
             .span = joinSpans(start.span, self.typeSpan(body)),
             .data = .{ .InterfaceDeclaration = .{
                 .name = name.lexeme,
+                .type_parameters = type_parameters,
                 .extends = try heritage.toOwnedSlice(self.allocator),
                 .body = body,
             } },
@@ -647,6 +651,7 @@ const Parser = struct {
         const start = self.expect(.Keyword_function, "expected function").span;
         const is_generator = self.eat(.Asterisk);
         const name = self.expectIdentifierLike("expected function name").lexeme;
+        const type_parameters = try self.parseGenericTypeParameters();
         _ = self.expect(.LParen, "expected (");
 
         var params: std.ArrayList(NodeId) = .empty;
@@ -665,6 +670,7 @@ const Parser = struct {
             .span = joinSpans(start, end_span),
             .data = .{ .FunctionDeclaration = .{
                 .name = name,
+                .type_parameters = type_parameters,
                 .params = try params.toOwnedSlice(self.allocator),
                 .body = body,
                 .exported = exported,
@@ -706,11 +712,34 @@ const Parser = struct {
     fn parseClassDeclaration(self: *Parser) anyerror!NodeId {
         const start = self.expect(.Keyword_class, "expected class").span;
         const name = self.expectIdentifierLike("expected class name").lexeme;
+        const type_parameters = try self.parseGenericTypeParameters();
         const parts = try self.parseClassBody();
         return self.addNode(.{
             .span = joinSpans(start, self.previousOrCurrent().span),
-            .data = .{ .ClassDeclaration = .{ .name = name, .super_class = parts.super_class, .members = parts.members } },
+            .data = .{ .ClassDeclaration = .{ .name = name, .type_parameters = type_parameters, .super_class = parts.super_class, .members = parts.members } },
         });
+    }
+
+    fn parseGenericTypeParameters(self: *Parser) anyerror![]const ast_mod.GenericTypeParameter {
+        if (!self.eat(.LessThan)) return &.{};
+        var parameters: std.ArrayList(ast_mod.GenericTypeParameter) = .empty;
+        errdefer parameters.deinit(self.allocator);
+        while (!self.at(.GreaterThan) and !self.at(.EOF)) {
+            const name = self.expectIdentifierLike("expected type parameter name");
+            const constraint = if (self.eat(.Keyword_extends)) blk: {
+                const root = try self.parseType();
+                break :blk ast_mod.TypeAnnotation{ .root = root, .span = self.typeSpan(root) };
+            } else null;
+            const default_type = if (self.eat(.Equal)) blk: {
+                const root = try self.parseType();
+                break :blk ast_mod.TypeAnnotation{ .root = root, .span = self.typeSpan(root) };
+            } else null;
+            const end = if (default_type) |item| item.span else if (constraint) |item| item.span else name.span;
+            try parameters.append(self.allocator, .{ .name = name.lexeme, .constraint = constraint, .default_type = default_type, .span = joinSpans(name.span, end) });
+            if (!self.eat(.Comma)) break;
+        }
+        _ = self.expect(.GreaterThan, "expected '>' after type parameters");
+        return parameters.toOwnedSlice(self.allocator);
     }
 
     const ParsedClassBody = struct { super_class: ?NodeId, members: []const NodeId };
@@ -3423,4 +3452,33 @@ test "parser builds TypeScript enum members and recovers invalid members" {
     try std.testing.expectEqual(@as(usize, 2), invalid_parse.ast.node(invalid_parse.ast.root).data.Program.statements.len);
     const recovered_enum = invalid_parse.ast.node(invalid_parse.ast.node(invalid_parse.ast.root).data.Program.statements[0]).data.EnumDeclaration;
     try std.testing.expectEqual(@as(usize, 2), recovered_enum.members.len);
+}
+
+test "parser preserves generic declaration parameters constraints and defaults" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\function identity<T extends Base = Default>(value: T): T {}
+        \\class Box<T> {}
+        \\interface Result<T> {}
+        \\type Pair<T, U> = [T, U];
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+
+    const function_decl = parsed.ast.node(statements[0]).data.FunctionDeclaration;
+    try std.testing.expectEqual(@as(usize, 1), function_decl.type_parameters.len);
+    const parameter = function_decl.type_parameters[0];
+    try std.testing.expectEqualStrings("T", parameter.name);
+    try std.testing.expectEqualStrings("Base", parsed.ast.typeNode(parameter.constraint.?.root).data.Named.name);
+    try std.testing.expectEqualStrings("Default", parsed.ast.typeNode(parameter.default_type.?.root).data.Named.name);
+    try std.testing.expect(parameter.span.end > parameter.span.start);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.ast.node(statements[1]).data.ClassDeclaration.type_parameters.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.ast.node(statements[2]).data.InterfaceDeclaration.type_parameters.len);
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(statements[3]).data.TypeAliasDeclaration.type_parameters.len);
 }

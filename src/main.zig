@@ -285,6 +285,15 @@ fn printTypeNode(writer: *Io.Writer, tree: ast_mod.Ast, type_id: ast_mod.TypeNod
     }
 }
 
+fn printGenericTypeParameters(writer: *Io.Writer, tree: ast_mod.Ast, parameters: []const ast_mod.GenericTypeParameter, depth: usize) !void {
+    for (parameters) |parameter| {
+        try printIndent(writer, depth);
+        try writer.print("GenericTypeParameter name=\"{s}\" {}..{}\n", .{ parameter.name, parameter.span.start, parameter.span.end });
+        if (parameter.constraint) |constraint| try printTypeNode(writer, tree, constraint.root, depth + 1);
+        if (parameter.default_type) |default_type| try printTypeNode(writer, tree, default_type.root, depth + 1);
+    }
+}
+
 fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, depth: usize) !void {
     if (node_id == ast_mod.invalid_node) return;
 
@@ -350,11 +359,13 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             for (decl.declarations) |declarator| try printAstNode(writer, tree, declarator, depth + 1);
         },
         .TypeAliasDeclaration => |decl| {
-            try writer.print("TypeAliasDeclaration #{} name=\"{s}\" type=#{} {}..{}\n", .{ node_id, decl.name, decl.type_annotation.root, node.span.start, node.span.end });
+            try writer.print("TypeAliasDeclaration #{} name=\"{s}\" type_parameters={} type=#{} {}..{}\n", .{ node_id, decl.name, decl.type_parameters.len, decl.type_annotation.root, node.span.start, node.span.end });
+            try printGenericTypeParameters(writer, tree, decl.type_parameters, depth + 1);
             try printTypeNode(writer, tree, decl.type_annotation.root, depth + 1);
         },
         .InterfaceDeclaration => |decl| {
-            try writer.print("InterfaceDeclaration #{} name=\"{s}\" extends={} body=#{} {}..{}\n", .{ node_id, decl.name, decl.extends.len, decl.body, node.span.start, node.span.end });
+            try writer.print("InterfaceDeclaration #{} name=\"{s}\" type_parameters={} extends={} body=#{} {}..{}\n", .{ node_id, decl.name, decl.type_parameters.len, decl.extends.len, decl.body, node.span.start, node.span.end });
+            try printGenericTypeParameters(writer, tree, decl.type_parameters, depth + 1);
             for (decl.extends) |heritage| try printTypeNode(writer, tree, heritage, depth + 1);
             try printTypeNode(writer, tree, decl.body, depth + 1);
         },
@@ -377,6 +388,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
         },
         .FunctionDeclaration => |decl| {
             try writer.print("FunctionDeclaration #{} name=\"{s}\" exported={} async={} generator={} body=#{} {}..{}\n", .{ node_id, decl.name, decl.exported, decl.flags.is_async, decl.flags.is_generator, decl.body, node.span.start, node.span.end });
+            try printGenericTypeParameters(writer, tree, decl.type_parameters, depth + 1);
             for (decl.params) |param| try printAstNode(writer, tree, param, depth + 1);
             if (decl.return_type) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             try printAstNode(writer, tree, decl.body, depth + 1);
@@ -396,7 +408,8 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             if (yield_expr.argument) |argument| try printAstNode(writer, tree, argument, depth + 1);
         },
         .ClassDeclaration => |decl| {
-            try writer.print("ClassDeclaration #{} name=\"{s}\" members={} {}..{}\n", .{ node_id, decl.name, decl.members.len, node.span.start, node.span.end });
+            try writer.print("ClassDeclaration #{} name=\"{s}\" type_parameters={} members={} {}..{}\n", .{ node_id, decl.name, decl.type_parameters.len, decl.members.len, node.span.start, node.span.end });
+            try printGenericTypeParameters(writer, tree, decl.type_parameters, depth + 1);
             if (decl.super_class) |super_class| try printAstNode(writer, tree, super_class, depth + 1);
             for (decl.members) |member| try printAstNode(writer, tree, member, depth + 1);
         },

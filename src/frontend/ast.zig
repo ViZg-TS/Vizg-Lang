@@ -35,6 +35,13 @@ pub const TypeParameter = struct {
     span: tokens.Span,
 };
 
+pub const GenericTypeParameter = struct {
+    name: []const u8,
+    constraint: ?TypeAnnotation = null,
+    default_type: ?TypeAnnotation = null,
+    span: tokens.Span,
+};
+
 pub const TypeNodeData = union(enum) {
     Named: NamedType,
     Array: TypeNodeId,
@@ -155,11 +162,13 @@ pub const ExportDeclaration = struct {
 
 pub const TypeAliasDeclaration = struct {
     name: []const u8,
+    type_parameters: []const GenericTypeParameter = &.{},
     type_annotation: TypeAnnotation,
 };
 
 pub const InterfaceDeclaration = struct {
     name: []const u8,
+    type_parameters: []const GenericTypeParameter = &.{},
     extends: []const TypeNodeId = &.{},
     body: TypeNodeId,
 };
@@ -193,6 +202,7 @@ pub const FunctionFlags = struct {
 
 pub const FunctionDeclaration = struct {
     name: []const u8,
+    type_parameters: []const GenericTypeParameter = &.{},
     params: []const NodeId,
     body: NodeId,
     exported: bool = false,
@@ -231,6 +241,7 @@ pub const AccessModifier = enum { none, public, private, protected };
 
 pub const ClassDeclaration = struct {
     name: []const u8,
+    type_parameters: []const GenericTypeParameter = &.{},
     super_class: ?NodeId = null,
     members: []const NodeId,
 };

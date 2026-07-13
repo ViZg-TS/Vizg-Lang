@@ -10,6 +10,7 @@ pub const SymbolId = u32;
 
 pub const ScopeKind = enum {
     global,
+    type_parameters,
     function,
     class,
     enum_,
@@ -26,6 +27,7 @@ pub const SymbolKind = enum {
     class,
     enum_,
     enum_member,
+    type_parameter,
     field,
     method,
 };
@@ -170,7 +172,8 @@ const Binder = struct {
                 const symbol_id = try self.declare(scope, function_decl.name, .function, node_id, node.span);
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
 
-                const function_scope = try self.addScope(.function, scope);
+                const declaration_scope = try self.bindTypeParameters(function_decl.type_parameters, scope, node_id);
+                const function_scope = try self.addScope(.function, declaration_scope);
                 for (function_decl.params) |param_id| {
                     const param_node = self.ast.node(param_id);
                     switch (param_node.data) {
@@ -202,8 +205,9 @@ const Binder = struct {
                 const value_symbol = try self.declareInNamespace(scope, class_decl.name, .class, .value, node_id, node.span);
                 _ = try self.declareInNamespace(scope, class_decl.name, .class, .type, node_id, node.span);
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = value_symbol });
-                if (class_decl.super_class) |super_class| try self.bindNode(super_class, scope);
-                const class_scope = try self.addScope(.class, scope);
+                const declaration_scope = try self.bindTypeParameters(class_decl.type_parameters, scope, node_id);
+                if (class_decl.super_class) |super_class| try self.bindNode(super_class, declaration_scope);
+                const class_scope = try self.addScope(.class, declaration_scope);
                 for (class_decl.members) |member| try self.bindNode(member, class_scope);
             },
             .ClassExpression => |class_expr| {
@@ -251,10 +255,12 @@ const Binder = struct {
             .TypeAliasDeclaration => |decl| {
                 const symbol_id = try self.declareInNamespace(scope, decl.name, .type_alias, .type, node_id, node.span);
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                _ = try self.bindTypeParameters(decl.type_parameters, scope, node_id);
             },
             .InterfaceDeclaration => |decl| {
                 const symbol_id = try self.declareInNamespace(scope, decl.name, .interface, .type, node_id, node.span);
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                _ = try self.bindTypeParameters(decl.type_parameters, scope, node_id);
             },
             .EnumDeclaration => |decl| {
                 const value_symbol = try self.declareInNamespace(scope, decl.name, .enum_, .value, node_id, node.span);
@@ -394,6 +400,15 @@ const Binder = struct {
         const id: ScopeId = @intCast(self.scopes.items.len);
         try self.scopes.append(self.allocator, .{ .id = id, .kind = kind, .parent = parent });
         return id;
+    }
+
+    fn bindTypeParameters(self: *Binder, parameters: []const ast_mod.GenericTypeParameter, parent: ScopeId, declaration: NodeId) !ScopeId {
+        if (parameters.len == 0) return parent;
+        const scope = try self.addScope(.type_parameters, parent);
+        for (parameters) |parameter| {
+            _ = try self.declareInNamespace(scope, parameter.name, .type_parameter, .type, declaration, parameter.span);
+        }
+        return scope;
     }
 
     fn declare(self: *Binder, scope_id: ScopeId, name: []const u8, kind: SymbolKind, declaration: NodeId, span: tokens.Span) !SymbolId {
@@ -676,4 +691,34 @@ test "enums bind value type and member namespaces" {
     const duplicate_bound = try bind(allocator, duplicate_parse.ast);
     try std.testing.expectEqual(@as(usize, 1), duplicate_bound.diagnostics.len);
     try std.testing.expectEqual(diagnostics.DiagnosticCode.duplicate_declaration, duplicate_bound.diagnostics[0].code);
+}
+
+test "generic declarations bind ordered type parameter scopes" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator, "export function outer<T, T>() { class Nested<U> {} } type Pair<A, B> = [A, B];", true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const bound = try bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 1), bound.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.duplicate_declaration, bound.diagnostics[0].code);
+
+    var type_parameter_symbols: usize = 0;
+    var type_parameter_scopes: usize = 0;
+    for (bound.symbols) |symbol| {
+        if (symbol.kind == .type_parameter) {
+            type_parameter_symbols += 1;
+            try std.testing.expectEqual(SymbolNamespace.type, symbol.namespace);
+        }
+    }
+    for (bound.scopes) |scope| if (scope.kind == .type_parameters) {
+        type_parameter_scopes += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 5), type_parameter_symbols);
+    try std.testing.expectEqual(@as(usize, 3), type_parameter_scopes);
+    try std.testing.expectEqual(@as(usize, 1), bound.module.exports.len);
 }

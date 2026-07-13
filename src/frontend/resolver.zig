@@ -85,6 +85,7 @@ const Resolver = struct {
                 }
             },
             .FunctionDeclaration => |function_decl| {
+                if (function_decl.type_parameters.len != 0) _ = self.takeScope();
                 const function_scope = self.takeScope();
                 for (function_decl.params) |_| {}
                 try self.resolveNode(function_decl.body, function_scope);
@@ -97,7 +98,8 @@ const Resolver = struct {
                 if (yield_expr.argument) |argument| try self.resolveNode(argument, scope);
             },
             .ClassDeclaration => |class_decl| {
-                if (class_decl.super_class) |super_class| try self.resolveNode(super_class, scope);
+                const declaration_scope = if (class_decl.type_parameters.len != 0) self.takeScope() else scope;
+                if (class_decl.super_class) |super_class| try self.resolveNode(super_class, declaration_scope);
                 const class_scope = self.takeScope();
                 for (class_decl.members) |member| try self.resolveNode(member, class_scope);
             },
@@ -124,7 +126,12 @@ const Resolver = struct {
             .VariableDeclaration => |var_decl| {
                 for (var_decl.declarations) |declaration| try self.resolveNode(declaration, scope);
             },
-            .TypeAliasDeclaration, .InterfaceDeclaration => {},
+            .TypeAliasDeclaration => |decl| {
+                if (decl.type_parameters.len != 0) _ = self.takeScope();
+            },
+            .InterfaceDeclaration => |decl| {
+                if (decl.type_parameters.len != 0) _ = self.takeScope();
+            },
             .EnumDeclaration => |decl| {
                 const enum_scope = self.takeScope();
                 for (decl.members) |member| try self.resolveNode(member, enum_scope);
@@ -685,4 +692,26 @@ test "resolver visits enum computed names and initializers" {
         first_seen = first_seen or std.mem.eql(u8, reference.name, "First");
     }
     try std.testing.expect(value_seen and key_seen and first_seen);
+}
+
+test "resolver consumes generic declaration scopes in binder order" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\function identity<T>(value: T): T { return value; }
+        \\class Box<T> extends Base { value: T; }
+        \\interface Result<T> { value: T; }
+        \\type Pair<A, B> = [A, B];
+    , true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const bound = try binder.bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 1), resolved.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.cannot_find_name, resolved.diagnostics[0].code);
 }
