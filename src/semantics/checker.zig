@@ -56,7 +56,7 @@ fn checkInitializer(
     // or matching keys), compare element-by-element and report per-position
     // mismatches. The generic diagnostic is preserved when shapes cannot be
     // meaningfully compared side-by-side so we do not silence real errors.
-    const emitted = try checkAggregateElementMismatch(allocator, result.ast, store, result.ast.node(declaration_id).span, initializer, expected, actual, out);
+    const emitted = try checkAggregateElementMismatch(allocator, result.ast, type_info, store, result.ast.node(declaration_id).span, initializer, expected, actual, out);
     if (emitted) return;
     try appendDiagnostic(allocator, out, .type_mismatch, "initializer is not assignable to the declared type", "incompatible initializer", result.ast.node(initializer).span, symbol.span, "declared type is here");
 }
@@ -206,6 +206,7 @@ fn checkReturnsIn(
 fn checkAggregateElementMismatch(
     allocator: std.mem.Allocator,
     tree: ast_mod.Ast,
+    type_info: type_info_mod.TypeInfo,
     store: *types.TypeStore,
     expected_span: tokens.Span,
     initializer_id: ast_mod.NodeId,
@@ -226,19 +227,43 @@ fn checkAggregateElementMismatch(
             return true;
         },
         .tuple => |expected_tuple| {
-            if (actual_ty.kind != .tuple) return false;
-            const actual_tuple = actual_ty.kind.tuple;
-            if (expected_tuple.elements.len != actual_tuple.elements.len) return false;
-            var emitted: bool = false;
-            for (expected_tuple.elements, 0..expected_tuple.elements.len) |_, i| {
-                const act_elem = actual_tuple.elements[i];
-                if (act_elem.hole) continue;  // source-side holes carry no value to compare
-                const msg = try std.fmt.allocPrint(allocator, "tuple element at index {} is not assignable to the declared type", .{i});
-                const related = try std.fmt.allocPrint(allocator, "declared tuple element at index {} is here", .{i});
-                try appendDiagnostic(allocator, out, .type_mismatch, msg, "element type mismatch", tree.node(initializer_id).span, expected_span, related);
-                emitted = true;
+            if (actual_ty.kind == .tuple) {
+                // Both sides are tuples — compare per-position.
+                const actual_tuple = actual_ty.kind.tuple;
+                if (expected_tuple.elements.len != actual_tuple.elements.len) return false;
+                var emitted: bool = false;
+                for (expected_tuple.elements, 0..expected_tuple.elements.len) |_, i| {
+                    const act_elem = actual_tuple.elements[i];
+                    if (act_elem.hole) continue;
+                    const msg = try std.fmt.allocPrint(allocator, "tuple element at index {} is not assignable to the declared type", .{i});
+                    const related = try std.fmt.allocPrint(allocator, "declared tuple element at index {} is here", .{i});
+                    try appendDiagnostic(allocator, out, .type_mismatch, msg, "element type mismatch", tree.node(initializer_id).span, expected_span, related);
+                    emitted = true;
+                }
+                return emitted;
+            } else if (actual_ty.kind == .array) {
+                // Annotation declares tuple but inferArray produced an array shape.
+                // Compare declared element types vs source-side inferred types per-position.
+                const arr_type = actual_ty.kind.array;
+                var emitted: bool = false;
+                for (expected_tuple.elements, 0..) |decl_elem, i| {
+                    const nd = tree.node(initializer_id);
+                    if (nd.data != .ArrayExpression) continue;
+                    const init_arr = nd.data.ArrayExpression;
+                    if (i >= init_arr.elements.len) continue;
+                    const elem_id = init_arr.elements[i] orelse continue;
+                    var eff_act: ?types.TypeId = resolvedNode(type_info, elem_id, store);
+                    if (eff_act == null or eff_act.? == types.invalid_type) eff_act = arr_type.element_type;
+                    if (eff_act == null) continue;
+                    if (type_compat.check(eff_act.?, decl_elem.type_id, store).isCompatible()) continue;
+                    const msg = try std.fmt.allocPrint(allocator, "tuple element at index {} is not assignable to the declared type", .{i});
+                    const related = try std.fmt.allocPrint(allocator, "declared tuple element at index {} is here", .{i});
+                    try appendDiagnostic(allocator, out, .type_mismatch, msg, "element type mismatch", tree.node(initializer_id).span, expected_span, related);
+                    emitted = true;
+                }
+                return emitted;
             }
-            return emitted;
+            return false;
         },
         .object => |expected_props| {
             if (actual_ty.kind != .object) return false;

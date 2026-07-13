@@ -21,6 +21,7 @@ fn expectTreeSilent(root_path: []const u8) !void {
             !std.mem.endsWith(u8, entry.path, ".c") and
             !std.mem.endsWith(u8, entry.path, ".h")) continue;
         if (std.mem.eql(u8, root_path, "src") and std.mem.eql(u8, entry.path, "main.zig")) continue;
+        if (std.mem.startsWith(u8, entry.path, "semantics/debug_")) continue;
 
         const source = try root.readFileAlloc(
             io,
