@@ -16,6 +16,7 @@ pub const SymbolTypeInfo = struct {
     symbol_id: binder.SymbolId,
     declared_type: ?types.TypeId = null,
     inferred_type: ?types.TypeId = null,
+    state: TypeResolutionState = .resolved,
 
     /// Returns the preferred type for this symbol: declared if present,
     /// otherwise inferred; `null` only when neither is known.
@@ -64,12 +65,46 @@ pub const SymbolTypeInfo = struct {
 pub const NodeTypeInfo = struct {
     node_id: ast_mod.NodeId,
     type_id: types.TypeId,
+    state: TypeResolutionState = .resolved,
+    issue: TypeIssue = .none,
+    /// Base object for a method-valued member access. Call inference uses this
+    /// to preserve `this` without changing the canonical function identity.
+    receiver_type: ?types.TypeId = null,
 
     test "nodeTypeInfo stores id and type" {
         const n = NodeTypeInfo{ .node_id = 42, .type_id = 7 };
         try std.testing.expectEqual(@as(usize, 42), @as(usize, n.node_id));
         try std.testing.expectEqual(@as(types.TypeId, 7), n.type_id);
     }
+};
+
+/// Canonical inference outcome consumed by the checker. Keeping the issue on
+/// the node table prevents the checker from re-running inference rules.
+pub const TypeIssue = enum {
+    none,
+    invalid_operator,
+    unknown_property,
+    invalid_index,
+    invalid_argument_count,
+    invalid_argument_type,
+    satisfies,
+};
+
+/// Flow-sensitive type of one resolved reference in one CFG block.
+pub const FlowTypeInfo = struct {
+    function_node: ast_mod.NodeId,
+    block_id: u32,
+    symbol_id: binder.SymbolId,
+    reference_node: ast_mod.NodeId,
+    type_id: types.TypeId,
+};
+
+/// Why a symbol or expression has the type currently recorded for it.
+pub const TypeResolutionState = enum {
+    resolved,
+    uninitialized,
+    unresolved,
+    @"error",
 };
 
 // ---------------------------------------------------------------------------
@@ -82,6 +117,7 @@ pub const NodeTypeInfo = struct {
 pub const TypeInfo = struct {
     symbols: []const SymbolTypeInfo,
     nodes: []const NodeTypeInfo,
+    flow_types: []const FlowTypeInfo = &.{},
     diagnostics: []const diagnostics_mod.Diagnostic,
 
     /// Look up a symbol by id; returns null if not found.
@@ -97,6 +133,21 @@ pub const TypeInfo = struct {
     pub fn lookupNode(self: @This(), node_id: ast_mod.NodeId) ?types.TypeId {
         for (self.nodes) |entry| {
             if (entry.node_id == node_id) return entry.type_id;
+        }
+        return null;
+    }
+
+    pub fn lookupNodeInfo(self: @This(), node_id: ast_mod.NodeId) ?NodeTypeInfo {
+        for (self.nodes) |entry| {
+            if (entry.node_id == node_id) return entry;
+        }
+        return null;
+    }
+
+    pub fn lookupFlowType(self: @This(), function_node: ast_mod.NodeId, block_id: u32, symbol_id: binder.SymbolId) ?types.TypeId {
+        for (self.flow_types) |entry| {
+            if (entry.function_node == function_node and entry.block_id == block_id and entry.symbol_id == symbol_id)
+                return entry.type_id;
         }
         return null;
     }
