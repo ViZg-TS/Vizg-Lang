@@ -8,7 +8,11 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+## [0.0.3] — 2026-07-13
+
 - `do { ... } while (condition);` now has a body-first AST/CFG representation, with a required trailing semicolon and stable missing-`while` recovery.
+- Closed Syntax Coverage v2.1 traversal and recovery gaps: the full frontend suite is registered, anonymous default async/generator exports parse coherently, `as`/`satisfies` precedence matches binary grouping, function CFG discovery is structural, and malformed recovered nodes remain safe through analysis.
+- Generic constraints/defaults are explicitly syntax-and-scope data until Typed Semantics v2; type queries are limited to simple identifiers and unsupported `typeof import()` forms recover as one construct.
 
 ### Added
 
@@ -42,7 +46,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - `throw expression;` statements now have AST, binder/resolver traversal, same-line expression diagnostics, terminating CFG edges, and AST output.
 - `switch` statements now preserve ordered `case`/`default` clauses in the AST, diagnose duplicate defaults, bind and resolve clause contents, and model dispatch, fallthrough, and `break` exits in CFGs.
 - Classic `for`, `for-in`, `for-of`, and syntax-only `for await...of` loops now have discriminated AST forms, loop-header binding scopes, resolver traversal, CFG exits, and AST output.
-- Unlabeled `break` and `continue` now have distinct AST nodes and loop-aware CFG edges; labeled forms diagnose consistently and remain deferred with the label system.
+- Unlabeled `break` and `continue` now have distinct AST nodes and loop-aware CFG edges; labeled forms use the label-aware CFG system.
 - Spread elements now parse in call, array, and object literals; function and arrow rest parameters preserve AST metadata, bind normally, and diagnose non-final positions.
 - Optional chaining now preserves optional member, computed-access, and call boundaries in the AST, resolver traversal, and AST output.
 - Function expressions now support anonymous, named, and contextual `async` forms in expression positions, with private recursive names, function scopes, resolution, and AST output.
@@ -177,6 +181,7 @@ Comments, named/default imports, `let`/`const`/`var`, exported variables and fun
 - CLI command reference (`docs/cli.md`).
 - Roadmap with planned milestones (`docs/roadmap.md`).
 
-[Unreleased]: https://github.com/moliko/vizg/compare/v0.0.2...HEAD
+[Unreleased]: https://github.com/moliko/vizg/compare/v0.0.3...HEAD
+[0.0.3]: https://github.com/moliko/vizg/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/moliko/vizg/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/moliko/vizg/releases/tag/v0.0.1

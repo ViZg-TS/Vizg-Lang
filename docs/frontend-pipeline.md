@@ -88,6 +88,7 @@ The parser consumes scanner tokens and builds `ast.Ast`. The AST supports the cu
 - spread elements in calls, arrays, and object literals
 - postfix non-null assertions, distinct from prefix `!`
 - TypeScript `satisfies` expressions, preserved distinctly from `as` assertions
+- simple-identifier type queries (`typeof value`); qualified and `typeof import()` queries are deferred
 - right-associative exponentiation plus multiplicative, additive, shift, relational, equality, bitwise, logical, nullish-coalescing, conditional, and assignment precedence levels
 
 Recognized but intentionally deferred syntax uses targeted parser diagnostics:
@@ -123,6 +124,10 @@ The binder walks the AST and builds:
 
 It reports duplicate declarations and duplicate exports with `VZG3xxx` codes.
 Interfaces do not merge; a repeated interface or type alias in the same type namespace is a duplicate declaration.
+
+Generic declarations preserve parameter names, constraints, defaults, and their
+scopes. Resolving references inside constraint/default type syntax belongs to
+Typed Semantics v2; Syntax Coverage v2.1 guarantees syntax plus scope only.
 
 Classes bind in both value and type namespaces. Each class has a member scope; each method or constructor has a nested function scope. `this` and `super` are syntax nodes traversed within those scopes. Decorators, private fields, abstract semantics, and class type checking are deferred.
 
@@ -165,8 +170,9 @@ shift, nullish, and logical compound assignments resolve identifier targets as
 read-modify-write operations. Member receivers and computed indices are visited
 once for either form.
 
-`satisfies` and `as` share the same postfix precedence and chain from left to
-right. Both `value as Input satisfies Output` and
+`satisfies` and `as` chain from left to right and compose with binary operators:
+`a + b satisfies T` asserts the complete sum, while `a satisfies T + b` keeps
+the assertion as the left operand. Both `value as Input satisfies Output` and
 `value satisfies Input as Output` preserve their nested node identities. The
 value resolver visits only the expression side; type syntax remains for later
 semantic passes.
