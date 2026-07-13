@@ -786,13 +786,21 @@ fn applyAggregateContexts(
                                 .elements = merged,
                                 .readonly = declared_tuple.readonly,
                             } });
-                            changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, contextual_id) or changed;
+                            if (!updateContextualTypeOnly(entries, initializer, contextual_id)) {
+                                changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, contextual_id) or changed;
+                            } else {
+                                changed = true;
+                            }
                         },
                         .array => {
                             // For a declared array shape store the annotation as the contextual hint only.
-                            // Do not overwrite `type_id` so the checker can compare actual element types against
-                            // the declared element type and report per-position mismatches.
-                            changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, declared_contextual) or changed;
+                            // If an entry already exists from inferArray (with actual element types on type_id),
+                            // update only contextual_type so the checker can compare actual vs declared element types.
+                            if (!updateContextualTypeOnly(entries, initializer, declared_contextual)) {
+                                changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, declared_contextual) or changed;
+                            } else {
+                                changed = true;
+                            }
                         },
                         else => {},
                     };
@@ -803,7 +811,11 @@ fn applyAggregateContexts(
                             // Store the declared object shape as contextual only — do not overwrite `type_id`.
                             // The checker will later compare actual property types against this declared shape and
                             // emit per-property mismatches when they diverge.
-                            changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, declared_contextual) or changed;
+                            if (!updateContextualTypeOnly(entries, initializer, declared_contextual)) {
+                                changed = putTypeWithContextual(entries, initializer, declared_contextual, true, .none, null, declared_contextual) or changed;
+                            } else {
+                                changed = true;
+                            }
                         },
                         else => {},
                     };
@@ -960,6 +972,23 @@ fn putTypeWithContextual(
     });
     return true;
 }
+
+/// Update only the contextual_type slot on an existing entry, leaving type_id
+/// untouched. Used for aggregate annotations so the declared shape can coexist
+/// with a separately-inferred actual element/property type.
+fn updateContextualTypeOnly(
+    entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
+    node_id: ast_mod.NodeId,
+    contextual_type: ?types.TypeId,
+) bool {
+    for (entries.items) |*entry| {
+        if (entry.node_id != node_id) continue;
+        entry.contextual_type = contextual_type;
+        return true;
+    }
+    return false;
+}
+
 
 /// Quick numeric test. Never rejects input the parser already accepted; may be
 /// slightly over-inclusive for edge cases like `"1e"`, which is acceptable
