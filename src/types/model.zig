@@ -2,32 +2,27 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 const builtin_kind = @import("builtin.zig");
-
 // ---------------------------------------------------------------------------
 // TypeId — opaque numeric identifier for any type in the model.
 // ---------------------------------------------------------------------------
 
 pub const TypeId = u32;
 pub const invalid_type: TypeId = std.math.maxInt(TypeId);
-
 /// Reserved numeric ranges across every TypeId space:
 ///   - 0..99       reserved
 ///   - 100..199    builtin types allocated by one `Builtins` registry
 ///   - 200..999    reserved for future builtins or extensions (no consumer yet)
-///   - >= 1000     user-defined function signatures via `FunctionSignatureStore`
-///                 (`next_user_type_id + index`, see model.zig:110).
-/// Builtins and user signatures must never overlap — the lookup at line 137 relies
-///   on `sig_id < next_user_type_id` to distinguish the two kinds cheaply.
-/// Start of reserved TypeId range for FunctionSignatureStore (user-defined function signatures).
+///   - >= 1000     user-defined TypeIds allocated by `TypeStore`
+///                 (`next_user_type_id + index`). All semantic type identities —
+///                 primitives, nominal types, function signatures — come from one
+///                 store; the range merely separates builtins from user space.
 pub const next_user_type_id: TypeId = 1000;
-
 // ---------------------------------------------------------------------------
 // FunctionSignature — captured at declaration, referenced by id from a TypeKind.
 // ---------------------------------------------------------------------------
 
 pub const FunctionSignatureId = u32;
 const invalid_function_signature: FunctionSignatureId = std.math.maxInt(FunctionSignatureId);
-
 /// A single parameter in a function signature. The name is for debugging /
 /// display purposes and does not participate in type identity.
 pub const ParameterType = struct {
@@ -96,7 +91,6 @@ pub const TypeParameterType = struct {
     default: ?TypeId = null,
 };
 
-
 /// Represents a field in a class or interface declaration.
 pub const ClassField = struct {
     name: []const u8,
@@ -104,14 +98,12 @@ pub const ClassField = struct {
     is_public: bool = true,
     is_readonly: bool = false,
 };
-
 /// Represents a method in a class declaration with its full signature.
 pub const ClassMethod = struct {
     name: []const u8,
     signature_id: FunctionSignatureId,
     is_static: bool = false,
 };
-
 /// Complete semantic representation of a class - includes both identity and members.
 pub const ClassSemanticModel = struct {
     declaration_id: u32,
@@ -121,7 +113,6 @@ pub const ClassSemanticModel = struct {
     methods: []const ClassMethod,
     constructor_signature: ?FunctionSignatureId = null,
 };
-
 /// Complete semantic representation of an interface - includes member signatures.
 pub const InterfaceSemanticModel = struct {
     declaration_id: u32,
@@ -129,7 +120,6 @@ pub const InterfaceSemanticModel = struct {
     name: []const u8,
     members: []const ClassField,  // Interfaces have fields/methods as properties
 };
-
 /// Complete signature of a typed function. Stored as an opaque blob; the caller
 /// (typically the binder or module graph) is responsible for its lifetime.
 pub const FunctionSignature = struct {
@@ -186,7 +176,6 @@ pub const FunctionSignature = struct {
 
 pub const PromiseType = struct { value_type: TypeId };
 pub const GeneratorType = struct { yield_type: TypeId, return_type: TypeId };
-
 // ---------------------------------------------------------------------------
 // TypeKind — the discriminated union of every type in the model.
 // ---------------------------------------------------------------------------
@@ -210,141 +199,9 @@ pub const TypeKind = union(enum) {
     enum_type: NominalType,
     type_parameter: TypeParameterType,
 };
-
-// ---------------------------------------------------------------------------
-// FunctionSignatureStore — arena-owned container for every function signature
-// produced by a semantic pass. Signatures are stored alongside their own ids so
-// downstream phases (checker, resolver) can look them up via `TypeId`. The slice
-// lives on the caller-provided allocator (typically an arena); callers do not
-// need to free individual entries and should just drop the store when done.
-// ---------------------------------------------------------------------------
-
-/// Minimal arena-backed container of `FunctionSignature`s collected during a single
-/// analysis pass. Parameter slices are allocated with the same allocator so they
-/// outlive any transient AST data even if that arena is dropped before consumers.
-pub const FunctionSignatureStore = struct {
-    /// Allocator used for internal allocations (parameter copies). For typical
-    /// callers this is an `ArenaAllocator`; OOMs propagate through `add()`.
-    allocator: std.mem.Allocator,
-
-    /// Accumulator of every signature added via `add()`. Backing storage comes from
-    /// `self.allocator` so entries are freed when the arena (or its parent allocator)
-    /// is dropped; callers do not call `deinit()` on this store directly.
-    signatures: std.ArrayList(FunctionSignature),
-
-    pub fn init(allocator_: std.mem.Allocator) FunctionSignatureStore {
-        return .{
-            .allocator = allocator_,
-            .signatures = std.ArrayList(FunctionSignature).empty,
-        };
-    }
-
-    /// Appends a new signature with the given parameter names and types plus the
-    /// declared return type. Returns the id of the newly created signature so that
-    /// downstream phases can later construct a `Type{ .kind = .function = sig_id }`.
-    pub fn add(self: *FunctionSignatureStore, parameters: []const ParameterType, return_type: TypeId) !FunctionSignatureId {
-        const new_id: FunctionSignatureId = next_user_type_id + @as(FunctionSignatureId, @intCast(self.signatures.items.len));
-
-        // Duplicate the parameter slice on the store's allocator. We always copy —
-        // the AST or binder may free its temporary slices before downstream consumers
-        // touch the signature, so relying on borrowed storage would be a use-after-free
-        // in every non-trivial pipeline.
-        const params_copy = try self.allocator.dupe(ParameterType, parameters);
-
-        var sig: FunctionSignature = undefined;
-        sig.id = new_id;
-        sig.parameters = params_copy;
-        sig.return_type = return_type;
-
-        if (self.signatures.append(self.allocator, sig)) |_| {} else |err| {
-            // Arena-backed append only reports OOM in pathological paths that we cannot
-            // recover from — keep the same error path as `dupe` for API symmetry.
-            _ = self.allocator.free(params_copy);
-            return err;
-        }
-
-        return new_id;
-    }
-
-    /// Looks up a signature by its id (the function's TypeId when wrapped). Returns
-    /// null if the store never produced one with that id — useful for defensive code
-    /// but callers are expected to only query ids they previously added.
-    pub fn lookup(self: FunctionSignatureStore, sig_id: FunctionSignatureId) ?FunctionSignature {
-        if (sig_id < next_user_type_id) return null;
-        const idx = @as(usize, @intCast(sig_id - next_user_type_id));
-        if (idx >= self.signatures.items.len) return null;
-        // Return a copy to avoid aliasing the internal storage — callers should not
-        // mutate signatures through this view.
-        return self.signatures.items[idx];
-    }
-
-    /// Number of signatures currently stored — handy for tests and debug rendering.
-    pub fn count(self: FunctionSignatureStore) usize {
-        return self.signatures.items.len;
-    }
-
-    /// Returns a slice over the accumulated signatures. The slice's lifetime is tied to
-    /// the store (and its allocator), so it must not outlive them.
-    pub fn items(self: *FunctionSignatureStore) []const FunctionSignature {
-        return self.signatures.items;
-    }
-};
-
-test "FunctionSignatureStore.add allocates a fresh signature" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const b = Builtins.init();
-    const x_param = ParameterType{ .name = "x", .type_id = b.number };
-    const y_param = ParameterType{ .name = "y", .type_id = b.string };
-    const params: []const ParameterType = &.{ x_param, y_param };
-
-    var store = FunctionSignatureStore.init(arena.allocator());
-
-    const sig_id = try store.add(params, b.boolean);
-    try testing.expect(sig_id >= next_user_type_id);
-
-    // The store should now report one entry and the lookup should return a matching signature.
-    const found = store.lookup(sig_id).?;
-    try testing.expectEqual(@as(usize, 2), found.parameterCount());
-    try testing.expect(std.mem.eql(u8, "x", found.parameters[0].name));
-
-    // Verify the parameter types are also captured correctly.
-    try testing.expectEqual(b.number, found.parameters[0].type_id);
-    try testing.expectEqualStrings("y", found.parameters[1].name);
-    try testing.expectEqual(b.string, found.parameters[1].type_id);
-
-    // The arena is still alive through `arena` — signature data should not be dropped.
-}
-
-test "FunctionSignatureStore.count reflects additions" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    var store = FunctionSignatureStore.init(arena.allocator());
-    try testing.expectEqual(@as(usize, 0), store.count());
-
-    const b = Builtins.init();
-    _ = try store.add(&[_]ParameterType{}, b.number);
-    try testing.expectEqual(@as(usize, 1), store.count());
-}
-
-test "FunctionSignatureStore.lookup returns null for missing id" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    var store = FunctionSignatureStore.init(arena.allocator());
-    const b = Builtins.init();
-    _ = try store.add(&[_]ParameterType{}, b.number);
-
-    // Ids in the builtin range (100-199) must not collide with user signatures.
-    try testing.expect(store.lookup(next_user_type_id - 1) == null);
-}
-
 // ---------------------------------------------------------------------------
 // Type — a concrete type value consisting of an id and a kind.
 // ---------------------------------------------------------------------------
-
 /// Describes the shape of any value in the frontend's analysis. Ids make types
 /// cheap to pass around; kinds carry the real semantics.
 pub const Type = struct {
@@ -428,7 +285,6 @@ pub const Type = struct {
         try testing.expectEqualStrings("function", t.displayName());
     }
 };
-
 // ---------------------------------------------------------------------------
 // Builtins — one canonical registry per semantic context.
 // ---------------------------------------------------------------------------
