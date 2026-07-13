@@ -801,14 +801,17 @@ fn applyAggregateContexts(
                                     };
                                 }
                             }
-                            const inferred_tuple_id = try store.intern(.{ .tuple = .{
-                                .elements = actual,
-                                .readonly = declared_tuple.readonly,
-                            } });
-                            // Always override both slots for tuple annotations: type_id must
-                            // become a concrete `.tuple` so downstream code can read
-                            // `kind.tuple.*`, and contextual_type mirrors the same shape.
-                            changed = putTypeWithContextual(entries, initializer, inferred_tuple_id, true, .none, null, inferred_tuple_id) or changed;
+                            // Store only the *declared* tuple shape as contextual_type.
+                            // inferArray already set type_id with inferred element types —
+                            // do not overwrite it, so downstream comparison sees real
+                            // source-side shapes against the declared annotation shape.
+                            if (!updateContextualTypeOnly(entries, initializer, declared_contextual)) {
+                                changed = putTypeWithContextual(
+                                    entries, initializer, store.builtins.unknown, true, .none, null, declared_contextual,
+                                ) or changed;
+                            } else {
+                                changed = true;
+                            }
                         },
                         .array => {
                             // For a declared array shape store the annotation as the contextual hint only.
