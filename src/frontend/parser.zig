@@ -1820,7 +1820,7 @@ const Parser = struct {
     }
 
     fn parseConditionalExpression(self: *Parser) anyerror!NodeId {
-        const condition = try self.parseTypeAssertionExpression();
+        const condition = try self.parseBinaryExpression(2);
         if (!self.eat(.Question)) return condition;
 
         const consequent = try self.parseAssignmentExpression();
@@ -1836,17 +1836,17 @@ const Parser = struct {
         });
     }
 
-    fn parseTypeAssertionExpression(self: *Parser) anyerror!NodeId {
-        var expression = try self.parseCoalescingExpression();
-        while (self.atIdentifierText("as") or self.atIdentifierText("satisfies")) {
-            expression = try self.parseTypeAssertionSuffix(expression);
-        }
-        return expression;
-    }
-
     fn parseTypeAssertionSuffix(self: *Parser, expression: NodeId) anyerror!NodeId {
         const operator = self.advance();
-        const type_root = try self.parseType();
+        const type_root = if ((self.at(.Identifier) or self.at(.PrivateIdentifier)) and
+            self.peek(1).kind == .LessThan and !self.hasClosingTypeArgumentList())
+        blk: {
+            const name = self.advance();
+            break :blk try self.addTypeNode(.{
+                .span = name.span,
+                .data = .{ .Named = .{ .name = name.lexeme } },
+            });
+        } else try self.parseType();
         if (type_root == ast_mod.invalid_type_node) {
             self.reportAt(operator, if (std.mem.eql(u8, operator.lexeme, "as")) "expected type after 'as'" else "expected type after 'satisfies'", .expected_token);
             return expression;
@@ -1860,6 +1860,59 @@ const Parser = struct {
             else
                 .{ .SatisfiesExpression = .{ .expression = expression, .type_annotation = annotation } },
         });
+    }
+
+    fn hasClosingTypeArgumentList(self: *const Parser) bool {
+        var depth: usize = 0;
+        var cursor = self.index + 1;
+        while (cursor < self.tokens.len) : (cursor += 1) {
+            switch (self.tokens[cursor].kind) {
+                .LessThan => depth += 1,
+                .GreaterThan => {
+                    if (depth == 0) return false;
+                    depth -= 1;
+                    if (depth == 0) return true;
+                },
+                .Semicolon, .RParen, .RBracket, .RBrace, .EOF => return false,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn parseBinaryExpression(self: *Parser, min_precedence: u8) anyerror!NodeId {
+        var left = try self.parseUnaryExpression();
+        while (true) {
+            const is_type_assertion = self.atIdentifierText("as") or self.atIdentifierText("satisfies");
+            const precedence = if (is_type_assertion)
+                @as(u8, 9)
+            else
+                binaryPrecedence(self.current().kind) orelse break;
+            if (precedence < min_precedence or precedence < 2) break;
+
+            if (is_type_assertion) {
+                left = try self.parseTypeAssertionSuffix(left);
+                continue;
+            }
+
+            if (self.current().kind == .Keyword_in and !self.allow_in) break;
+
+            const operator = self.advance();
+            const right_precedence = if (operator.kind == .AsteriskAsterisk) precedence else precedence + 1;
+            const right = try self.parseBinaryExpression(right_precedence);
+            if (operator.kind == .QuestionQuestion and
+                (self.isUnparenthesizedLogicalExpression(left) or self.isUnparenthesizedLogicalExpression(right)))
+            {
+                self.reportAt(operator, "cannot mix ?? with && or || without parentheses", .unexpected_token);
+            }
+            if ((operator.kind == .AmpersandAmpersand or operator.kind == .BarBar) and
+                self.isUnparenthesizedCoalescingExpression(left))
+            {
+                self.reportAt(operator, "cannot mix ?? with && or || without parentheses", .unexpected_token);
+            }
+            left = try self.addBinaryExpression(operator.kind, left, right);
+        }
+        return left;
     }
 
     fn parseCoalescingExpression(self: *Parser) anyerror!NodeId {
@@ -1880,6 +1933,14 @@ const Parser = struct {
         if (std.mem.indexOfScalar(NodeId, self.parenthesized_nodes.items, node_id) != null) return false;
         return switch (self.nodes.items[@intCast(node_id)].data) {
             .BinaryExpression => |binary| binary.operator == .AmpersandAmpersand or binary.operator == .BarBar,
+            else => false,
+        };
+    }
+
+    fn isUnparenthesizedCoalescingExpression(self: *const Parser, node_id: NodeId) bool {
+        if (std.mem.indexOfScalar(NodeId, self.parenthesized_nodes.items, node_id) != null) return false;
+        return switch (self.nodes.items[@intCast(node_id)].data) {
+            .BinaryExpression => |binary| binary.operator == .QuestionQuestion,
             else => false,
         };
     }
@@ -2012,10 +2073,6 @@ const Parser = struct {
     fn parseAdditiveExpression(self: *Parser) anyerror!NodeId {
         var left = try self.parseMultiplicativeExpression();
         while (true) {
-            if (self.atIdentifierText("as") or self.atIdentifierText("satisfies")) {
-                left = try self.parseTypeAssertionSuffix(left);
-                continue;
-            }
             left = switch (self.current().kind) {
                 .Plus => blk: {
                     _ = self.advance();

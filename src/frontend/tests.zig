@@ -2907,25 +2907,105 @@ test "frontend suite: function flags cover async declarations exports expression
     try std.testing.expectEqualStrings("async", parsed.ast.node(class.members[1]).data.ClassField.name);
 }
 
-test "frontend suite: as and satisfies bind looser than binary operators" {
+test "frontend suite: as and satisfies participate in general binary precedence" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const parsed = try parseOk(allocator,
-        \\const a = x + y satisfies T;
-        \\const b = x satisfies T + y;
-        \\const c = x + y as T;
-        \\const d = x as T + y;
-    );
+    const source =
+        \\const additive_left = a + b satisfies T;
+        \\const additive_right = a satisfies T + b;
+        \\const multiplicative_left = a * b satisfies T;
+        \\const multiplicative_right = a satisfies T * b;
+        \\const logical = a && b satisfies T;
+        \\const logical_parenthesized = a && (b satisfies T);
+        \\const coalescing = a ?? b as T;
+        \\const coalescing_parenthesized = a ?? (b as T);
+        \\const relational_left = a < b as T;
+        \\const relational_right = a as T < b;
+        \\const division_right = a as T / b;
+        \\const exponent_right = a satisfies T ** b;
+    ;
+    const scanned = try scanOk(allocator, source, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = true });
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    try std.testing.expectEqual(scanned.tokens.len - 1, parsed.consumed_tokens);
     const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
-    const a = parsed.ast.node(parsed.ast.node(parsed.ast.node(statements[0]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?).data.SatisfiesExpression;
-    try expectNodeTag(parsed.ast, a.expression, .BinaryExpression);
-    const b = parsed.ast.node(parsed.ast.node(parsed.ast.node(statements[1]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?).data.BinaryExpression;
-    try expectNodeTag(parsed.ast, b.left, .SatisfiesExpression);
-    const c = parsed.ast.node(parsed.ast.node(parsed.ast.node(statements[2]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?).data.AsExpression;
-    try expectNodeTag(parsed.ast, c.expression, .BinaryExpression);
-    const d = parsed.ast.node(parsed.ast.node(parsed.ast.node(statements[3]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?).data.BinaryExpression;
-    try expectNodeTag(parsed.ast, d.left, .AsExpression);
+    try std.testing.expectEqual(@as(usize, 12), statements.len);
+
+    const additive_left_id = parsed.ast.node(parsed.ast.node(statements[0]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const additive_left = parsed.ast.node(additive_left_id).data.SatisfiesExpression;
+    const additive_left_binary = parsed.ast.node(additive_left.expression).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Plus, additive_left_binary.operator);
+    try expectNodeTag(parsed.ast, additive_left_binary.left, .Identifier);
+    try expectNodeTag(parsed.ast, additive_left_binary.right, .Identifier);
+
+    const additive_right_id = parsed.ast.node(parsed.ast.node(statements[1]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const additive_right = parsed.ast.node(additive_right_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Plus, additive_right.operator);
+    try expectNodeTag(parsed.ast, additive_right.left, .SatisfiesExpression);
+    try expectNodeTag(parsed.ast, additive_right.right, .Identifier);
+
+    const multiplicative_left_id = parsed.ast.node(parsed.ast.node(statements[2]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const multiplicative_left = parsed.ast.node(multiplicative_left_id).data.SatisfiesExpression;
+    const multiplicative_left_binary = parsed.ast.node(multiplicative_left.expression).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Asterisk, multiplicative_left_binary.operator);
+    try expectNodeTag(parsed.ast, multiplicative_left_binary.left, .Identifier);
+    try expectNodeTag(parsed.ast, multiplicative_left_binary.right, .Identifier);
+
+    const multiplicative_right_id = parsed.ast.node(parsed.ast.node(statements[3]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const multiplicative_right = parsed.ast.node(multiplicative_right_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Asterisk, multiplicative_right.operator);
+    try expectNodeTag(parsed.ast, multiplicative_right.left, .SatisfiesExpression);
+    try expectNodeTag(parsed.ast, multiplicative_right.right, .Identifier);
+
+    const logical_id = parsed.ast.node(parsed.ast.node(statements[4]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const logical = parsed.ast.node(logical_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.AmpersandAmpersand, logical.operator);
+    try expectNodeTag(parsed.ast, logical.left, .Identifier);
+    try expectNodeTag(parsed.ast, logical.right, .SatisfiesExpression);
+
+    const logical_parenthesized_id = parsed.ast.node(parsed.ast.node(statements[5]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const logical_parenthesized = parsed.ast.node(logical_parenthesized_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.AmpersandAmpersand, logical_parenthesized.operator);
+    try expectNodeTag(parsed.ast, logical_parenthesized.left, .Identifier);
+    try expectNodeTag(parsed.ast, logical_parenthesized.right, .SatisfiesExpression);
+
+    const coalescing_id = parsed.ast.node(parsed.ast.node(statements[6]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const coalescing = parsed.ast.node(coalescing_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.QuestionQuestion, coalescing.operator);
+    try expectNodeTag(parsed.ast, coalescing.left, .Identifier);
+    try expectNodeTag(parsed.ast, coalescing.right, .AsExpression);
+
+    const coalescing_parenthesized_id = parsed.ast.node(parsed.ast.node(statements[7]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const coalescing_parenthesized = parsed.ast.node(coalescing_parenthesized_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.QuestionQuestion, coalescing_parenthesized.operator);
+    try expectNodeTag(parsed.ast, coalescing_parenthesized.left, .Identifier);
+    try expectNodeTag(parsed.ast, coalescing_parenthesized.right, .AsExpression);
+
+    const relational_left_id = parsed.ast.node(parsed.ast.node(statements[8]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const relational_left = parsed.ast.node(relational_left_id).data.AsExpression;
+    const relational_left_binary = parsed.ast.node(relational_left.expression).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.LessThan, relational_left_binary.operator);
+    try expectNodeTag(parsed.ast, relational_left_binary.left, .Identifier);
+    try expectNodeTag(parsed.ast, relational_left_binary.right, .Identifier);
+
+    const relational_right_id = parsed.ast.node(parsed.ast.node(statements[9]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const relational_right = parsed.ast.node(relational_right_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.LessThan, relational_right.operator);
+    try expectNodeTag(parsed.ast, relational_right.left, .AsExpression);
+    try expectNodeTag(parsed.ast, relational_right.right, .Identifier);
+
+    const division_right_id = parsed.ast.node(parsed.ast.node(statements[10]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const division_right = parsed.ast.node(division_right_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Slash, division_right.operator);
+    try expectNodeTag(parsed.ast, division_right.left, .AsExpression);
+    try expectNodeTag(parsed.ast, division_right.right, .Identifier);
+
+    const exponent_right_id = parsed.ast.node(parsed.ast.node(statements[11]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    const exponent_right = parsed.ast.node(exponent_right_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.AsteriskAsterisk, exponent_right.operator);
+    try expectNodeTag(parsed.ast, exponent_right.left, .SatisfiesExpression);
+    try expectNodeTag(parsed.ast, exponent_right.right, .Identifier);
 }
 
 test "frontend suite: binder and resolver traverse assertions and updates" {

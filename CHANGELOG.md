@@ -8,6 +8,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Integrated TypeScript `as` and `satisfies` into general binary precedence, including multiplicative, exponentiation, logical, coalescing, and relational grouping with full-token matrix coverage.
+
 ## [0.0.3] — 2026-07-13
 
 - `do { ... } while (condition);` now has a body-first AST/CFG representation, with a required trailing semicolon and stable missing-`while` recovery.
