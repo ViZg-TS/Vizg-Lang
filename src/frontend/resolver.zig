@@ -87,11 +87,12 @@ const Resolver = struct {
             .FunctionDeclaration => |function_decl| {
                 if (function_decl.type_parameters.len != 0) _ = self.takeScope();
                 const function_scope = self.takeScope();
-                for (function_decl.params) |_| {}
+                try self.resolveParameterInitializers(function_decl.params, function_scope);
                 try self.resolveNode(function_decl.body, function_scope);
             },
             .FunctionExpression => |function_expr| {
                 const function_scope = self.takeScope();
+                try self.resolveParameterInitializers(function_expr.params, function_scope);
                 try self.resolveNode(function_expr.body, function_scope);
             },
             .YieldExpression => |yield_expr| {
@@ -113,10 +114,12 @@ const Resolver = struct {
             },
             .ClassMethod => |method| {
                 const function_scope = self.takeScope();
+                try self.resolveParameterInitializers(method.params, function_scope);
                 try self.resolveNode(method.body, function_scope);
             },
             .ArrowFunctionExpression => |arrow| {
                 const function_scope = self.takeScope();
+                try self.resolveParameterInitializers(arrow.params, function_scope);
                 try self.resolveNode(arrow.body, function_scope);
             },
             .BlockStatement => |block| {
@@ -361,6 +364,13 @@ const Resolver = struct {
         const scope = self.next_scope;
         self.next_scope += 1;
         return scope;
+    }
+
+    fn resolveParameterInitializers(self: *Resolver, parameters: []const NodeId, scope: binder.ScopeId) !void {
+        for (parameters) |parameter_id| switch (self.ast.node(parameter_id).data) {
+            .Parameter => |parameter| if (parameter.initializer) |initializer| try self.resolveNode(initializer, scope),
+            else => {},
+        };
     }
 };
 
@@ -714,4 +724,25 @@ test "resolver consumes generic declaration scopes in binder order" {
     const resolved = try resolve(allocator, parsed.ast, bound);
     try std.testing.expectEqual(@as(usize, 1), resolved.diagnostics.len);
     try std.testing.expectEqual(diagnostics.DiagnosticCode.cannot_find_name, resolved.diagnostics[0].code);
+}
+
+test "resolver visits parameter default expressions in parameter scope" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, "let seed = 1; function f(first = seed, second = first) { return second; }", true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+    var seed_read = false;
+    var first_read = false;
+    for (resolved.references) |reference| {
+        seed_read = seed_read or std.mem.eql(u8, reference.name, "seed");
+        first_read = first_read or std.mem.eql(u8, reference.name, "first");
+    }
+    try std.testing.expect(seed_read and first_read);
 }

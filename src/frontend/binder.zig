@@ -181,6 +181,7 @@ const Binder = struct {
                         else => {},
                     }
                 }
+                try self.bindParameterInitializers(function_decl.params, function_scope);
                 try self.bindNode(function_decl.body, function_scope);
             },
             .FunctionExpression => |function_expr| {
@@ -196,6 +197,7 @@ const Binder = struct {
                         else => {},
                     }
                 }
+                try self.bindParameterInitializers(function_expr.params, function_scope);
                 try self.bindNode(function_expr.body, function_scope);
             },
             .YieldExpression => |yield_expr| {
@@ -232,6 +234,7 @@ const Binder = struct {
                     .Parameter => |param| _ = try self.declare(function_scope, param.name, .parameter, param_id, self.ast.node(param_id).span),
                     else => {},
                 };
+                try self.bindParameterInitializers(method.params, function_scope);
                 try self.bindNode(method.body, function_scope);
             },
             .ArrowFunctionExpression => |arrow| {
@@ -243,6 +246,7 @@ const Binder = struct {
                         else => {},
                     }
                 }
+                try self.bindParameterInitializers(arrow.params, function_scope);
                 try self.bindNode(arrow.body, function_scope);
             },
             .BlockStatement => |block| {
@@ -409,6 +413,14 @@ const Binder = struct {
             _ = try self.declareInNamespace(scope, parameter.name, .type_parameter, .type, declaration, parameter.span);
         }
         return scope;
+    }
+
+    // Defaults are traversed in the parameter scope after all names are bound.
+    fn bindParameterInitializers(self: *Binder, parameters: []const NodeId, scope: ScopeId) !void {
+        for (parameters) |parameter_id| switch (self.ast.node(parameter_id).data) {
+            .Parameter => |parameter| if (parameter.initializer) |initializer| try self.bindNode(initializer, scope),
+            else => {},
+        };
     }
 
     fn declare(self: *Binder, scope_id: ScopeId, name: []const u8, kind: SymbolKind, declaration: NodeId, span: tokens.Span) !SymbolId {

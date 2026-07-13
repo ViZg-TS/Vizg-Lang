@@ -438,10 +438,12 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, arrow.body, depth + 1);
         },
         .Parameter => |param| {
-            try writer.print("Parameter #{} name=\"{s}\" rest={}", .{ node_id, param.name, param.rest });
+            try writer.print("Parameter #{} name=\"{s}\" rest={} optional={}", .{ node_id, param.name, param.rest, param.optional });
             if (param.type_annotation) |annotation| try writer.print(" type=#{}", .{annotation.root});
+            if (param.initializer) |initializer| try writer.print(" initializer=#{}", .{initializer});
             try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
             if (param.type_annotation) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
+            if (param.initializer) |initializer| try printAstNode(writer, tree, initializer, depth + 1);
         },
         .SpreadElement => |spread| {
             try writer.print("SpreadElement #{} argument=#{} {}..{}\n", .{ node_id, spread.argument, node.span.start, node.span.end });

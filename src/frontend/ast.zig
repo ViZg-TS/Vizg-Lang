@@ -235,6 +235,8 @@ pub const Parameter = struct {
     name: []const u8,
     type_annotation: ?TypeAnnotation = null,
     rest: bool = false,
+    optional: bool = false,
+    initializer: ?NodeId = null,
 };
 
 pub const AccessModifier = enum { none, public, private, protected };

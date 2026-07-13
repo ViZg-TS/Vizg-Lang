@@ -1095,14 +1095,25 @@ const Parser = struct {
         while (!self.at(.RParen) and !self.at(.EOF)) {
             const rest_token: ?Token = if (self.at(.Spread)) self.advance() else null;
             const param_token = self.expectIdentifierLike("expected parameter name");
+            const optional_token: ?Token = if (self.at(.Question)) self.advance() else null;
             const param_type = try self.parseOptionalTypeAnnotation();
-            while (!self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) _ = self.advance();
+            const initializer: ?NodeId = if (self.eat(.Equal)) try self.parseAssignmentExpression() else null;
+            if (rest_token != null and optional_token != null) self.reportAt(optional_token.?, "rest parameter cannot be optional", .unexpected_token);
+            if (rest_token != null and initializer != null) self.reportAt(param_token, "rest parameter cannot have an initializer", .unexpected_token);
+            if (optional_token != null and initializer != null) self.reportAt(optional_token.?, "optional parameter cannot have an initializer", .unexpected_token);
+            if (!self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) {
+                self.report("unexpected token in parameter", .unexpected_token);
+                while (!self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) _ = self.advance();
+            }
+            const end_span = if (initializer) |id| self.nodes.items[@intCast(id)].span else if (param_type) |annotation| annotation.span else if (optional_token) |token| token.span else param_token.span;
             try params.append(self.allocator, try self.addNode(.{
-                .span = if (rest_token) |token| joinSpans(token.span, param_token.span) else param_token.span,
+                .span = joinSpans(if (rest_token) |token| token.span else param_token.span, end_span),
                 .data = .{ .Parameter = .{
                     .name = param_token.lexeme,
                     .type_annotation = param_type,
                     .rest = rest_token != null,
+                    .optional = optional_token != null,
+                    .initializer = initializer,
                 } },
             }));
             if (!self.eat(.Comma)) break;
@@ -1582,28 +1593,16 @@ const Parser = struct {
         if (self.tokens[cursor].kind == .Identifier) return self.tokens[cursor + 1].kind == .EqualsGreaterThan;
         if (self.tokens[cursor].kind != .LParen) return false;
         cursor += 1;
-
-        if (self.tokens[cursor].kind != .RParen) {
-            while (true) {
-                if (self.tokens[cursor].kind == .Spread) cursor += 1;
-                if (self.tokens[cursor].kind != .Identifier and self.tokens[cursor].kind != .PrivateIdentifier) return false;
-                cursor += 1;
-                if (self.tokens[cursor].kind == .Colon) {
-                    cursor += 1;
-                    if (self.tokens[cursor].kind != .Identifier and self.tokens[cursor].kind != .PrivateIdentifier) return false;
-                    cursor += 1;
-                }
-                if (self.tokens[cursor].kind != .Comma) break;
-                cursor += 1;
-                if (self.tokens[cursor].kind == .RParen) break;
-            }
-        }
-        if (self.tokens[cursor].kind != .RParen) return false;
-        cursor += 1;
+        var depth: usize = 1;
+        while (depth != 0 and self.tokens[cursor].kind != .EOF) : (cursor += 1) switch (self.tokens[cursor].kind) {
+            .LParen, .LBracket, .LBrace => depth += 1,
+            .RParen, .RBracket, .RBrace => depth -= 1,
+            else => {},
+        };
+        if (depth != 0) return false;
         if (self.tokens[cursor].kind == .Colon) {
             cursor += 1;
-            if (self.tokens[cursor].kind != .Identifier and self.tokens[cursor].kind != .PrivateIdentifier) return false;
-            cursor += 1;
+            while (self.tokens[cursor].kind != .EqualsGreaterThan and self.tokens[cursor].kind != .EOF) : (cursor += 1) {}
         }
         return self.tokens[cursor].kind == .EqualsGreaterThan;
     }
@@ -3481,4 +3480,36 @@ test "parser preserves generic declaration parameters constraints and defaults" 
     try std.testing.expectEqual(@as(usize, 1), parsed.ast.node(statements[1]).data.ClassDeclaration.type_parameters.len);
     try std.testing.expectEqual(@as(usize, 1), parsed.ast.node(statements[2]).data.InterfaceDeclaration.type_parameters.len);
     try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(statements[3]).data.TypeAliasDeclaration.type_parameters.len);
+}
+
+test "parser preserves optional and default parameters across callable forms" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\function f(value?: string, fallback = 'default') {}
+        \\const arrow = (value = make(1)) => value;
+        \\class C { constructor(value = 1) {} method(flag?: boolean) {} }
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const function_decl = parsed.ast.node(statements[0]).data.FunctionDeclaration;
+    try std.testing.expect(parsed.ast.node(function_decl.params[0]).data.Parameter.optional);
+    try std.testing.expect(parsed.ast.node(function_decl.params[1]).data.Parameter.initializer != null);
+    const arrow_id = parsed.ast.node(parsed.ast.node(statements[1]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator.init.?;
+    try std.testing.expect(parsed.ast.node(parsed.ast.node(arrow_id).data.ArrowFunctionExpression.params[0]).data.Parameter.initializer != null);
+    const class_decl = parsed.ast.node(statements[2]).data.ClassDeclaration;
+    try std.testing.expect(parsed.ast.node(parsed.ast.node(class_decl.members[0]).data.ClassMethod.params[0]).data.Parameter.initializer != null);
+    try std.testing.expect(parsed.ast.node(parsed.ast.node(class_decl.members[1]).data.ClassMethod.params[0]).data.Parameter.optional);
+
+    const malformed_scan = try scanner.scanAll(allocator, "function bad(value @ string, ...rest = [], tail) {}", true);
+    const malformed = try parse(allocator, malformed_scan.tokens, .{});
+    try std.testing.expect(malformed.diagnostics.len >= 3);
+    try std.testing.expectEqualStrings("unexpected token in parameter", malformed.diagnostics[0].message);
+    var found_rest_last = false;
+    for (malformed.diagnostics) |diagnostic| found_rest_last = found_rest_last or std.mem.eql(u8, diagnostic.message, "rest parameter must be last");
+    try std.testing.expect(found_rest_last);
 }
