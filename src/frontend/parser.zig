@@ -377,6 +377,8 @@ const Parser = struct {
         var source_unquoted: []const u8 = "";
         if (tok) |t| source_unquoted = trimString(t.lexeme);
 
+        const attributes = if (self.at(.Keyword_with)) try self.parseStaticImportAttributes() else null;
+
         _ = self.eat(.Semicolon);
 
         const kind: ast_mod.ImportKind = if (!needs_from)
@@ -399,8 +401,54 @@ const Parser = struct {
                 .specifiers = try specifiers.toOwnedSlice(self.allocator),
                 .source = source_unquoted,
                 .source_span = source_span,
+                .attributes = attributes,
             } },
         });
+    }
+
+    fn parseStaticImportAttributes(self: *Parser) anyerror!?ast_mod.ImportAttributes {
+        const start = self.advance();
+        if (!self.eat(.LBrace)) {
+            self.report("expected '{' after import with", .expected_token);
+            while (!self.at(.Semicolon) and !self.at(.EOF)) _ = self.advance();
+            return null;
+        }
+        var entries: std.ArrayList(ast_mod.ImportAttribute) = .empty;
+        errdefer entries.deinit(self.allocator);
+        while (!self.at(.RBrace) and !self.at(.Semicolon) and !self.at(.EOF)) {
+            const key = self.current();
+            if (key.kind != .Identifier and key.kind != .StringLiteral) {
+                self.report("expected import attribute key", .expected_token);
+                while (!self.at(.Comma) and !self.at(.RBrace) and !self.at(.Semicolon) and !self.at(.EOF)) _ = self.advance();
+                if (self.eat(.Comma)) continue;
+                break;
+            }
+            _ = self.advance();
+            const normalized_key = if (key.kind == .StringLiteral) trimString(key.lexeme) else key.lexeme;
+            if (!self.eat(.Colon)) {
+                self.report("expected ':' after import attribute key", .expected_token);
+                while (!self.at(.Comma) and !self.at(.RBrace) and !self.at(.Semicolon) and !self.at(.EOF)) _ = self.advance();
+                if (self.eat(.Comma)) continue;
+                break;
+            }
+            if (!self.at(.StringLiteral)) {
+                self.report("expected string import attribute value", .expected_token);
+                while (!self.at(.Comma) and !self.at(.RBrace) and !self.at(.Semicolon) and !self.at(.EOF)) _ = self.advance();
+                if (self.eat(.Comma)) continue;
+                break;
+            }
+            const value_token = self.advance();
+            const value = try self.addNode(.{ .span = value_token.span, .data = .{ .Literal = .{ .value = value_token.lexeme } } });
+            try entries.append(self.allocator, .{
+                .key = normalized_key,
+                .key_span = key.span,
+                .value = value,
+                .span = joinSpans(key.span, value_token.span),
+            });
+            if (!self.eat(.Comma)) break;
+        }
+        const close = self.expect(.RBrace, "expected '}' after import attributes");
+        return .{ .entries = try entries.toOwnedSlice(self.allocator), .span = joinSpans(start.span, close.span) };
     }
 
     fn parseImportExpression(self: *Parser, start: Token) anyerror!NodeId {
@@ -408,10 +456,35 @@ const Parser = struct {
         const source = try self.parseAssignmentExpression();
         const options = if (self.eat(.Comma)) try self.parseAssignmentExpression() else null;
         const end = self.expect(.RParen, "expected ) after import expression").span;
+        const attributes = if (options) |id| try self.dynamicImportAttributes(id) else null;
         return self.addNode(.{
             .span = joinSpans(start.span, end),
-            .data = .{ .ImportExpression = .{ .source = source, .options = options } },
+            .data = .{ .ImportExpression = .{ .source = source, .options = options, .attributes = attributes } },
         });
+    }
+
+    fn dynamicImportAttributes(self: *Parser, options: NodeId) !?ast_mod.ImportAttributes {
+        const options_node = self.nodes.items[@intCast(options)];
+        if (options_node.data != .ObjectExpression) return null;
+        for (options_node.data.ObjectExpression.properties) |property| {
+            if (property.kind != .key_value or !std.mem.eql(u8, property.key, "with")) continue;
+            const payload = self.nodes.items[@intCast(property.value)];
+            if (payload.data != .ObjectExpression) return null;
+            var entries: std.ArrayList(ast_mod.ImportAttribute) = .empty;
+            errdefer entries.deinit(self.allocator);
+            for (payload.data.ObjectExpression.properties) |entry| {
+                if (entry.kind != .key_value) continue;
+                const value_span = self.nodes.items[@intCast(entry.value)].span;
+                try entries.append(self.allocator, .{
+                    .key = entry.key,
+                    .key_span = entry.key_span,
+                    .value = entry.value,
+                    .span = joinSpans(entry.key_span, value_span),
+                });
+            }
+            return .{ .entries = try entries.toOwnedSlice(self.allocator), .span = payload.span };
+        }
+        return null;
     }
 
     fn parseMetaProperty(self: *Parser, start: Token, expected: []const u8, kind: ast_mod.MetaPropertyKind) anyerror!NodeId {
@@ -2000,13 +2073,13 @@ const Parser = struct {
     }
 
     fn isObjectPropertyKeyToken(token: Token) bool {
-        return token.kind == .Identifier or token.kind == .PrivateIdentifier or
+        return token.kind == .Identifier or token.kind == .PrivateIdentifier or token.kind == .Keyword_with or
             token.kind == .StringLiteral or token.kind == .NumberLiteral;
     }
 
     fn objectPropertyKey(token: Token) []const u8 {
         return switch (token.kind) {
-            .Identifier, .PrivateIdentifier, .NumberLiteral => token.lexeme,
+            .Identifier, .PrivateIdentifier, .Keyword_with, .NumberLiteral => token.lexeme,
             .StringLiteral => token.lexeme[1 .. token.lexeme.len - 1],
             else => unreachable,
         };
@@ -2049,7 +2122,7 @@ const Parser = struct {
             const key_tok_kind = key_tok.kind;
 
             // Accept Identifier, PrivateIdentifier, StringLiteral; also NumberLiteral for "0: ..." keys.
-            if (key_tok_kind != .Identifier and key_tok_kind != .PrivateIdentifier and
+            if (key_tok_kind != .Identifier and key_tok_kind != .PrivateIdentifier and key_tok_kind != .Keyword_with and
                 key_tok_kind != .StringLiteral and key_tok_kind != .NumberLiteral)
             {
                 self.reportAt(key_tok, "expected property key", .expected_token);
@@ -2057,7 +2130,7 @@ const Parser = struct {
             }
 
             const key = switch (key_tok_kind) {
-                .Identifier, .PrivateIdentifier => key_tok.lexeme,
+                .Identifier, .PrivateIdentifier, .Keyword_with => key_tok.lexeme,
                 .StringLiteral => blk: {
                     // Strip surrounding quotes. StringLiteral lexeme includes the quote chars.
                     const s = key_tok.lexeme;
@@ -2099,7 +2172,7 @@ const Parser = struct {
                     .key_span = key_tok.span,
                     .value = value,
                 });
-            } else if ((key_tok_kind == .Identifier or key_tok_kind == .PrivateIdentifier) and
+            } else if ((key_tok_kind == .Identifier or key_tok_kind == .PrivateIdentifier or key_tok_kind == .Keyword_with) and
                 (self.at(.Comma) or self.at(.RBrace)))
             {
                 const value = try self.addNode(.{
@@ -2776,6 +2849,52 @@ test "parser distinguishes dynamic imports from static declarations" {
     const conditional = parsed.ast.node(parsed.ast.node(call).data.CallExpression.arguments[0]).data.ConditionalExpression;
     try std.testing.expectEqual(.ImportExpression, std.meta.activeTag(parsed.ast.node(conditional.consequent).data));
     try std.testing.expectEqual(.ImportExpression, std.meta.activeTag(parsed.ast.node(conditional.alternate).data));
+}
+
+test "parser preserves static and dynamic import attributes" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const scan = try scanner.scanAll(allocator,
+        \\import data from "./data.json" with { type: "json" };
+        \\const lazy = import("./lazy.json", { with: { type: "json" } });
+    , true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+
+    const static_import = parsed.ast.node(statements[0]).data.ImportDeclaration;
+    const static_attributes = static_import.attributes.?;
+    try std.testing.expectEqual(@as(usize, 1), static_attributes.entries.len);
+    try std.testing.expectEqualStrings("type", static_attributes.entries[0].key);
+    try std.testing.expectEqualStrings("\"json\"", parsed.ast.node(static_attributes.entries[0].value).data.Literal.value);
+    try std.testing.expect(static_attributes.span.end > static_attributes.span.start);
+
+    const declaration = parsed.ast.node(statements[1]).data.VariableDeclaration;
+    const import_id = parsed.ast.node(declaration.declarations[0]).data.VariableDeclarator.init.?;
+    const dynamic_import = parsed.ast.node(import_id).data.ImportExpression;
+    const dynamic_attributes = dynamic_import.attributes.?;
+    try std.testing.expectEqual(@as(usize, 1), dynamic_attributes.entries.len);
+    try std.testing.expectEqualStrings("type", dynamic_attributes.entries[0].key);
+    try std.testing.expect(dynamic_import.options != null);
+}
+
+test "parser recovers after malformed import attributes" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const scan = try scanner.scanAll(allocator,
+        \\import data from "./data.json" with { type: json;
+        \\const after = 1;
+    , true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expect(parsed.diagnostics.len >= 1);
+    try std.testing.expectEqualStrings("expected string import attribute value", parsed.diagnostics[0].message);
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 2), statements.len);
+    try std.testing.expectEqual(.VariableDeclaration, std.meta.activeTag(parsed.ast.node(statements[1]).data));
 }
 
 test "parser preserves strict meta-properties, spans, nesting, and recovery" {

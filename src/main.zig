@@ -356,7 +356,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, tagged.template, depth + 1);
         },
         .ImportExpression => |import_expr| {
-            try writer.print("ImportExpression #{} source=#{} options={?} {}..{}\n", .{ node_id, import_expr.source, import_expr.options, node.span.start, node.span.end });
+            try writer.print("ImportExpression #{} source=#{} options={?} attributes={} {}..{}\n", .{ node_id, import_expr.source, import_expr.options, if (import_expr.attributes) |attrs| attrs.entries.len else 0, node.span.start, node.span.end });
             try printAstNode(writer, tree, import_expr.source, depth + 1);
             if (import_expr.options) |options| try printAstNode(writer, tree, options, depth + 1);
         },
@@ -607,6 +607,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
                 try printImportSpecifiers(writer, decl.specifiers);
                 try writer.print("]", .{});
             }
+            try writer.print(" attributes={}", .{if (decl.attributes) |attrs| attrs.entries.len else 0});
             try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
         },
         .ExportDeclaration => |decl| {

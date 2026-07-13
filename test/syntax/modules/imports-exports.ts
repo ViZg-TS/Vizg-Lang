@@ -2,6 +2,8 @@ import "polyfill";
 import primary, { named as local, type Shape } from "pkg";
 import * as namespace from "pkg";
 import type { Model } from "types";
+import records from "records.json" with { type: "json" };
+const lazyRecords = import("lazy-records.json", { with: { type: "json" } });
 export const value = local;
 export default primary;
 export { local as renamed };

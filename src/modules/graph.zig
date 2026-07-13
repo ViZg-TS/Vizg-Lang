@@ -45,6 +45,7 @@ pub const ImportEdge = struct {
     kind: ast_mod.ImportKind,
     type_only: bool,
     re_export: bool = false,
+    attributes: ?ast_mod.ImportAttributes = null,
     status: ImportStatus,
     span: tokens.Span,
 };
@@ -202,6 +203,7 @@ const Builder = struct {
                             .specifier = import_decl.source,
                             .kind = import_decl.kind,
                             .type_only = import_decl.type_only,
+                            .attributes = import_decl.attributes,
                             .status = .external,
                             .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                         });
@@ -217,6 +219,7 @@ const Builder = struct {
                             .specifier = import_decl.source,
                             .kind = import_decl.kind,
                             .type_only = import_decl.type_only,
+                            .attributes = import_decl.attributes,
                             .status = .missing,
                             .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                         });
@@ -244,6 +247,7 @@ const Builder = struct {
                         .specifier = import_decl.source,
                         .kind = import_decl.kind,
                         .type_only = import_decl.type_only,
+                        .attributes = import_decl.attributes,
                         .status = .local,
                         .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                     });

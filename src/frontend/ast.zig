@@ -109,6 +109,19 @@ pub const TaggedTemplateExpression = struct {
 pub const ImportExpression = struct {
     source: NodeId,
     options: ?NodeId = null,
+    attributes: ?ImportAttributes = null,
+};
+
+pub const ImportAttribute = struct {
+    key: []const u8,
+    key_span: tokens.Span,
+    value: NodeId,
+    span: tokens.Span,
+};
+
+pub const ImportAttributes = struct {
+    entries: []const ImportAttribute,
+    span: tokens.Span,
 };
 
 pub const MetaPropertyKind = enum { import_meta, new_target };
@@ -124,6 +137,7 @@ pub const ImportDeclaration = struct {
     specifiers: []const ImportSpecifier = &.{},
     source: []const u8,
     source_span: tokens.Span,
+    attributes: ?ImportAttributes = null,
 };
 
 pub const ImportKind = enum {
