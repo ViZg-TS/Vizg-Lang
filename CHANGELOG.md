@@ -12,6 +12,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Added
 
+- TypeScript `satisfies` expressions now have a distinct AST node, preserve structured type syntax, and compose with `as` assertions.
 - Logical `&&=` and `||=` assignments now parse alongside `??=`, and all compound assignments use read-modify-write reference semantics.
 - Prefix `++` and `--` now produce update-expression AST nodes with read-modify-write resolution, matching existing postfix forms.
 - Relational expressions now support `in` and `instanceof`, while `for` headers preserve unambiguous classic, `for-in`, and `for-of` parsing.

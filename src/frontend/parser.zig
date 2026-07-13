@@ -1978,6 +1978,25 @@ const Parser = struct {
                     break;
                 }
             }
+            // TypeScript `satisfies` shares `as` precedence but remains a distinct node.
+            if (self.atIdentifierText("satisfies")) {
+                const satisfies_tok = self.advance();
+                const type_root = try self.parseType();
+                if (type_root != ast_mod.invalid_type_node) {
+                    const type_span = self.typeSpan(type_root);
+                    node = try self.addNode(.{
+                        .span = joinSpans(self.nodes.items[@intCast(node)].span, type_span),
+                        .data = .{ .SatisfiesExpression = .{
+                            .expression = node,
+                            .type_annotation = .{ .root = type_root, .span = type_span },
+                        } },
+                    });
+                    continue;
+                } else {
+                    self.reportAt(satisfies_tok, "expected type after 'satisfies'", .expected_token);
+                    break;
+                }
+            }
             break;
         }
 
@@ -2272,6 +2291,51 @@ test "parser preserves logical assignments and right associativity" {
     try std.testing.expectEqual(TokenType.BarBarEqual, inner.operator);
     try std.testing.expectEqualStrings("b", parsed.ast.node(inner.left).data.Identifier.name);
     try std.testing.expectEqualStrings("c", parsed.ast.node(inner.right).data.Identifier.name);
+}
+
+test "parser preserves satisfies expressions precedence and as chains" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\const config = value satisfies Config;
+        \\const chained = value as Input satisfies Output;
+        \\const reverse = value satisfies Input as Output;
+        \\const selected = value satisfies Config ? yes : no;
+        \\const satisfies = value;
+        \\satisfies;
+    ;
+    const scan = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    try std.testing.expectEqual(scan.tokens.len - 1, parsed.consumed_tokens);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const config_decl = parsed.ast.node(statements[0]).data.VariableDeclaration;
+    const config_id = parsed.ast.node(config_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const config = parsed.ast.node(config_id).data.SatisfiesExpression;
+    try std.testing.expectEqualStrings("value", parsed.ast.node(config.expression).data.Identifier.name);
+    try std.testing.expectEqualStrings("Config", parsed.ast.typeNode(config.type_annotation.root).data.Named.name);
+
+    const chained_decl = parsed.ast.node(statements[1]).data.VariableDeclaration;
+    const chained_id = parsed.ast.node(chained_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const chained = parsed.ast.node(chained_id).data.SatisfiesExpression;
+    try std.testing.expectEqual(.AsExpression, std.meta.activeTag(parsed.ast.node(chained.expression).data));
+
+    const reverse_decl = parsed.ast.node(statements[2]).data.VariableDeclaration;
+    const reverse_id = parsed.ast.node(reverse_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const reverse = parsed.ast.node(reverse_id).data.AsExpression;
+    try std.testing.expectEqual(.SatisfiesExpression, std.meta.activeTag(parsed.ast.node(reverse.expression).data));
+
+    const selected_decl = parsed.ast.node(statements[3]).data.VariableDeclaration;
+    const selected_id = parsed.ast.node(selected_decl.declarations[0]).data.VariableDeclarator.init.?;
+    const selected = parsed.ast.node(selected_id).data.ConditionalExpression;
+    try std.testing.expectEqual(.SatisfiesExpression, std.meta.activeTag(parsed.ast.node(selected.condition).data));
+
+    const identifier_expression = parsed.ast.node(statements[5]).data.ExpressionStatement.expression;
+    try std.testing.expectEqualStrings("satisfies", parsed.ast.node(identifier_expression).data.Identifier.name);
 }
 
 fn joinSpans(a: tokens.Span, b: tokens.Span) tokens.Span {

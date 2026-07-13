@@ -169,6 +169,10 @@ const Resolver = struct {
                 _ = as_expr.type_annotation; // type names are not resolved at runtime
                 try self.resolveNode(as_expr.expression, scope);
             },
+            .SatisfiesExpression => |satisfies_expr| {
+                _ = satisfies_expr.type_annotation;
+                try self.resolveNode(satisfies_expr.expression, scope);
+            },
             .NonNullExpression => |nonnull| try self.resolveNode(nonnull.expression, scope),
             .UnaryExpression => |unary| try self.resolveNode(unary.argument, scope),
             .MemberExpression => |member| {
@@ -384,6 +388,30 @@ test "resolver distinguishes plain and compound assignment references" {
     try std.testing.expectEqual(@as(usize, 6), value_writes);
     try std.testing.expectEqual(@as(usize, 1), object_reads);
     try std.testing.expectEqual(@as(usize, 1), index_reads);
+}
+
+test "resolver visits only the value side of satisfies expressions" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\let value = 1;
+        \\const checked = value satisfies MissingType;
+    , true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+
+    var value_reads: usize = 0;
+    for (resolved.references) |reference| {
+        if (std.mem.eql(u8, reference.name, "value") and reference.kind == .read) value_reads += 1;
+        try std.testing.expect(!std.mem.eql(u8, reference.name, "MissingType"));
+    }
+    try std.testing.expectEqual(@as(usize, 1), value_reads);
 }
 
 test "resolver visits prefix unary operands" {

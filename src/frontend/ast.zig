@@ -289,6 +289,11 @@ pub const AsExpression = struct {
     type_annotation: TypeAnnotation,
 };
 
+pub const SatisfiesExpression = struct {
+    expression: NodeId,
+    type_annotation: TypeAnnotation,
+};
+
 pub const NonNullExpression = struct {
     expression: NodeId,
 };
@@ -430,6 +435,7 @@ pub const NodeData = union(enum) {
     MemberExpression: MemberExpression,
     ElementAccessExpression: ElementAccessExpression,
     AsExpression: AsExpression,
+    SatisfiesExpression: SatisfiesExpression,
     NonNullExpression: NonNullExpression,
     UnaryExpression: UnaryExpression,
     BinaryExpression: BinaryExpression,

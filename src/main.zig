@@ -465,6 +465,10 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try writer.print("AsExpression #{} expr=#{} type=#{} {}..{}\n", .{ node_id, as_expr.expression, as_expr.type_annotation.root, node.span.start, node.span.end });
             try printTypeNode(writer, tree, as_expr.type_annotation.root, depth + 1);
         },
+        .SatisfiesExpression => |satisfies_expr| {
+            try writer.print("SatisfiesExpression #{} expr=#{} type=#{} {}..{}\n", .{ node_id, satisfies_expr.expression, satisfies_expr.type_annotation.root, node.span.start, node.span.end });
+            try printTypeNode(writer, tree, satisfies_expr.type_annotation.root, depth + 1);
+        },
         .MemberExpression => |member| {
             try writer.print("MemberExpression #{} object=#{} property=\"{s}\" optional={} {}..{}\n", .{ node_id, member.object, member.property, member.optional, node.span.start, node.span.end });
             try printAstNode(writer, tree, member.object, depth + 1);
@@ -1281,6 +1285,7 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .NonNullExpression => return "NonNullExpression",
         .UnaryExpression => return "UnaryExpression",
         .AsExpression => return "AsExpression",
+        .SatisfiesExpression => return "SatisfiesExpression",
         .MemberExpression => return "MemberExpression",
         .BinaryExpression => return "BinaryExpression",
         .SequenceExpression => return "SequenceExpression",

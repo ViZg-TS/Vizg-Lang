@@ -87,6 +87,7 @@ The parser consumes scanner tokens and builds `ast.Ast`. The AST supports the cu
 - call, member, binary, conditional, assignment, prefix unary, and prefix/postfix update expressions
 - spread elements in calls, arrays, and object literals
 - postfix non-null assertions, distinct from prefix `!`
+- TypeScript `satisfies` expressions, preserved distinctly from `as` assertions
 - right-associative exponentiation plus multiplicative, additive, shift, relational, equality, bitwise, logical, nullish-coalescing, conditional, and assignment precedence levels
 
 Recognized but intentionally deferred syntax uses targeted parser diagnostics:
@@ -163,6 +164,12 @@ Plain `=` assignments resolve identifier targets as writes. Arithmetic, bitwise,
 shift, nullish, and logical compound assignments resolve identifier targets as
 read-modify-write operations. Member receivers and computed indices are visited
 once for either form.
+
+`satisfies` and `as` share the same postfix precedence and chain from left to
+right. Both `value as Input satisfies Output` and
+`value satisfies Input as Output` preserve their nested node identities. The
+value resolver visits only the expression side; type syntax remains for later
+semantic passes.
 
 Example CLI shape:
 

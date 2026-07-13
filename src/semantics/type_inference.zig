@@ -159,6 +159,10 @@ pub fn inferLiteralNodeTypes(
                 _ = as_expr.type_annotation;
                 _ = try stack.append(allocator, as_expr.expression);
             },
+            .SatisfiesExpression => |satisfies_expr| {
+                _ = satisfies_expr.type_annotation;
+                _ = try stack.append(allocator, satisfies_expr.expression);
+            },
             .NonNullExpression => |nonnull| _ = try stack.append(allocator, nonnull.expression),
             .UnaryExpression => |unary| {
                 _ = unary.operator;
