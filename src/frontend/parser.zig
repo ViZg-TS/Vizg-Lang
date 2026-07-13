@@ -1264,7 +1264,7 @@ const Parser = struct {
 
     fn binaryPrecedence(kind: TokenType) ?u8 {
         return switch (kind) {
-            .PlusEqual, .MinusEqual, .AsteriskEqual, .AsteriskAsteriskEqual, .SlashEqual, .PercentEqual, .AmpersandEqual, .BarEqual, .CaretEqual, .LessThanLessThanEqual, .GreaterThanGreaterThanEqual, .GreaterThanGreaterThanGreaterThanEqual, .QuestionQuestionEqual => @as(u8, 0),
+            .PlusEqual, .MinusEqual, .AsteriskEqual, .AsteriskAsteriskEqual, .SlashEqual, .PercentEqual, .AmpersandEqual, .BarEqual, .CaretEqual, .LessThanLessThanEqual, .GreaterThanGreaterThanEqual, .GreaterThanGreaterThanGreaterThanEqual, .AmpersandAmpersandEqual, .BarBarEqual, .QuestionQuestionEqual => @as(u8, 0),
             .Question => @as(u8, 1),
             .QuestionQuestion => @as(u8, 2),
             .BarBar => @as(u8, 3),
@@ -1301,6 +1301,8 @@ const Parser = struct {
             self.current().kind == .LessThanLessThanEqual or
             self.current().kind == .GreaterThanGreaterThanEqual or
             self.current().kind == .GreaterThanGreaterThanGreaterThanEqual or
+            self.current().kind == .AmpersandAmpersandEqual or
+            self.current().kind == .BarBarEqual or
             self.current().kind == .QuestionQuestionEqual)
         {
             const op_tok = self.advance();
@@ -2236,6 +2238,40 @@ pub fn parse(allocator: std.mem.Allocator, token_list: []const Token, options: P
         .max_parse_depth = options.max_parse_depth,
     };
     return parser.parse();
+}
+
+test "parser preserves logical assignments and right associativity" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\value &&= next;
+        \\value ||= fallback;
+        \\value ??= fallback;
+        \\a ||= b ||= c;
+    ;
+    const scan = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    try std.testing.expectEqual(scan.tokens.len - 1, parsed.consumed_tokens);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const operators = [_]TokenType{ .AmpersandAmpersandEqual, .BarBarEqual, .QuestionQuestionEqual };
+    for (operators, 0..) |operator, index| {
+        const expression = parsed.ast.node(statements[index]).data.ExpressionStatement.expression;
+        try std.testing.expectEqual(operator, parsed.ast.node(expression).data.AssignmentExpression.operator);
+    }
+
+    const outer_id = parsed.ast.node(statements[3]).data.ExpressionStatement.expression;
+    const outer = parsed.ast.node(outer_id).data.AssignmentExpression;
+    try std.testing.expectEqual(TokenType.BarBarEqual, outer.operator);
+    try std.testing.expectEqualStrings("a", parsed.ast.node(outer.left).data.Identifier.name);
+    const inner = parsed.ast.node(outer.right).data.AssignmentExpression;
+    try std.testing.expectEqual(TokenType.BarBarEqual, inner.operator);
+    try std.testing.expectEqualStrings("b", parsed.ast.node(inner.left).data.Identifier.name);
+    try std.testing.expectEqualStrings("c", parsed.ast.node(inner.right).data.Identifier.name);
 }
 
 fn joinSpans(a: tokens.Span, b: tokens.Span) tokens.Span {

@@ -192,7 +192,7 @@ const Resolver = struct {
                 try self.resolveUpdateTarget(update_expr.argument, scope);
             },
             .AssignmentExpression => |assignment| {
-                try self.resolveAssignmentTarget(assignment.left, scope);
+                try self.resolveAssignmentTarget(assignment.left, scope, assignment.operator != .Equal);
                 try self.resolveNode(assignment.right, scope);
             },
             .IfStatement => |if_stmt| {
@@ -248,12 +248,18 @@ const Resolver = struct {
         }
     }
 
-    fn resolveAssignmentTarget(self: *Resolver, node_id: NodeId, scope: binder.ScopeId) !void {
+    fn resolveAssignmentTarget(self: *Resolver, node_id: NodeId, scope: binder.ScopeId, read_before_write: bool) !void {
         if (node_id == ast_mod.invalid_node) return;
         const node = self.ast.node(node_id);
         switch (node.data) {
-            .Identifier => |identifier| try self.addReference(node_id, identifier.name, scope, .write),
-            .ElementAccessExpression => |elem_access| try self.resolveNode(elem_access.object, scope),
+            .Identifier => |identifier| {
+                if (read_before_write) try self.addReference(node_id, identifier.name, scope, .read);
+                try self.addReference(node_id, identifier.name, scope, .write);
+            },
+            .ElementAccessExpression => |elem_access| {
+                try self.resolveNode(elem_access.object, scope);
+                try self.resolveNode(elem_access.index, scope);
+            },
             .MemberExpression => |member| try self.resolveNode(member.object, scope),
             else => try self.resolveNode(node_id, scope),
         }
@@ -333,6 +339,51 @@ pub fn resolve(allocator: std.mem.Allocator, tree: ast_mod.Ast, bound: binder.Bi
         .bind = bound,
     };
     return resolver.resolve();
+}
+
+test "resolver distinguishes plain and compound assignment references" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\let value = 0;
+        \\let next = 1;
+        \\let object = [value];
+        \\let index = 0;
+        \\value = next;
+        \\value += next;
+        \\value &= next;
+        \\value &&= next;
+        \\value ||= next;
+        \\value ??= next;
+        \\object[index] += next;
+    ;
+    const scanned = try scanner.scanAll(allocator, source, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+
+    var value_reads: usize = 0;
+    var value_writes: usize = 0;
+    var object_reads: usize = 0;
+    var index_reads: usize = 0;
+    for (resolved.references) |reference| {
+        if (std.mem.eql(u8, reference.name, "value")) switch (reference.kind) {
+            .read => value_reads += 1,
+            .write => value_writes += 1,
+            else => {},
+        };
+        if (std.mem.eql(u8, reference.name, "object") and reference.kind == .read) object_reads += 1;
+        if (std.mem.eql(u8, reference.name, "index") and reference.kind == .read) index_reads += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 6), value_reads);
+    try std.testing.expectEqual(@as(usize, 6), value_writes);
+    try std.testing.expectEqual(@as(usize, 1), object_reads);
+    try std.testing.expectEqual(@as(usize, 1), index_reads);
 }
 
 test "resolver visits prefix unary operands" {

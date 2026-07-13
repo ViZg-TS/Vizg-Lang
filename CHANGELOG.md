@@ -12,6 +12,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Added
 
+- Logical `&&=` and `||=` assignments now parse alongside `??=`, and all compound assignments use read-modify-write reference semantics.
 - Prefix `++` and `--` now produce update-expression AST nodes with read-modify-write resolution, matching existing postfix forms.
 - Relational expressions now support `in` and `instanceof`, while `for` headers preserve unambiguous classic, `for-in`, and `for-of` parsing.
 - Comma expressions now produce ordered `SequenceExpression` AST nodes in full-expression positions while preserving structural commas in arguments, arrays, objects, and declarations.

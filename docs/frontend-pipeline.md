@@ -159,6 +159,11 @@ receivers and computed indices remain reads. Parsing currently preserves any
 syntactic update target. Full assignable-target validation is deferred to the
 type checker.
 
+Plain `=` assignments resolve identifier targets as writes. Arithmetic, bitwise,
+shift, nullish, and logical compound assignments resolve identifier targets as
+read-modify-write operations. Member receivers and computed indices are visited
+once for either form.
+
 Example CLI shape:
 
 ```txt
