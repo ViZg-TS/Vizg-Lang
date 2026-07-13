@@ -51,6 +51,13 @@ fn checkInitializer(
     const expected = symbol_type.declared_type orelse return;
     const actual = resolvedNode(type_info, initializer, store) orelse return;
     if (type_compat.check(actual, expected, store).isCompatible()) return;
+
+    // When both sides are aggregates with a compatible shape (matching length
+    // or matching keys), compare element-by-element and report per-position
+    // mismatches. The generic diagnostic is preserved when shapes cannot be
+    // meaningfully compared side-by-side so we do not silence real errors.
+    const emitted = try checkAggregateElementMismatch(allocator, result.ast, store, result.ast.node(declaration_id).span, initializer, expected, actual, out);
+    if (emitted) return;
     try appendDiagnostic(allocator, out, .type_mismatch, "initializer is not assignable to the declared type", "incompatible initializer", result.ast.node(initializer).span, symbol.span, "declared type is here");
 }
 
@@ -188,6 +195,73 @@ fn checkReturnsIn(
         .LabeledStatement => |statement| try checkReturnsIn(allocator, tree, type_info, store, statement.body, expected, function_span, out),
         .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassDeclaration, .ClassExpression => {},
         else => {},
+    }
+}
+
+/// When both expected and actual are aggregates with a matching shape (matching
+/// length for arrays/tuples or matching keys for objects), walk side-by-side
+/// and emit per-position element/type-mismatch diagnostics. Returns true if at
+/// least one diagnostic was emitted; false when the shapes cannot be compared
+/// positionally so the caller falls back to the generic "incompatible X" message.
+fn checkAggregateElementMismatch(
+    allocator: std.mem.Allocator,
+    tree: ast_mod.Ast,
+    store: *types.TypeStore,
+    expected_span: tokens.Span,
+    initializer_id: ast_mod.NodeId,
+    expected: types.TypeId,
+    actual: types.TypeId,
+    out: *std.ArrayList(diagnostics.Diagnostic),
+) !bool {
+    const expected_ty = store.lookup(expected) orelse return false;
+    const actual_ty = store.lookup(actual) orelse return false;
+
+    switch (expected_ty.kind) {
+        .array => {
+            if (actual_ty.kind != .array) return false;
+            // Both sides are arrays. The outer check already determined the
+            // declared element type and inferred element type disagree. Emit a
+            // single element-level diagnostic rather than the generic message.
+            try appendDiagnostic(allocator, out, .type_mismatch, "initializer element is not assignable to the declared array element type", "array element type mismatch", tree.node(initializer_id).span, expected_span, "declared array element type is here");
+            return true;
+        },
+        .tuple => |expected_tuple| {
+            if (actual_ty.kind != .tuple) return false;
+            const actual_tuple = actual_ty.kind.tuple;
+            if (expected_tuple.elements.len != actual_tuple.elements.len) return false;
+            var emitted: bool = false;
+            for (expected_tuple.elements, 0..expected_tuple.elements.len) |_, i| {
+                const act_elem = actual_tuple.elements[i];
+                if (act_elem.hole) continue;  // source-side holes carry no value to compare
+                const msg = try std.fmt.allocPrint(allocator, "tuple element at index {} is not assignable to the declared type", .{i});
+                const related = try std.fmt.allocPrint(allocator, "declared tuple element at index {} is here", .{i});
+                try appendDiagnostic(allocator, out, .type_mismatch, msg, "element type mismatch", tree.node(initializer_id).span, expected_span, related);
+                emitted = true;
+            }
+            return emitted;
+        },
+        .object => |expected_props| {
+            if (actual_ty.kind != .object) return false;
+            const actual_props = actual_ty.kind.object;
+            var emitted: bool = false;
+            for (expected_props) |exp_prop| {
+                // Find matching key in the actual side.
+                var found: ?usize = null;
+                for (actual_props, 0..) |act_prop, index| {
+                    if (std.mem.eql(u8, act_prop.name, exp_prop.name)) {
+                        found = index;
+                        break;
+                    }
+                }
+                const actual_index = found orelse continue;  // key missing in actual — keep generic diagnostic for now
+                const act_prop = actual_props[actual_index];
+                if (act_prop.type_id == exp_prop.type_id) continue;
+                try appendDiagnostic(allocator, out, .type_mismatch, "object property is not assignable to the declared type", "property type mismatch", tree.node(initializer_id).span, expected_span, "declared property is here");
+                emitted = true;
+            }
+            return emitted;
+        },
+        else => return false,
     }
 }
 
