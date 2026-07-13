@@ -60,26 +60,31 @@ fn checkFixture(source: []const u8, valid: bool) !void {
     const expected = try expectedCodes(allocator, source);
     try std.testing.expect(expected.len > 0);
     try std.testing.expectEqual(expected.len, parsed.diagnostics.len);
-    for (expected, parsed.diagnostics) |code, diagnostic| {
+    for (expected, parsed.diagnostics, 0..) |code, diagnostic, diagnostic_index| {
         try std.testing.expectEqual(code, diagnostic.code);
         try std.testing.expectEqual(diagnostics.DiagnosticPhase.parser, diagnostic.phase);
         if (code == .unsupported_syntax or code == .unsupported_ts_syntax or code == .unsupported_jsx) {
             try std.testing.expect(diagnostic.span.end > diagnostic.span.start);
             try std.testing.expect(diagnostic.span.end <= source.len);
-            const expected_span = expectedSpan(source) orelse return error.MissingExpectedSpan;
+            const expected_span = expectedSpan(source, diagnostic_index) orelse return error.MissingExpectedSpan;
             try std.testing.expectEqualStrings(expected_span, source[diagnostic.span.start..diagnostic.span.end]);
         }
     }
 }
 
-fn expectedSpan(source: []const u8) ?[]const u8 {
+fn expectedSpan(source: []const u8, requested_index: usize) ?[]const u8 {
     const prefix = "// span:";
     const first_end = std.mem.indexOfScalar(u8, source, '\n') orelse return null;
     const second_start = first_end + 1;
     const second_end = std.mem.indexOfScalarPos(u8, source, second_start, '\n') orelse source.len;
     const line = std.mem.trim(u8, source[second_start..second_end], " \t\r");
     if (!std.mem.startsWith(u8, line, prefix)) return null;
-    return std.mem.trim(u8, line[prefix.len..], " \t");
+    var spans = std.mem.splitScalar(u8, line[prefix.len..], ',');
+    var index: usize = 0;
+    while (spans.next()) |span| : (index += 1) {
+        if (index == requested_index) return std.mem.trim(u8, span, " \t");
+    }
+    return null;
 }
 
 fn expectedCodes(allocator: std.mem.Allocator, source: []const u8) ![]const diagnostics.DiagnosticCode {

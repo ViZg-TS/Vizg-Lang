@@ -13,6 +13,6 @@ Runner also requires EOF emission and full non-EOF token consumption. Fixtures
 assert syntax behavior and diagnostic codes; they intentionally avoid AST node
 IDs. `mixed/` holds representative real-world combinations.
 
-`unsupported/` covers intentionally deferred syntax. Each fixture must emit one
-targeted parser diagnostic (`VZG2004`-`VZG2006`) with a non-empty in-bounds span,
-then consume the remaining token stream without scanner errors.
+`unsupported/` covers intentionally deferred syntax. Fixtures declare ordered
+diagnostic codes with `// expect:` and matching comma-separated token spans with
+`// span:`. Reserved pipeline syntax (`|>`) is intentionally unsupported.

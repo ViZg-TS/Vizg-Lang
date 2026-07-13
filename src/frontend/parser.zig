@@ -1306,7 +1306,10 @@ const Parser = struct {
         while (!self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) {
             const name = self.expectIdentifierLike("expected variable name");
             const type_annotation: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
-            while (!self.at(.Equal) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) _ = self.advance();
+            if (!self.at(.Equal) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) {
+                self.report("unexpected token in variable declaration", .unexpected_token);
+                while (!self.at(.Equal) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) _ = self.advance();
+            }
             const init = if (self.eat(.Equal)) try self.parseAssignmentExpression() else null;
             try declarations.append(self.allocator, try self.addNode(.{
                 .span = joinSpans(name.span, self.previousOrCurrent().span),
@@ -1684,6 +1687,13 @@ const Parser = struct {
         if (self.isArrowFunctionStart()) return self.parseArrowFunctionExpression();
 
         const left = try self.parseConditionalExpression();
+
+        if (self.at(.BarGreaterThan)) {
+            const pipeline = self.advance();
+            self.reportAt(pipeline, "pipeline operator syntax is reserved and not supported", .unsupported_syntax);
+            _ = try self.parseAssignmentExpression();
+            return left;
+        }
 
         // Assignment (=, +=, -=, *=, /= %=). Right-associative.
         if (self.current().kind == .Equal or
@@ -3622,6 +3632,20 @@ test "parser builds debugger statements and rejects with precisely" {
     try std.testing.expectEqual(@as(usize, 2), statements.len);
     _ = parsed.ast.node(statements[0]).data.DebuggerStatement;
     _ = parsed.ast.node(statements[1]).data.ExpressionStatement;
+}
+
+test "parser rejects reserved pipeline syntax and recovers" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, "value |> transform; after();", true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 1), parsed.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.unsupported_syntax, parsed.diagnostics[0].code);
+    try std.testing.expectEqualStrings("pipeline operator syntax is reserved and not supported", parsed.diagnostics[0].message);
+    try std.testing.expectEqual(@as(usize, 2), parsed.ast.node(parsed.ast.root).data.Program.statements.len);
 }
 
 test "parser builds TypeScript enum members and recovers invalid members" {

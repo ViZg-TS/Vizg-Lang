@@ -79,7 +79,7 @@ The parser consumes scanner tokens and builds `ast.Ast`. The AST supports the cu
 - import declarations
 - declaration, default-expression, local, star, named re-export, and type-only export forms
 - variable declarations and declarators
-- function declarations, ordinary parameters, and final rest parameters
+- function declarations, generic/optional/default/rest parameters, async functions, and generators
 - structured type annotations with generic, array, readonly, union, intersection, object, function, tuple, and parenthesized nodes
 - type alias declarations and interfaces whose members reuse the structured type AST; interface `extends` lists are preserved
 - class declarations and expressions with optional `extends`, typed fields, constructors, methods, `static`, and `public`/`private`/`protected` syntax
@@ -91,7 +91,7 @@ The parser consumes scanner tokens and builds `ast.Ast`. The AST supports the cu
 - right-associative exponentiation plus multiplicative, additive, shift, relational, equality, bitwise, logical, nullish-coalescing, conditional, and assignment precedence levels
 
 Recognized but intentionally deferred syntax uses targeted parser diagnostics:
-`VZG2004 unsupported_syntax` for decorators and private class members,
+`VZG2004 unsupported_syntax` for decorators, private class members, `with`, and reserved pipeline syntax,
 `VZG2005 unsupported_ts_syntax` for namespaces and advanced, mapped, or
 conditional types, and `VZG2006 unsupported_jsx` for JSX/TSX. Recovery consumes
 the unsupported construct and resumes at its enclosing boundary.
@@ -99,7 +99,7 @@ the unsupported construct and resumes at its enclosing boundary.
 - tagged and untagged template expressions with traversable interpolation expressions
 - `if`, `switch`/`case`/`default`, `while`, `do`/`while`, classic `for`, `for-in`, `for-of`, and syntax-only `for await...of` statements
 
-`break` and `continue` are currently unlabeled. A following label produces a stable parser diagnostic and parsing resumes after the statement.
+Labeled statements and labeled `break`/`continue` are represented directly and validated by CFG construction.
 `throw` requires an expression on the same source line. Its expression is traversed normally, and its CFG block terminates the current path; exception typing remains out of scope.
 `try` requires at least one `catch` or `finally` clause. A catch binding lives in a dedicated block scope and does not leak outside its clause. The CFG preserves try, catch, and finally branches without exception-flow type analysis.
 Iteration declarations accept exactly one variable without an initializer. Their binding lives in a loop-header scope shared with the iteration RHS and body.

@@ -13,6 +13,9 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 ### Added
 
 - `debugger;` now has a dedicated AST statement, while `with` statements receive targeted unsupported-syntax recovery.
+- TypeScript enums, generic declarations, rich parameters, constructor parameter properties, and literal/indexed/query type nodes now preserve source structure.
+- Static import attributes and dynamic-import options are preserved for module analysis.
+- Reserved pipeline syntax now emits targeted `VZG2004` recovery; fixtures support ordered multi-diagnostic span contracts.
 - Labeled statements now preserve label metadata, validate `break` and `continue` targets, and build label-aware CFG edges.
 - Generator declarations, expressions, object methods, and class methods now preserve generator flags; `yield`, `yield value`, and delegated `yield*` use a contextual, traversable AST representation.
 - Function declarations, expressions, arrows, object methods, and class methods now share coherent async/generator flags; async declaration/default-export forms parse directly.

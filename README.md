@@ -19,7 +19,7 @@ Implemented today:
 - CLI inspection commands for checks, tokens, AST, symbols, references, CFGs, and modules.
 - Static library `libvizg.a` with a public C header and file/in-memory analysis entry points.
 
-Supported syntax is described by `test/frontend/vizg_capabilities_test.ts` and enforced by the organized `test/syntax/` regression corpus: comments, named/default/namespace/side-effect imports, declaration-level `import type`, mixed default-plus-named imports, `let`/`const`/`var`, type aliases, interfaces with optional members and `extends` lists, classes and class expressions with `extends`, typed fields, constructors, methods, `static`, and basic access modifiers, exported variables/functions/classes, default-expression exports, local and aliased exports, star and named re-exports, type-only exports, typed and rest parameters, structured type annotations (generic, array, readonly, union, intersection, object, function, tuple, and parenthesized forms), function expressions, arrow functions, `this`, `super`, constructor-style `new` expressions, primitive literals, unary and precedence-aware binary expressions, assignments, calls, call/array/object spread, member expressions, optional member/call/computed chains, `if`/`else`, `switch`/`case`/`default`, `try`/`catch`/`finally`, `while`, `do`/`while`, classic `for`, `for-in`, `for-of`, syntax-only `for await...of`, `break`, `continue`, `return`, and `throw`. Decorators, private fields, namespaces, JSX/TSX, advanced TypeScript types, mapped types, conditional types, abstract-class semantics, interface merging, and structural type checking are not implemented; recognized forms receive targeted `VZG2004`-`VZG2006` diagnostics with recovery. Labeled `break` and `continue` remain deferred until labeled statements are supported.
+Supported syntax is enforced by `test/frontend/vizg_capabilities_test.ts` and `test/syntax/`. Current AST coverage includes modules (static attributes and dynamic imports), classes, enums, generic declarations, async/generator functions, rich parameters, labeled control flow, modern expressions, and structured TypeScript types including literal, indexed-access, `keyof`, and type-query nodes. Decorators, private fields, namespaces, JSX/TSX, mapped and conditional types, `with`, and reserved pipeline syntax are intentionally unsupported and receive targeted `VZG2004`-`VZG2006` recovery. This is a stable syntax/frontend contract, not HIR, runtime, bundler, or complete structural type checking.
 
 ## Build
 
@@ -184,7 +184,7 @@ docs/                     Contributor and architecture documentation
 ## Non-Goals For Current Milestone
 
 - No package, `node_modules`, `package.json`, or `tsconfig` resolution.
-- No dynamic imports or CommonJS.
+- No runtime module loading, CommonJS, or bundling. Dynamic imports are represented syntactically.
 - No semantic type checker.
 - No HIR/lowering layer.
 - No code generation or native compilation.
