@@ -188,13 +188,8 @@ const Resolver = struct {
                 try self.resolveNode(conditional.alternate, scope);
             },
             .UpdateExpression => |update_expr| {
-                // Postfix/PREFIX update is a read-modify-write; emit write ref on argument.
-                if (node_id == ast_mod.invalid_node) {} else switch (self.ast.node(update_expr.argument).data) {
-                    .Identifier => |id| try self.addReference(update_expr.argument, id.name, scope, .write),
-                    .ElementAccessExpression => |elem_access| try self.resolveNode(elem_access.object, scope),
-                    .MemberExpression => |member| try self.resolveNode(member.object, scope),
-                    else => {},
-                }
+                _ = update_expr.prefix;
+                try self.resolveUpdateTarget(update_expr.argument, scope);
             },
             .AssignmentExpression => |assignment| {
                 try self.resolveAssignmentTarget(assignment.left, scope);
@@ -259,6 +254,22 @@ const Resolver = struct {
         switch (node.data) {
             .Identifier => |identifier| try self.addReference(node_id, identifier.name, scope, .write),
             .ElementAccessExpression => |elem_access| try self.resolveNode(elem_access.object, scope),
+            .MemberExpression => |member| try self.resolveNode(member.object, scope),
+            else => try self.resolveNode(node_id, scope),
+        }
+    }
+
+    fn resolveUpdateTarget(self: *Resolver, node_id: NodeId, scope: binder.ScopeId) !void {
+        if (node_id == ast_mod.invalid_node) return;
+        switch (self.ast.node(node_id).data) {
+            .Identifier => |identifier| {
+                try self.addReference(node_id, identifier.name, scope, .read);
+                try self.addReference(node_id, identifier.name, scope, .write);
+            },
+            .ElementAccessExpression => |element| {
+                try self.resolveNode(element.object, scope);
+                try self.resolveNode(element.index, scope);
+            },
             .MemberExpression => |member| try self.resolveNode(member.object, scope),
             else => try self.resolveNode(node_id, scope),
         }
@@ -356,6 +367,51 @@ test "resolver visits prefix unary operands" {
     try std.testing.expect(saw_value);
     try std.testing.expect(saw_object);
     try std.testing.expect(saw_fn_call);
+}
+
+test "resolver treats update targets as read-modify-write" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\let i = 0;
+        \\let object = { value: i };
+        \\let items = [i];
+        \\let index = 0;
+        \\++i;
+        \\i--;
+        \\++object.value;
+        \\--items[index];
+    ;
+    const scanned = try scanner.scanAll(allocator, source, true);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+
+    var i_reads: usize = 0;
+    var i_writes: usize = 0;
+    var object_reads: usize = 0;
+    var items_reads: usize = 0;
+    var index_reads: usize = 0;
+    for (resolved.references) |reference| {
+        if (std.mem.eql(u8, reference.name, "i")) switch (reference.kind) {
+            .read => i_reads += 1,
+            .write => i_writes += 1,
+            else => {},
+        };
+        if (std.mem.eql(u8, reference.name, "object") and reference.kind == .read) object_reads += 1;
+        if (std.mem.eql(u8, reference.name, "items") and reference.kind == .read) items_reads += 1;
+        if (std.mem.eql(u8, reference.name, "index") and reference.kind == .read) index_reads += 1;
+    }
+    try std.testing.expect(i_reads >= 4);
+    try std.testing.expectEqual(@as(usize, 2), i_writes);
+    try std.testing.expectEqual(@as(usize, 1), object_reads);
+    try std.testing.expectEqual(@as(usize, 1), items_reads);
+    try std.testing.expectEqual(@as(usize, 1), index_reads);
 }
 
 test "resolver visits every conditional expression branch" {

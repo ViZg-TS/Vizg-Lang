@@ -1629,6 +1629,14 @@ const Parser = struct {
 
     fn parseUnaryExpression(self: *Parser) anyerror!NodeId {
         return switch (self.current().kind) {
+            .PlusPlus, .MinusMinus => blk: {
+                const operator = self.advance();
+                const argument = try self.parseUnaryExpression();
+                break :blk try self.addNode(.{
+                    .span = joinSpans(operator.span, self.nodes.items[@intCast(argument)].span),
+                    .data = .{ .UpdateExpression = .{ .operator = operator.kind, .argument = argument, .prefix = true } },
+                });
+            },
             .Exclamation,
             .Tilde,
             .Minus,
@@ -2308,6 +2316,53 @@ test "parser builds prefix unary expressions with correct precedence" {
     const postfix_decl = parsed.ast.node(statements[10]).data.VariableDeclaration;
     const postfix_init = parsed.ast.node(postfix_decl.declarations[0]).data.VariableDeclarator.init.?;
     try std.testing.expectEqual(.NonNullExpression, std.meta.activeTag(parsed.ast.node(postfix_init).data));
+}
+
+test "parser preserves prefix and postfix update expressions" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\++i;
+        \\--i;
+        \\++object.value;
+        \\--items[index];
+        \\++i * 2;
+        \\i++;
+        \\i--;
+    ;
+    const scan = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    try std.testing.expectEqual(scan.tokens.len - 1, parsed.consumed_tokens);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const expected_prefix_operators = [_]TokenType{ .PlusPlus, .MinusMinus, .PlusPlus, .MinusMinus };
+    for (expected_prefix_operators, 0..) |operator, index| {
+        const expression = parsed.ast.node(statements[index]).data.ExpressionStatement.expression;
+        const update = parsed.ast.node(expression).data.UpdateExpression;
+        try std.testing.expect(update.prefix);
+        try std.testing.expectEqual(operator, update.operator);
+        try std.testing.expect(parsed.ast.node(expression).span.start < parsed.ast.node(update.argument).span.start);
+        try std.testing.expectEqual(parsed.ast.node(expression).span.end, parsed.ast.node(update.argument).span.end);
+    }
+
+    const member_update_id = parsed.ast.node(statements[2]).data.ExpressionStatement.expression;
+    try std.testing.expectEqual(.MemberExpression, std.meta.activeTag(parsed.ast.node(parsed.ast.node(member_update_id).data.UpdateExpression.argument).data));
+    const element_update_id = parsed.ast.node(statements[3]).data.ExpressionStatement.expression;
+    try std.testing.expectEqual(.ElementAccessExpression, std.meta.activeTag(parsed.ast.node(parsed.ast.node(element_update_id).data.UpdateExpression.argument).data));
+
+    const product_id = parsed.ast.node(statements[4]).data.ExpressionStatement.expression;
+    const product = parsed.ast.node(product_id).data.BinaryExpression;
+    try std.testing.expectEqual(TokenType.Asterisk, product.operator);
+    try std.testing.expect(parsed.ast.node(product.left).data.UpdateExpression.prefix);
+
+    for (statements[5..7]) |statement| {
+        const expression = parsed.ast.node(statement).data.ExpressionStatement.expression;
+        try std.testing.expect(!parsed.ast.node(expression).data.UpdateExpression.prefix);
+    }
 }
 
 test "parser preserves sequence expressions and structural commas" {

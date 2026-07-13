@@ -84,7 +84,7 @@ The parser consumes scanner tokens and builds `ast.Ast`. The AST supports the cu
 - type alias declarations and interfaces whose members reuse the structured type AST; interface `extends` lists are preserved
 - class declarations and expressions with optional `extends`, typed fields, constructors, methods, `static`, and `public`/`private`/`protected` syntax
 - return, throw, try/catch/finally, break, continue, and expression statements
-- call, member, binary, conditional, assignment, and prefix unary expressions
+- call, member, binary, conditional, assignment, prefix unary, and prefix/postfix update expressions
 - spread elements in calls, arrays, and object literals
 - postfix non-null assertions, distinct from prefix `!`
 - right-associative exponentiation plus multiplicative, additive, shift, relational, equality, bitwise, logical, nullish-coalescing, conditional, and assignment precedence levels
@@ -153,6 +153,11 @@ Reference kinds:
 - `export_ref`
 
 Missing names produce `VZG4001 cannot_find_name`.
+
+Update expressions resolve identifier targets as both `read` and `write`; member
+receivers and computed indices remain reads. Parsing currently preserves any
+syntactic update target. Full assignable-target validation is deferred to the
+type checker.
 
 Example CLI shape:
 
