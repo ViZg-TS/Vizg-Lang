@@ -838,16 +838,15 @@ fn refreshFunctionReturns(
         // addFunctionDetailed clones parameters via cloneParameters; free our copy.
         allocator.free(new_sig_params);
 
-        // Always install the inferred signature — the symbol's declared_type is
-        // a placeholder set during collectDeclaredTypes for functions without an
-        // explicit annotation; we cannot rely on it being null after that step.
+        // Write inferred signature to inferred_type for unannotated functions.
+        // Per Goal 134, declared_type stays null when no explicit annotation is present.
         const sym_info_ptr = symbolTypePtr(symbol_types, symbol.id) orelse continue;
-        if (sym_info_ptr.declared_type != null and
-            sym_info_ptr.declared_type.? == new_signature_id)
+        if (sym_info_ptr.inferred_type != null and
+            sym_info_ptr.inferred_type.? == new_signature_id)
         {
             continue;
         }
-        sym_info_ptr.declared_type = new_signature_id;
+        sym_info_ptr.inferred_type = new_signature_id;
         changed = true;
     }
     return changed;
