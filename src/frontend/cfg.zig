@@ -59,7 +59,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
             try functions.append(allocator, .{
                 .function = node_id,
                 .name = function_decl.name,
-                .graph = try buildFunctionGraph(allocator, tree, function_decl.body),
+                .graph = try buildFunctionGraph(allocator, tree, function_decl.body, false),
             });
             try collectFunctions(allocator, tree, function_decl.body, functions);
         },
@@ -67,7 +67,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
             try functions.append(allocator, .{
                 .function = node_id,
                 .name = function_expr.name orelse "<anonymous>",
-                .graph = try buildFunctionGraph(allocator, tree, function_expr.body),
+                .graph = try buildFunctionGraph(allocator, tree, function_expr.body, false),
             });
             try collectFunctions(allocator, tree, function_expr.body, functions);
         },
@@ -75,7 +75,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
             try functions.append(allocator, .{
                 .function = node_id,
                 .name = "<arrow>",
-                .graph = try buildFunctionGraph(allocator, tree, arrow.body),
+                .graph = try buildFunctionGraph(allocator, tree, arrow.body, arrow.expression_body),
             });
             try collectFunctions(allocator, tree, arrow.body, functions);
         },
@@ -90,7 +90,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
             try functions.append(allocator, .{
                 .function = node_id,
                 .name = method.name,
-                .graph = try buildFunctionGraph(allocator, tree, method.body),
+                .graph = try buildFunctionGraph(allocator, tree, method.body, false),
             });
             try collectFunctions(allocator, tree, method.body, functions);
         },
@@ -192,7 +192,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
     }
 }
 
-fn buildFunctionGraph(allocator: std.mem.Allocator, tree: ast_mod.Ast, body_id: NodeId) !ControlFlowGraph {
+fn buildFunctionGraph(allocator: std.mem.Allocator, tree: ast_mod.Ast, body_id: NodeId, expression_body: bool) !ControlFlowGraph {
     var builder = GraphBuilder.init(allocator, tree);
     const entry = try builder.createBlock(.entry);
     builder.exit = try builder.createBlock(.exit);
@@ -200,7 +200,8 @@ fn buildFunctionGraph(allocator: std.mem.Allocator, tree: ast_mod.Ast, body_id: 
     const first = try builder.createBlock(.normal);
     try builder.addEdge(entry, first);
 
-    const fallthrough = try builder.buildStatementList(first, blockStatements(tree, body_id));
+    const statements: []const NodeId = if (expression_body) &.{body_id} else blockStatements(tree, body_id);
+    const fallthrough = try builder.buildStatementList(first, statements);
     if (fallthrough) |block| try builder.addEdge(block, builder.exit);
 
     return .{
