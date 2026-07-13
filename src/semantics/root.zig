@@ -1344,6 +1344,110 @@ test "Goal 118 arrays infer homogeneous unions and contextual tuples" {
     // the declared annotation shape without source-side hole fill.
 }
 
+test "Goal 137 annotated array mismatch reports per-element diagnostic" {
+    var result = try analyze(std.testing.allocator,
+        \\const values: number[] = ["wrong"];
+    );
+    defer result.deinit();
+
+    const initializer_id = testVariableInitializer(&result, "values").?;
+    try std.testing.expect(initializer_id != 0);
+
+    var found_element_mismatch = false;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .type_mismatch and
+            std.mem.endsWith(u8, diagnostic.message, "is not assignable to the declared array element type"))
+        {
+            found_element_mismatch = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_element_mismatch);
+
+    // The declared type must still be an array of number — contextual typing
+    // does not destroy the initializer's inferred shape.
+    const symbol_id = goal137ValueSymbol(&result, "values").?;
+    const sym_info = result.lookupSymbolType(symbol_id).?;
+    const dt = sym_info.declared_type orelse return error.TestFailed;
+    try std.testing.expect(dt != 0);
+
+}
+
+test "Goal 137 annotated object mismatch reports property diagnostic" {
+    var result = try analyze(std.testing.allocator,
+        \\const object: { value: number } = { value: "wrong" };
+    );
+    defer result.deinit();
+
+    const initializer_id = testVariableInitializer(&result, "object").?;
+    try std.testing.expect(initializer_id != 0);
+
+    var found_property_mismatch = false;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .type_mismatch and diagnostic.label != null) {
+            // The checker now emits a per-property label distinguishing the mismatch.
+            found_property_mismatch = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_property_mismatch);
+
+    const symbol_id = goal137ValueSymbol(&result, "object").?;
+    const sym_info = result.lookupSymbolType(symbol_id).?;
+    // Declared object shape survives — contextual typing does not overwrite.
+    try std.testing.expect(sym_info.declared_type != 0);
+}
+
+test "Goal 137 annotated tuple mismatch reports both element diagnostics" {
+    var result = try analyze(std.testing.allocator,
+        \\const tuple: [number, string] = ["wrong", 1];
+    );
+    defer result.deinit();
+
+    const initializer_id = testVariableInitializer(&result, "tuple").?;
+    try std.testing.expect(initializer_id != 0);
+
+    // Both tuple positions disagree — expect at least two element-level mismatches.
+    var mismatch_count: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .type_mismatch and diagnostic.label != null) {
+            mismatch_count += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), mismatch_count);
+
+    const symbol_id = goal137ValueSymbol(&result, "tuple").?;
+    const sym_info = result.lookupSymbolType(symbol_id).?;
+    // Declared tuple shape survives.
+    try std.testing.expect(sym_info.declared_type != 0);
+}
+
+test "Goal 137 stable annotated aggregate converges without round exhaustion" {
+    var result = try analyze(std.testing.allocator,
+        \\const shaped: [number, string] = [1, "ok"];
+    );
+    defer result.deinit();
+
+    // The declared annotation and the inferred initializer type should agree for
+    // a stable aggregate — no round-limit error means convergence succeeded.
+    const symbol_id = goal137ValueSymbol(&result, "shaped").?;
+    const sym_info = result.lookupSymbolType(symbol_id).?;
+    try std.testing.expect(sym_info.declared_type != 0);
+
+    // The initializer node should be resolved (not stuck in unresolved state).
+    const init_node = testVariableInitializer(&result, "shaped");
+    try std.testing.expect(init_node != null);
+    const node_id = init_node.?;
+    const info = result.lookupNodeTypeInfo(node_id).?;
+    try std.testing.expectEqual(@as(u8, @intFromEnum(type_info.TypeResolutionState.resolved)), @as(u8, @intFromEnum(info.state)));
+
+
+    // Inferred type should match declared shape — stable convergence.
+    const inferred_id = info.type_id;
+    const declared_id = sym_info.declared_type;
+    try std.testing.expectEqual(inferred_id, declared_id);
+}
+
 test "Goal 118 object forms spreads and duplicates are deterministic" {
     var result = try analyze(std.testing.allocator,
         \\const shorthand = 1;
@@ -1740,6 +1844,14 @@ test "Goal 124 repeated project rebuilds do not retain stale semantic storage" {
 fn goal134FunctionSymbol(result: *const SemanticResult, name: []const u8) ?binder.SymbolId {
     for (result.frontend.bind.symbols) |symbol| {
         if (symbol.kind != .function or !std.mem.eql(u8, symbol.name, name)) continue;
+        return symbol.id;
+    }
+    return null;
+}
+
+fn goal137ValueSymbol(result: *const SemanticResult, name: []const u8) ?binder.SymbolId {
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind != .variable or !std.mem.eql(u8, symbol.name, name)) continue;
         return symbol.id;
     }
     return null;
