@@ -17,6 +17,7 @@ const Parser = struct {
     tokens: []const Token,
     index: usize = 0,
     nodes: std.ArrayList(ast_mod.Node) = .empty,
+    type_nodes: std.ArrayList(ast_mod.TypeNode) = .empty,
     diagnostics: std.ArrayList(diagnostics.Diagnostic) = .empty,
     parenthesized_nodes: std.ArrayList(NodeId) = .empty,
     recover_errors: bool = true,
@@ -35,6 +36,7 @@ const Parser = struct {
         return .{
             .ast = .{
                 .nodes = try self.nodes.toOwnedSlice(self.allocator),
+                .type_nodes = try self.type_nodes.toOwnedSlice(self.allocator),
                 .root = root,
             },
             .diagnostics = try self.diagnostics.toOwnedSlice(self.allocator),
@@ -63,6 +65,9 @@ const Parser = struct {
     fn parseStatement(self: *Parser) anyerror!?NodeId {
         if (self.at(.Keyword_import)) return try self.parseImportDeclaration();
         if (self.at(.Keyword_export)) return try self.parseExportDeclaration();
+        if (self.atTypeAliasDeclaration()) return try self.parseTypeAliasDeclaration();
+        if (self.atInterfaceDeclaration()) return try self.parseInterfaceDeclaration();
+        if (self.at(.Keyword_class)) return try self.parseClassDeclaration();
         if (self.at(.Keyword_function)) return try self.parseFunctionDeclaration(false);
         if (self.at(.LBrace)) return try self.parseBlockStatement();
         if (self.at(.Keyword_return)) return try self.parseReturnStatement();
@@ -83,6 +88,55 @@ const Parser = struct {
         return try self.parseExpressionStatement();
     }
 
+    fn atTypeAliasDeclaration(self: *const Parser) bool {
+        return self.atIdentifierText("type") and
+            self.peek(1).kind == .Identifier and
+            self.peek(2).kind == .Equal;
+    }
+
+    fn atInterfaceDeclaration(self: *const Parser) bool {
+        return self.atIdentifierText("interface") and self.peek(1).kind == .Identifier;
+    }
+
+    fn parseTypeAliasDeclaration(self: *Parser) anyerror!NodeId {
+        const start = self.advance();
+        const name = self.expect(.Identifier, "expected type alias name");
+        _ = self.expect(.Equal, "expected '=' after type alias name");
+        const type_node = try self.parseType();
+        _ = self.eat(.Semicolon);
+        return self.addNode(.{
+            .span = joinSpans(start.span, self.previousOrCurrent().span),
+            .data = .{ .TypeAliasDeclaration = .{
+                .name = name.lexeme,
+                .type_annotation = .{ .root = type_node, .span = self.typeSpan(type_node) },
+            } },
+        });
+    }
+
+    fn parseInterfaceDeclaration(self: *Parser) anyerror!NodeId {
+        const start = self.advance();
+        const name = self.expect(.Identifier, "expected interface name");
+        var heritage: std.ArrayList(ast_mod.TypeNodeId) = .empty;
+        errdefer heritage.deinit(self.allocator);
+        if (self.eat(.Keyword_extends)) {
+            while (!self.at(.LBrace) and !self.at(.EOF)) {
+                const before = self.index;
+                try heritage.append(self.allocator, try self.parsePostfixType());
+                if (!self.eat(.Comma)) break;
+                if (self.index == before) _ = self.advance();
+            }
+        }
+        const body = try self.parsePrimaryType();
+        return self.addNode(.{
+            .span = joinSpans(start.span, self.typeSpan(body)),
+            .data = .{ .InterfaceDeclaration = .{
+                .name = name.lexeme,
+                .extends = try heritage.toOwnedSlice(self.allocator),
+                .body = body,
+            } },
+        });
+    }
+
     fn parseImportDeclaration(self: *Parser) anyerror!NodeId {
         const start = self.expect(.Keyword_import, "expected import").span;
         var names: std.ArrayList([]const u8) = .empty;
@@ -90,10 +144,18 @@ const Parser = struct {
         var specifiers: std.ArrayList(ast_mod.ImportSpecifier) = .empty;
         errdefer specifiers.deinit(self.allocator);
 
+        const type_only = if (self.atIdentifierText("type")) type_only: {
+            _ = self.advance();
+            break :type_only true;
+        } else false;
         var needs_from = false;
+        var has_named = false;
+        var has_default = false;
+        var has_namespace = false;
 
         if (self.at(.LBrace)) {
             needs_from = true;
+            has_named = true;
             _ = self.advance();
             while (!self.at(.RBrace) and !self.at(.EOF)) {
                 if (self.at(.Identifier) and !self.atIdentifierText("as")) {
@@ -104,6 +166,7 @@ const Parser = struct {
                     } else imported;
                     try names.append(self.allocator, local.lexeme);
                     try specifiers.append(self.allocator, .{
+                        .kind = .named,
                         .imported_name = imported.lexeme,
                         .local_name = local.lexeme,
                         .imported_span = imported.span,
@@ -118,15 +181,75 @@ const Parser = struct {
             _ = self.expect(.RBrace, "expected }");
         } else if (self.at(.Identifier)) {
             needs_from = true;
-            try names.append(self.allocator, self.advance().lexeme);
+            has_default = true;
+            const default_local = self.advance();
+            try names.append(self.allocator, default_local.lexeme);
+            try specifiers.append(self.allocator, .{
+                .kind = .default,
+                .imported_name = "default",
+                .local_name = default_local.lexeme,
+                .imported_span = default_local.span,
+                .local_span = default_local.span,
+            });
+
+            if (self.at(.Comma)) {
+                _ = self.advance();
+                if (self.at(.LBrace)) {
+                    has_named = true;
+                    _ = self.advance();
+                    while (!self.at(.RBrace) and !self.at(.EOF)) {
+                        if (self.at(.Identifier) and !self.atIdentifierText("as")) {
+                            const imported = self.advance();
+                            const alias = if (self.atIdentifierText("as")) alias: {
+                                _ = self.advance();
+                                break :alias self.expectIdentifierLike("expected import alias");
+                            } else imported;
+                            try names.append(self.allocator, alias.lexeme);
+                            try specifiers.append(self.allocator, .{
+                                .kind = .named,
+                                .imported_name = imported.lexeme,
+                                .local_name = alias.lexeme,
+                                .imported_span = imported.span,
+                                .local_span = alias.span,
+                            });
+                            if (self.at(.Comma)) _ = self.advance();
+                            continue;
+                        }
+                        self.report("expected imported name", .expected_token);
+                        _ = self.advance();
+                    }
+                    _ = self.expect(.RBrace, "expected }");
+                } else if (self.at(.Asterisk)) {
+                    has_namespace = true;
+                    const imported = self.advance();
+                    _ = self.expectContextualIdentifier("as", "expected as");
+                    const local = self.expectIdentifierLike("expected namespace import");
+                    try names.append(self.allocator, local.lexeme);
+                    try specifiers.append(self.allocator, .{
+                        .kind = .namespace,
+                        .imported_name = "*",
+                        .local_name = local.lexeme,
+                        .imported_span = imported.span,
+                        .local_span = local.span,
+                    });
+                } else {
+                    self.report("expected named or namespace import", .expected_token);
+                }
+            }
         } else if (self.at(.Asterisk)) {
             needs_from = true;
-            _ = self.advance();
+            has_namespace = true;
+            const imported = self.advance();
             _ = self.expectContextualIdentifier("as", "expected as");
-            _ = self.expectIdentifierLike("expected namespace import");
-            if (self.previous()) |name_token| {
-                try names.append(self.allocator, name_token.lexeme);
-            }
+            const local = self.expectIdentifierLike("expected namespace import");
+            try names.append(self.allocator, local.lexeme);
+            try specifiers.append(self.allocator, .{
+                .kind = .namespace,
+                .imported_name = "*",
+                .local_name = local.lexeme,
+                .imported_span = imported.span,
+                .local_span = local.span,
+            });
         }
 
         if (needs_from) _ = self.expectContextualIdentifier("from", "expected from");
@@ -140,9 +263,22 @@ const Parser = struct {
 
         _ = self.eat(.Semicolon);
 
+        const kind: ast_mod.ImportKind = if (!needs_from)
+            .side_effect
+        else if (@as(u8, @intFromBool(has_named)) + @as(u8, @intFromBool(has_default)) + @as(u8, @intFromBool(has_namespace)) > 1)
+            .mixed
+        else if (has_named)
+            .named
+        else if (has_default)
+            .default
+        else
+            .namespace;
+
         return self.addNode(.{
             .span = joinSpans(start, self.previousOrCurrent().span),
             .data = .{ .ImportDeclaration = .{
+                .kind = kind,
+                .type_only = type_only,
                 .names = try names.toOwnedSlice(self.allocator),
                 .specifiers = try specifiers.toOwnedSlice(self.allocator),
                 .source = source_unquoted,
@@ -154,11 +290,30 @@ const Parser = struct {
     fn parseExportDeclaration(self: *Parser) anyerror!NodeId {
         const start = self.expect(.Keyword_export, "expected export").span;
 
+        if (self.atTypeAliasDeclaration() or self.atInterfaceDeclaration()) {
+            const declaration = if (self.atTypeAliasDeclaration())
+                try self.parseTypeAliasDeclaration()
+            else
+                try self.parseInterfaceDeclaration();
+            return self.addNode(.{
+                .span = joinSpans(start, self.nodes.items[@intCast(declaration)].span),
+                .data = .{ .ExportDeclaration = .{ .kind = .declaration, .type_only = true, .declaration = declaration } },
+            });
+        }
+
         if (self.at(.Keyword_function)) {
             const function = try self.parseFunctionDeclaration(true);
             return self.addNode(.{
                 .span = joinSpans(start, self.nodes.items[@intCast(function)].span),
-                .data = .{ .ExportDeclaration = .{ .declaration = function } },
+                .data = .{ .ExportDeclaration = .{ .kind = .declaration, .declaration = function } },
+            });
+        }
+
+        if (self.at(.Keyword_class)) {
+            const class = try self.parseClassDeclaration();
+            return self.addNode(.{
+                .span = joinSpans(start, self.nodes.items[@intCast(class)].span),
+                .data = .{ .ExportDeclaration = .{ .kind = .declaration, .declaration = class } },
             });
         }
 
@@ -166,7 +321,7 @@ const Parser = struct {
             const declaration = try self.parseVariableDeclarationStatement();
             return self.addNode(.{
                 .span = joinSpans(start, self.nodes.items[@intCast(declaration)].span),
-                .data = .{ .ExportDeclaration = .{ .declaration = declaration } },
+                .data = .{ .ExportDeclaration = .{ .kind = .declaration, .declaration = declaration } },
             });
         }
 
@@ -181,17 +336,45 @@ const Parser = struct {
                 return self.addNode(.{
                     .span = joinSpans(start, func_node.span),
                     .data = .{ .ExportDeclaration = .{
+                        .kind = .declaration,
                         .declaration = function_id,
                         .default_name = func_node.data.FunctionDeclaration.name,
                     } },
                 });
             }
 
-            const name = if (self.at(.Identifier)) self.advance().lexeme else "";
+            const expression = try self.parseExpression();
+            const expression_node = self.nodes.items[@intCast(expression)];
+            const name: ?[]const u8 = switch (expression_node.data) {
+                .Identifier => |identifier| identifier.name,
+                else => null,
+            };
             _ = self.eat(.Semicolon);
             return self.addNode(.{
                 .span = joinSpans(start, self.previousOrCurrent().span),
-                .data = .{ .ExportDeclaration = .{ .default_name = name } },
+                .data = .{ .ExportDeclaration = .{
+                    .kind = .default_expression,
+                    .expression = expression,
+                    .default_name = name,
+                } },
+            });
+        }
+
+        const type_only = self.atIdentifierText("type") and self.peek(1).kind == .LBrace;
+        if (type_only) _ = self.advance();
+
+        if (self.eat(.Asterisk)) {
+            _ = self.expectContextualIdentifier("from", "expected from");
+            const source_token = self.expect(.StringLiteral, "expected module specifier");
+            _ = self.eat(.Semicolon);
+            return self.addNode(.{
+                .span = joinSpans(start, self.previousOrCurrent().span),
+                .data = .{ .ExportDeclaration = .{
+                    .kind = .export_all,
+                    .type_only = type_only,
+                    .source = trimString(source_token.lexeme),
+                    .source_span = source_token.span,
+                } },
             });
         }
 
@@ -237,10 +420,24 @@ const Parser = struct {
             }
             _ = self.expect(.RBrace, "expected }");
         }
+        var source: []const u8 = "";
+        var source_span: ?tokens.Span = null;
+        if (self.atIdentifierText("from")) {
+            _ = self.advance();
+            const source_token = self.expect(.StringLiteral, "expected module specifier");
+            source = trimString(source_token.lexeme);
+            source_span = source_token.span;
+        }
         _ = self.eat(.Semicolon);
         return self.addNode(.{
             .span = joinSpans(start, self.previousOrCurrent().span),
-            .data = .{ .ExportDeclaration = .{ .specifiers = try specifiers.toOwnedSlice(self.allocator) } },
+            .data = .{ .ExportDeclaration = .{
+                .kind = if (source.len > 0) .re_export else .local,
+                .type_only = type_only,
+                .specifiers = try specifiers.toOwnedSlice(self.allocator),
+                .source = source,
+                .source_span = source_span,
+            } },
         });
     }
 
@@ -278,7 +475,7 @@ const Parser = struct {
         errdefer params.deinit(self.allocator);
         try self.parseParameterList(&params);
         _ = self.expect(.RParen, "expected )");
-        const return_type: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
+        const return_type: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
 
         const body = if (self.at(.LBrace)) try self.parseBlockStatement() else ast_mod.invalid_node;
         const end_span = if (body == ast_mod.invalid_node)
@@ -306,7 +503,7 @@ const Parser = struct {
         errdefer params.deinit(self.allocator);
         try self.parseParameterList(&params);
         _ = self.expect(.RParen, "expected )");
-        const return_type: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
+        const return_type: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
         const body = if (self.at(.LBrace)) try self.parseBlockStatement() else blk: {
             self.report("expected function body", .expected_token);
             break :blk ast_mod.invalid_node;
@@ -324,28 +521,280 @@ const Parser = struct {
         });
     }
 
-    fn parseOptionalTypeAnnotation(self: *Parser) ?ast_mod.TypeAnnotation {
+    fn parseClassDeclaration(self: *Parser) anyerror!NodeId {
+        const start = self.expect(.Keyword_class, "expected class").span;
+        const name = self.expectIdentifierLike("expected class name").lexeme;
+        const parts = try self.parseClassBody();
+        return self.addNode(.{
+            .span = joinSpans(start, self.previousOrCurrent().span),
+            .data = .{ .ClassDeclaration = .{ .name = name, .super_class = parts.super_class, .members = parts.members } },
+        });
+    }
+
+    const ParsedClassBody = struct { super_class: ?NodeId, members: []const NodeId };
+
+    fn parseClassExpression(self: *Parser, start: Token) anyerror!NodeId {
+        const name: ?[]const u8 = if (self.at(.Identifier) or self.at(.PrivateIdentifier)) self.advance().lexeme else null;
+        const parts = try self.parseClassBody();
+        return self.addNode(.{
+            .span = joinSpans(start.span, self.previousOrCurrent().span),
+            .data = .{ .ClassExpression = .{ .name = name, .super_class = parts.super_class, .members = parts.members } },
+        });
+    }
+
+    fn parseClassBody(self: *Parser) anyerror!ParsedClassBody {
+        const super_class: ?NodeId = if (self.eat(.Keyword_extends)) try self.parsePrimary() else null;
+        _ = self.expect(.LBrace, "expected {");
+        var members: std.ArrayList(NodeId) = .empty;
+        errdefer members.deinit(self.allocator);
+        while (!self.at(.RBrace) and !self.at(.EOF)) {
+            if (self.eat(.Semicolon)) continue;
+            try members.append(self.allocator, try self.parseClassMember());
+        }
+        _ = self.expect(.RBrace, "expected }");
+        return .{ .super_class = super_class, .members = try members.toOwnedSlice(self.allocator) };
+    }
+
+    fn parseClassMember(self: *Parser) anyerror!NodeId {
+        const start = self.current().span;
+        var access: ast_mod.AccessModifier = .none;
+        var is_static = false;
+        while (self.at(.Identifier)) {
+            if (self.atIdentifierText("static")) is_static = true else if (self.atIdentifierText("public")) access = .public else if (self.atIdentifierText("private")) access = .private else if (self.atIdentifierText("protected")) access = .protected else break;
+            _ = self.advance();
+        }
+        const name_token = self.expectIdentifierLike("expected class member name");
+        if (self.eat(.LParen)) {
+            var params: std.ArrayList(NodeId) = .empty;
+            errdefer params.deinit(self.allocator);
+            try self.parseParameterList(&params);
+            _ = self.expect(.RParen, "expected )");
+            const return_type = try self.parseOptionalTypeAnnotation();
+            const body = if (self.at(.LBrace)) try self.parseBlockStatement() else blk: {
+                self.report("expected method body", .expected_token);
+                break :blk ast_mod.invalid_node;
+            };
+            return self.addNode(.{
+                .span = joinSpans(start, self.previousOrCurrent().span),
+                .data = .{ .ClassMethod = .{
+                    .name = name_token.lexeme,
+                    .params = try params.toOwnedSlice(self.allocator),
+                    .body = body,
+                    .return_type = return_type,
+                    .is_static = is_static,
+                    .access = access,
+                    .kind = if (std.mem.eql(u8, name_token.lexeme, "constructor")) .constructor else .method,
+                } },
+            });
+        }
+        const type_annotation = try self.parseOptionalTypeAnnotation();
+        const initializer: ?NodeId = if (self.eat(.Equal)) try self.parseAssignmentExpression() else null;
+        _ = self.eat(.Semicolon);
+        return self.addNode(.{
+            .span = joinSpans(start, self.previousOrCurrent().span),
+            .data = .{ .ClassField = .{ .name = name_token.lexeme, .type_annotation = type_annotation, .initializer = initializer, .is_static = is_static, .access = access } },
+        });
+    }
+
+    fn parseOptionalTypeAnnotation(self: *Parser) !?ast_mod.TypeAnnotation {
         if (!self.at(.Colon)) return null;
         _ = self.advance(); // consume colon
-        if (self.at(.Identifier) or self.at(.PrivateIdentifier)) {
-            const type_token = self.advance();
-            const span: tokens.Span = .{
-                .start = type_token.span.start,
-                .end = type_token.span.end,
-                .line = type_token.span.line,
-                .column = type_token.span.column,
-            };
-            return .{ .name = type_token.lexeme, .span = span };
+        const root = try self.parseType();
+        if (root == ast_mod.invalid_type_node) return null;
+        return .{ .root = root, .span = self.type_nodes.items[@intCast(root)].span };
+    }
+
+    fn parseType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        if (self.looksLikeFunctionType()) return self.parseFunctionType();
+        return self.parseUnionType();
+    }
+
+    fn parseUnionType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        var members: std.ArrayList(ast_mod.TypeNodeId) = .empty;
+        errdefer members.deinit(self.allocator);
+        try members.append(self.allocator, try self.parseIntersectionType());
+        while (self.eat(.Bar)) try members.append(self.allocator, try self.parseIntersectionType());
+        if (members.items.len == 1) {
+            const only = members.items[0];
+            members.deinit(self.allocator);
+            return only;
         }
-        self.report("expected type name after ':'", .expected_token);
-        return null;
+        const span = joinSpans(self.typeSpan(members.items[0]), self.typeSpan(members.items[members.items.len - 1]));
+        return self.addTypeNode(.{ .span = span, .data = .{ .Union = try members.toOwnedSlice(self.allocator) } });
+    }
+
+    fn parseIntersectionType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        var members: std.ArrayList(ast_mod.TypeNodeId) = .empty;
+        errdefer members.deinit(self.allocator);
+        try members.append(self.allocator, try self.parsePostfixType());
+        while (self.eat(.Ampersand)) try members.append(self.allocator, try self.parsePostfixType());
+        if (members.items.len == 1) {
+            const only = members.items[0];
+            members.deinit(self.allocator);
+            return only;
+        }
+        const span = joinSpans(self.typeSpan(members.items[0]), self.typeSpan(members.items[members.items.len - 1]));
+        return self.addTypeNode(.{ .span = span, .data = .{ .Intersection = try members.toOwnedSlice(self.allocator) } });
+    }
+
+    fn parsePostfixType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        var node: ast_mod.TypeNodeId = if (self.atIdentifierText("readonly")) blk: {
+            const start = self.advance().span;
+            const inner = try self.parsePostfixType();
+            break :blk try self.addTypeNode(.{ .span = joinSpans(start, self.typeSpan(inner)), .data = .{ .Readonly = inner } });
+        } else try self.parsePrimaryType();
+
+        while (self.at(.LBracket) and self.peek(1).kind == .RBracket) {
+            _ = self.advance();
+            const close = self.advance();
+            node = try self.addTypeNode(.{ .span = joinSpans(self.typeSpan(node), close.span), .data = .{ .Array = node } });
+        }
+        return node;
+    }
+
+    fn parsePrimaryType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        if (self.at(.Identifier) or self.at(.PrivateIdentifier)) {
+            const name = self.advance();
+            var arguments: std.ArrayList(ast_mod.TypeNodeId) = .empty;
+            errdefer arguments.deinit(self.allocator);
+            var end = name.span;
+            if (self.eat(.LessThan)) {
+                while (!self.at(.GreaterThan) and !self.at(.EOF)) {
+                    const before = self.index;
+                    try arguments.append(self.allocator, try self.parseType());
+                    if (!self.eat(.Comma)) break;
+                    if (self.index == before) _ = self.advance();
+                }
+                end = self.expect(.GreaterThan, "expected '>' after type arguments").span;
+            }
+            return self.addTypeNode(.{
+                .span = joinSpans(name.span, end),
+                .data = .{ .Named = .{ .name = name.lexeme, .type_arguments = try arguments.toOwnedSlice(self.allocator) } },
+            });
+        }
+
+        if (self.eat(.LParen)) {
+            const open = self.previousOrCurrent();
+            const inner = try self.parseType();
+            const close = self.expect(.RParen, "expected ')' after type");
+            return self.addTypeNode(.{ .span = joinSpans(open.span, close.span), .data = .{ .Parenthesized = inner } });
+        }
+
+        if (self.eat(.LBracket)) {
+            const open = self.previousOrCurrent();
+            var elements: std.ArrayList(ast_mod.TypeNodeId) = .empty;
+            errdefer elements.deinit(self.allocator);
+            while (!self.at(.RBracket) and !self.at(.EOF)) {
+                const before = self.index;
+                try elements.append(self.allocator, try self.parseType());
+                if (!self.eat(.Comma)) break;
+                if (self.index == before) _ = self.advance();
+            }
+            const close = self.expect(.RBracket, "expected ']' after tuple type");
+            return self.addTypeNode(.{ .span = joinSpans(open.span, close.span), .data = .{ .Tuple = try elements.toOwnedSlice(self.allocator) } });
+        }
+
+        if (self.eat(.LBrace)) {
+            const open = self.previousOrCurrent();
+            var members: std.ArrayList(ast_mod.TypeMember) = .empty;
+            errdefer members.deinit(self.allocator);
+            while (!self.at(.RBrace) and !self.at(.EOF)) {
+                const before = self.index;
+                const name = self.expectIdentifierLike("expected property name in object type");
+                const optional = self.eat(.Question);
+                _ = self.expect(.Colon, "expected ':' after property name");
+                const member_type = try self.parseType();
+                try members.append(self.allocator, .{
+                    .name = name.lexeme,
+                    .optional = optional,
+                    .type_node = member_type,
+                    .span = joinSpans(name.span, self.typeSpan(member_type)),
+                });
+                if (!self.eat(.Semicolon) and !self.eat(.Comma) and !self.at(.RBrace)) {
+                    self.report("expected ';' or '}' after object type member", .expected_token);
+                    self.recoverTypeMember();
+                }
+                if (self.index == before) _ = self.advance();
+            }
+            const close = self.expect(.RBrace, "expected '}' after object type");
+            return self.addTypeNode(.{ .span = joinSpans(open.span, close.span), .data = .{ .Object = try members.toOwnedSlice(self.allocator) } });
+        }
+
+        const bad = self.current();
+        self.report("expected type", .expected_token);
+        if (!self.isTypeBoundary(bad.kind)) _ = self.advance();
+        return self.addTypeNode(.{ .span = bad.span, .data = .{ .Named = .{ .name = "<error>" } } });
+    }
+
+    fn looksLikeFunctionType(self: *const Parser) bool {
+        if (!self.at(.LParen)) return false;
+        var depth: usize = 0;
+        var i = self.index;
+        while (i < self.tokens.len) : (i += 1) {
+            switch (self.tokens[i].kind) {
+                .LParen => depth += 1,
+                .RParen => {
+                    if (depth == 0) return false;
+                    depth -= 1;
+                    if (depth == 0) return i + 1 < self.tokens.len and self.tokens[i + 1].kind == .EqualsGreaterThan;
+                },
+                .EOF => return false,
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn parseFunctionType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        const open = self.expect(.LParen, "expected '('");
+        var parameters: std.ArrayList(ast_mod.TypeParameter) = .empty;
+        errdefer parameters.deinit(self.allocator);
+        while (!self.at(.RParen) and !self.at(.EOF)) {
+            const before = self.index;
+            const name = self.expectIdentifierLike("expected function type parameter name");
+            const optional = self.eat(.Question);
+            _ = self.expect(.Colon, "expected ':' after function type parameter");
+            const parameter_type = try self.parseType();
+            try parameters.append(self.allocator, .{
+                .name = name.lexeme,
+                .optional = optional,
+                .type_node = parameter_type,
+                .span = joinSpans(name.span, self.typeSpan(parameter_type)),
+            });
+            if (!self.eat(.Comma)) break;
+            if (self.index == before) _ = self.advance();
+        }
+        _ = self.expect(.RParen, "expected ')' after function type parameters");
+        _ = self.expect(.EqualsGreaterThan, "expected '=>' in function type");
+        const return_type = try self.parseType();
+        return self.addTypeNode(.{
+            .span = joinSpans(open.span, self.typeSpan(return_type)),
+            .data = .{ .Function = .{ .parameters = try parameters.toOwnedSlice(self.allocator), .return_type = return_type } },
+        });
+    }
+
+    fn recoverTypeMember(self: *Parser) void {
+        while (!self.at(.Semicolon) and !self.at(.Comma) and !self.at(.RBrace) and !self.at(.EOF)) _ = self.advance();
+        if (self.at(.Semicolon) or self.at(.Comma)) _ = self.advance();
+    }
+
+    fn isTypeBoundary(self: *const Parser, kind: TokenType) bool {
+        _ = self;
+        return switch (kind) {
+            .Comma, .Semicolon, .RParen, .RBracket, .RBrace, .Equal, .EqualsGreaterThan, .EOF => true,
+            else => false,
+        };
+    }
+
+    fn typeSpan(self: *const Parser, id: ast_mod.TypeNodeId) tokens.Span {
+        return self.type_nodes.items[@intCast(id)].span;
     }
 
     fn parseParameterList(self: *Parser, params: *std.ArrayList(NodeId)) !void {
         while (!self.at(.RParen) and !self.at(.EOF)) {
             const rest_token: ?Token = if (self.at(.Spread)) self.advance() else null;
             const param_token = self.expectIdentifierLike("expected parameter name");
-            const param_type = self.parseOptionalTypeAnnotation();
+            const param_type = try self.parseOptionalTypeAnnotation();
             while (!self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) _ = self.advance();
             try params.append(self.allocator, try self.addNode(.{
                 .span = if (rest_token) |token| joinSpans(token.span, param_token.span) else param_token.span,
@@ -385,7 +834,7 @@ const Parser = struct {
 
         while (!self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) {
             const name = self.expectIdentifierLike("expected variable name");
-            const type_annotation: ?ast_mod.TypeAnnotation = self.parseOptionalTypeAnnotation();
+            const type_annotation: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
             while (!self.at(.Equal) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) _ = self.advance();
             const init = if (self.eat(.Equal)) try self.parseExpression() else null;
             try declarations.append(self.allocator, try self.addNode(.{
@@ -794,7 +1243,7 @@ const Parser = struct {
         if (self.eat(.LParen)) {
             try self.parseParameterList(&params);
             _ = self.expect(.RParen, "expected )");
-            return_type = self.parseOptionalTypeAnnotation();
+            return_type = try self.parseOptionalTypeAnnotation();
         } else {
             const param_token = self.expectIdentifierLike("expected parameter name");
             try params.append(self.allocator, try self.addNode(.{
@@ -1112,6 +1561,19 @@ const Parser = struct {
         return kind == .BarBar or kind == .AmpersandAmpersand;
     }
 
+    fn isObjectPropertyKeyToken(token: Token) bool {
+        return token.kind == .Identifier or token.kind == .PrivateIdentifier or
+            token.kind == .StringLiteral or token.kind == .NumberLiteral;
+    }
+
+    fn objectPropertyKey(token: Token) []const u8 {
+        return switch (token.kind) {
+            .Identifier, .PrivateIdentifier, .NumberLiteral => token.lexeme,
+            .StringLiteral => token.lexeme[1 .. token.lexeme.len - 1],
+            else => unreachable,
+        };
+    }
+
     fn parseObjectExpression(self: *Parser) anyerror!NodeId {
         // The LBrace was already consumed by parsePrimary before dispatching here.
         const start = self.previous().?.span;
@@ -1122,10 +1584,24 @@ const Parser = struct {
                 const spread_token = self.advance();
                 const value = try self.parseSpreadElement(spread_token);
                 try properties.append(self.allocator, .{
-                    .key = "",
+                    .kind = .spread,
                     .key_span = spread_token.span,
                     .value = value,
-                    .spread = true,
+                });
+                if (!self.eat(.Comma)) break;
+                continue;
+            }
+            if (self.at(.LBracket)) {
+                const key_start = self.advance();
+                const computed_key = try self.parseExpression();
+                const key_end = self.expect(.RBracket, "expected ]");
+                _ = self.expect(.Colon, "expected :");
+                const value = try self.parseExpression();
+                try properties.append(self.allocator, .{
+                    .kind = .computed,
+                    .key_span = joinSpans(key_start.span, key_end.span),
+                    .computed_key = computed_key,
+                    .value = value,
                 });
                 if (!self.eat(.Comma)) break;
                 continue;
@@ -1155,13 +1631,56 @@ const Parser = struct {
                 else => unreachable,
             };
 
-            _ = self.expect(.Colon, "expected :");
-            const value = try self.parseExpression();
-            try properties.append(self.allocator, .{
-                .key = key,
-                .key_span = key_tok.span,
-                .value = value,
-            });
+            if ((std.mem.eql(u8, key, "async") or std.mem.eql(u8, key, "get") or std.mem.eql(u8, key, "set")) and
+                isObjectPropertyKeyToken(self.current()) and self.peek(1).kind == .LParen)
+            {
+                const modifier = key;
+                const method_key = self.advance();
+                const method_name = objectPropertyKey(method_key);
+                const kind: ast_mod.ObjectPropertyKind = if (std.mem.eql(u8, modifier, "async"))
+                    .async_method
+                else if (std.mem.eql(u8, modifier, "get"))
+                    .getter
+                else
+                    .setter;
+                const value = try self.parseObjectMethod(key_tok, kind == .async_method);
+                try properties.append(self.allocator, .{
+                    .kind = kind,
+                    .key = method_name,
+                    .key_span = method_key.span,
+                    .value = value,
+                });
+            } else if (self.at(.LParen)) {
+                const value = try self.parseObjectMethod(key_tok, false);
+                try properties.append(self.allocator, .{
+                    .kind = .method,
+                    .key = key,
+                    .key_span = key_tok.span,
+                    .value = value,
+                });
+            } else if ((key_tok_kind == .Identifier or key_tok_kind == .PrivateIdentifier) and
+                (self.at(.Comma) or self.at(.RBrace)))
+            {
+                const value = try self.addNode(.{
+                    .span = key_tok.span,
+                    .data = .{ .Identifier = .{ .name = key } },
+                });
+                try properties.append(self.allocator, .{
+                    .kind = .shorthand,
+                    .key = key,
+                    .key_span = key_tok.span,
+                    .value = value,
+                });
+            } else {
+                _ = self.expect(.Colon, "expected :");
+                const value = try self.parseExpression();
+                try properties.append(self.allocator, .{
+                    .kind = .key_value,
+                    .key = key,
+                    .key_span = key_tok.span,
+                    .value = value,
+                });
+            }
             if (!self.eat(.Comma)) break;
         }
         _ = self.expect(.RBrace, "expected }");
@@ -1171,14 +1690,40 @@ const Parser = struct {
         });
     }
 
+    fn parseObjectMethod(self: *Parser, start: Token, is_async: bool) anyerror!NodeId {
+        _ = self.expect(.LParen, "expected (");
+        var params: std.ArrayList(NodeId) = .empty;
+        errdefer params.deinit(self.allocator);
+        try self.parseParameterList(&params);
+        _ = self.expect(.RParen, "expected )");
+        const return_type = try self.parseOptionalTypeAnnotation();
+        const body = if (self.at(.LBrace)) try self.parseBlockStatement() else blk: {
+            self.report("expected function body", .expected_token);
+            break :blk ast_mod.invalid_node;
+        };
+        const end_span = if (body == ast_mod.invalid_node) self.previousOrCurrent().span else self.nodes.items[@intCast(body)].span;
+        return self.addNode(.{
+            .span = joinSpans(start.span, end_span),
+            .data = .{ .FunctionExpression = .{
+                .params = try params.toOwnedSlice(self.allocator),
+                .body = body,
+                .is_async = is_async,
+                .return_type = return_type,
+            } },
+        });
+    }
+
     fn parseArrayExpression(self: *Parser) anyerror!NodeId {
         // The LBracket was already consumed by parsePrimary before dispatching here.
         const start = self.previous().?.span;
-        var elements: std.ArrayList(NodeId) = .empty;
+        var elements: std.ArrayList(?NodeId) = .empty;
         errdefer elements.deinit(self.allocator);
 
         while (!self.at(.RBracket) and !self.at(.EOF)) {
-            if (self.eat(.Comma)) continue; // trailing comma — allow it
+            if (self.eat(.Comma)) {
+                try elements.append(self.allocator, null);
+                continue;
+            }
             const elem = if (self.at(.Spread)) blk: {
                 const spread_token = self.advance();
                 break :blk try self.parseSpreadElement(spread_token);
@@ -1311,27 +1856,23 @@ const Parser = struct {
                 });
                 continue;
             }
-            // TypeScript `as` assertion: value as TypeAnnotation (v1 supports simple type identifiers).
+            // TypeScript `as` assertion uses the same structured type grammar as declarations.
             if (self.atIdentifierText("as")) {
                 const as_tok = self.advance();
-                const type_token_opt = if (self.at(.Identifier) or self.at(.PrivateIdentifier)) self.advance() else null;
-                if (type_token_opt) |unwrapped_type_token| {
-                    const span: tokens.Span = .{
-                        .start = as_tok.span.start,
-                        .end = unwrapped_type_token.span.end,
-                        .line = as_tok.span.line,
-                        .column = as_tok.span.column,
-                    };
+                const type_root = try self.parseType();
+                if (type_root != ast_mod.invalid_type_node) {
+                    const type_span = self.typeSpan(type_root);
+                    const span = joinSpans(as_tok.span, type_span);
                     node = try self.addNode(.{
                         .span = joinSpans(self.nodes.items[@intCast(node)].span, span),
                         .data = .{ .AsExpression = .{
                             .expression = node,
-                            .type_annotation = .{ .name = unwrapped_type_token.lexeme, .span = span },
+                            .type_annotation = .{ .root = type_root, .span = type_span },
                         } },
                     });
                     continue;
                 } else {
-                    self.reportAt(as_tok, "expected type name after 'as'", .expected_token);
+                    self.reportAt(as_tok, "expected type after 'as'", .expected_token);
                     break;
                 }
             }
@@ -1356,6 +1897,7 @@ const Parser = struct {
                 }
             },
             .Keyword_function => node = try self.parseFunctionExpression(token, false),
+            .Keyword_class => node = try self.parseClassExpression(token),
             .Keyword_this => node = try self.addNode(.{ .span = token.span, .data = .{ .ThisExpression = .{} } }),
             .Keyword_super => node = try self.addNode(.{ .span = token.span, .data = .{ .SuperExpression = .{} } }),
             .Keyword_new => node = try self.parseNewExpression(token),
@@ -1461,8 +2003,18 @@ const Parser = struct {
         return id;
     }
 
+    fn addTypeNode(self: *Parser, node: ast_mod.TypeNode) anyerror!ast_mod.TypeNodeId {
+        const id: ast_mod.TypeNodeId = @intCast(self.type_nodes.items.len);
+        try self.type_nodes.append(self.allocator, node);
+        return id;
+    }
+
     fn current(self: *const Parser) Token {
         return self.tokens[@min(self.index, self.tokens.len - 1)];
+    }
+
+    fn peek(self: *const Parser, offset: usize) Token {
+        return self.tokens[@min(self.index + offset, self.tokens.len - 1)];
     }
 
     fn previous(self: *const Parser) ?Token {

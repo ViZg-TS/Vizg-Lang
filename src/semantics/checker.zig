@@ -62,7 +62,7 @@ fn prewalk(
                 switch (decl_node.data) {
                     .VariableDeclarator => |d| {
                         if (d.type_annotation == null or d.name.len == 0) continue;
-                        const ann_name = d.type_annotation.?.name;
+                        const ann_name = tree.annotationName(d.type_annotation.?) orelse continue;
                         const type_id = lookupBuiltinIdByName(ann_name) orelse continue;
                         try out.append(gpa, .{ .scope = parent_scope, .name = d.name, .type_id = type_id });
                     },
@@ -209,7 +209,6 @@ fn staticTypeMismatchMessage(expected_id: types.TypeId, rhs_kind: builtin_kind.B
         },
         else => "type mismatch: unexpected types",
     };
-
 }
 
 fn checkInitializers(
@@ -222,7 +221,7 @@ fn checkInitializers(
     for (tree.nodes) |node| switch (node.data) {
         .VariableDeclarator => |vd| {
             if (vd.type_annotation == null or vd.init == null) continue;
-            const ann_name = vd.type_annotation.?.name;
+            const ann_name = tree.annotationName(vd.type_annotation.?) orelse continue;
 
             // v1 only checks literal initializers — the goal says "simple
             // literal initializers" and lists `let x: number = 1` as the
@@ -265,7 +264,6 @@ fn checkInitializers(
 /// Resolve the declared return type of a function call's callee (assumed to be
 /// an Identifier) by walking AST nodes for matching FunctionDeclarations. Returns
 /// the TypeId of the return type if one is explicitly annotated, otherwise null.
-
 fn lookupCallReturnTypeId(
     tree: *const ast_mod.Ast,
     references: []const @import("../frontend/resolver.zig").Reference,
@@ -285,7 +283,8 @@ fn lookupCallReturnTypeId(
             if (std.mem.eql(u8, fd.name, calleeref.name)) {
                 if (fd.return_type == null) return null;
                 // Look up the annotation's identifier in the builtins table.
-                return lookupBuiltinIdByName(fd.return_type.?.name);
+                const name = tree.annotationName(fd.return_type.?) orelse return null;
+                return lookupBuiltinIdByName(name);
             }
         },
         else => {},
@@ -385,7 +384,6 @@ fn handleLiteralRhs(
     }
 }
 
-
 // ---------------------------------------------------------------------------
 
 fn checkAssignments(
@@ -395,8 +393,7 @@ fn checkAssignments(
     gpa: std.mem.Allocator,
     out: *std.ArrayList(diagnostics.Diagnostic),
 ) !void {
-
-for (tree.nodes) |node| switch (node.data) {
+    for (tree.nodes) |node| switch (node.data) {
         .AssignmentExpression => |assign_expr| {
             if (assign_expr.operator != .Equal) continue;
 
@@ -421,7 +418,6 @@ for (tree.nodes) |node| switch (node.data) {
                 },
                 else => continue, // RHS unknown — skip in v1.
             }
-
         },
         else => {},
     };
@@ -437,7 +433,9 @@ fn inferBuiltinKindFromLiteral(value: []const u8) ?builtin_kind.BuiltinKind {
     // string. The check tolerates an optional leading sign and scientific
     // notation (e.g. "1e-7", "-3.5E2").
     const raw = if (value.len > 0 and (value[0] == '+' or value[0] == '-'))
-        value[1..] else value;
+        value[1..]
+    else
+        value;
 
     if (raw.len == 0) return .string;
 
@@ -492,7 +490,9 @@ test "checker: number initializer ok" {
     const type_info = @import("type_info.zig").TypeInfo{ .symbols = &.{}, .nodes = &.{}, .diagnostics = &.{} };
     const diags = try checkFile(a, result, type_info);
 
-    for (diags) |d| { _ = d; }
+    for (diags) |d| {
+        _ = d;
+    }
     try std.testing.expectEqual(@as(usize, 0), diags.len);
 }
 
@@ -508,7 +508,9 @@ test "checker: string initializer ok" {
     const type_info = @import("type_info.zig").TypeInfo{ .symbols = &.{}, .nodes = &.{}, .diagnostics = &.{} };
     const diags = try checkFile(a, result, type_info);
 
-    for (diags) |d| { _ = d; }
+    for (diags) |d| {
+        _ = d;
+    }
     try std.testing.expectEqual(@as(usize, 0), diags.len);
 }
 
@@ -524,7 +526,9 @@ test "checker: number var with string literal emits VZG6005" {
     const type_info = @import("type_info.zig").TypeInfo{ .symbols = &.{}, .nodes = &.{}, .diagnostics = &.{} };
     const diags = try checkFile(a, result, type_info);
 
-    for (diags) |d| { _ = d; }
+    for (diags) |d| {
+        _ = d;
+    }
 }
 
 test "checker: untyped variable initializer emits no checker diagnostic" {
@@ -539,7 +543,9 @@ test "checker: untyped variable initializer emits no checker diagnostic" {
     const type_info = @import("type_info.zig").TypeInfo{ .symbols = &.{}, .nodes = &.{}, .diagnostics = &.{} };
     const diags = try checkFile(a, result, type_info);
 
-    for (diags) |d| { _ = d; }
+    for (diags) |d| {
+        _ = d;
+    }
 }
 
 test "checker: declared variable with unknown initializer type emits no checker diagnostic in v1" {
@@ -555,7 +561,9 @@ test "checker: declared variable with unknown initializer type emits no checker 
     const type_info = @import("type_info.zig").TypeInfo{ .symbols = &.{}, .nodes = &.{}, .diagnostics = &.{} };
     const diags = try checkFile(a, result, type_info);
 
-    for (diags) |d| { _ = d; }
+    for (diags) |d| {
+        _ = d;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +583,9 @@ test "checker: valid assignment number to number no diagnostic" {
     const type_info = @import("type_info.zig").TypeInfo{ .symbols = &.{}, .nodes = &.{}, .diagnostics = &.{} };
     const diags = try checkFile(a, result, type_info);
 
-    for (diags) |d| { _ = d; }
+    for (diags) |d| {
+        _ = d;
+    }
     try std.testing.expectEqual(@as(usize, 0), diags.len);
 }
 
@@ -611,7 +621,9 @@ test "checker: assignment to untyped variable emits no diagnostic" {
     const type_info = @import("type_info.zig").TypeInfo{ .symbols = &.{}, .nodes = &.{}, .diagnostics = &.{} };
     const diags = try checkFile(a, result, type_info);
 
-    for (diags) |d| { _ = d; }
+    for (diags) |d| {
+        _ = d;
+    }
     try std.testing.expectEqual(@as(usize, 0), diags.len);
 }
 
@@ -628,6 +640,8 @@ test "checker: assignment from unknown expression emits no diagnostic" {
     const type_info = @import("type_info.zig").TypeInfo{ .symbols = &.{}, .nodes = &.{}, .diagnostics = &.{} };
     const diags = try checkFile(a, result, type_info);
 
-    for (diags) |d| { _ = d; }
+    for (diags) |d| {
+        _ = d;
+    }
     try std.testing.expectEqual(@as(usize, 0), diags.len);
 }

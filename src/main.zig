@@ -248,6 +248,43 @@ fn printAst(writer: *Io.Writer, tree: ast_mod.Ast) !void {
     try printAstNode(writer, tree, tree.root, 0);
 }
 
+fn printTypeNode(writer: *Io.Writer, tree: ast_mod.Ast, type_id: ast_mod.TypeNodeId, depth: usize) !void {
+    const node = tree.typeNode(type_id);
+    try printIndent(writer, depth);
+    try writer.print("Type{s} #{} {}..{}", .{ @tagName(node.data), type_id, node.span.start, node.span.end });
+    switch (node.data) {
+        .Named => |named| {
+            try writer.print(" name=\"{s}\"\n", .{named.name});
+            for (named.type_arguments) |child| try printTypeNode(writer, tree, child, depth + 1);
+        },
+        .Array, .Readonly, .Parenthesized => |child| {
+            try writer.writeByte('\n');
+            try printTypeNode(writer, tree, child, depth + 1);
+        },
+        .Union, .Intersection, .Tuple => |children| {
+            try writer.writeByte('\n');
+            for (children) |child| try printTypeNode(writer, tree, child, depth + 1);
+        },
+        .Object => |members| {
+            try writer.writeByte('\n');
+            for (members) |member| {
+                try printIndent(writer, depth + 1);
+                try writer.print("TypeMember name=\"{s}\" optional={} {}..{}\n", .{ member.name, member.optional, member.span.start, member.span.end });
+                try printTypeNode(writer, tree, member.type_node, depth + 2);
+            }
+        },
+        .Function => |function| {
+            try writer.writeByte('\n');
+            for (function.parameters) |parameter| {
+                try printIndent(writer, depth + 1);
+                try writer.print("TypeParameter name=\"{s}\" optional={} {}..{}\n", .{ parameter.name, parameter.optional, parameter.span.start, parameter.span.end });
+                try printTypeNode(writer, tree, parameter.type_node, depth + 2);
+            }
+            try printTypeNode(writer, tree, function.return_type, depth + 1);
+        },
+    }
+}
+
 fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, depth: usize) !void {
     if (node_id == ast_mod.invalid_node) return;
 
@@ -297,15 +334,27 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try writer.print("VariableDeclaration #{} kind={s} {}..{}\n", .{ node_id, @tagName(decl.kind), node.span.start, node.span.end });
             for (decl.declarations) |declarator| try printAstNode(writer, tree, declarator, depth + 1);
         },
+        .TypeAliasDeclaration => |decl| {
+            try writer.print("TypeAliasDeclaration #{} name=\"{s}\" type=#{} {}..{}\n", .{ node_id, decl.name, decl.type_annotation.root, node.span.start, node.span.end });
+            try printTypeNode(writer, tree, decl.type_annotation.root, depth + 1);
+        },
+        .InterfaceDeclaration => |decl| {
+            try writer.print("InterfaceDeclaration #{} name=\"{s}\" extends={} body=#{} {}..{}\n", .{ node_id, decl.name, decl.extends.len, decl.body, node.span.start, node.span.end });
+            for (decl.extends) |heritage| try printTypeNode(writer, tree, heritage, depth + 1);
+            try printTypeNode(writer, tree, decl.body, depth + 1);
+        },
         .VariableDeclarator => |decl| {
             try writer.print("VariableDeclarator #{} name=\"{s}\"", .{ node_id, decl.name });
+            if (decl.type_annotation) |annotation| try writer.print(" type=#{}", .{annotation.root});
             if (decl.init) |init| try writer.print(" init=#{}", .{init});
             try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
+            if (decl.type_annotation) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             if (decl.init) |init| try printAstNode(writer, tree, init, depth + 1);
         },
         .FunctionDeclaration => |decl| {
             try writer.print("FunctionDeclaration #{} name=\"{s}\" exported={} body=#{} {}..{}\n", .{ node_id, decl.name, decl.exported, decl.body, node.span.start, node.span.end });
             for (decl.params) |param| try printAstNode(writer, tree, param, depth + 1);
+            if (decl.return_type) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             try printAstNode(writer, tree, decl.body, depth + 1);
         },
         .FunctionExpression => |expr| {
@@ -313,14 +362,44 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             if (expr.name) |name| try writer.print(" name=\"{s}\"", .{name});
             try writer.print(" async={} body=#{} {}..{}\n", .{ expr.is_async, expr.body, node.span.start, node.span.end });
             for (expr.params) |param| try printAstNode(writer, tree, param, depth + 1);
+            if (expr.return_type) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             try printAstNode(writer, tree, expr.body, depth + 1);
+        },
+        .ClassDeclaration => |decl| {
+            try writer.print("ClassDeclaration #{} name=\"{s}\" members={} {}..{}\n", .{ node_id, decl.name, decl.members.len, node.span.start, node.span.end });
+            if (decl.super_class) |super_class| try printAstNode(writer, tree, super_class, depth + 1);
+            for (decl.members) |member| try printAstNode(writer, tree, member, depth + 1);
+        },
+        .ClassExpression => |expr| {
+            try writer.print("ClassExpression #{}", .{node_id});
+            if (expr.name) |name| try writer.print(" name=\"{s}\"", .{name});
+            try writer.print(" members={} {}..{}\n", .{ expr.members.len, node.span.start, node.span.end });
+            if (expr.super_class) |super_class| try printAstNode(writer, tree, super_class, depth + 1);
+            for (expr.members) |member| try printAstNode(writer, tree, member, depth + 1);
+        },
+        .ClassField => |field| {
+            try writer.print("ClassField #{} name=\"{s}\" static={} access={s} {}..{}\n", .{ node_id, field.name, field.is_static, @tagName(field.access), node.span.start, node.span.end });
+            if (field.type_annotation) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
+            if (field.initializer) |initializer| try printAstNode(writer, tree, initializer, depth + 1);
+        },
+        .ClassMethod => |method| {
+            try writer.print("ClassMethod #{} name=\"{s}\" kind={s} static={} access={s} {}..{}\n", .{ node_id, method.name, @tagName(method.kind), method.is_static, @tagName(method.access), node.span.start, node.span.end });
+            for (method.params) |param| try printAstNode(writer, tree, param, depth + 1);
+            if (method.return_type) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
+            try printAstNode(writer, tree, method.body, depth + 1);
         },
         .ArrowFunctionExpression => |arrow| {
             try writer.print("ArrowFunctionExpression #{} async={} expression_body={} body=#{} {}..{}\n", .{ node_id, arrow.is_async, arrow.expression_body, arrow.body, node.span.start, node.span.end });
             for (arrow.params) |param| try printAstNode(writer, tree, param, depth + 1);
+            if (arrow.return_type) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             try printAstNode(writer, tree, arrow.body, depth + 1);
         },
-        .Parameter => |param| try writer.print("Parameter #{} name=\"{s}\" rest={} {}..{}\n", .{ node_id, param.name, param.rest, node.span.start, node.span.end }),
+        .Parameter => |param| {
+            try writer.print("Parameter #{} name=\"{s}\" rest={}", .{ node_id, param.name, param.rest });
+            if (param.type_annotation) |annotation| try writer.print(" type=#{}", .{annotation.root});
+            try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
+            if (param.type_annotation) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
+        },
         .SpreadElement => |spread| {
             try writer.print("SpreadElement #{} argument=#{} {}..{}\n", .{ node_id, spread.argument, node.span.start, node.span.end });
             try printAstNode(writer, tree, spread.argument, depth + 1);
@@ -383,10 +462,8 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, unary.argument, depth + 1);
         },
         .AsExpression => |as_expr| {
-            try writer.print("AsExpression #{} expr=#{} type={s} {}..{}\n", .{
-                node_id,         as_expr.expression, as_expr.type_annotation.name,
-                node.span.start, node.span.end,
-            });
+            try writer.print("AsExpression #{} expr=#{} type=#{} {}..{}\n", .{ node_id, as_expr.expression, as_expr.type_annotation.root, node.span.start, node.span.end });
+            try printTypeNode(writer, tree, as_expr.type_annotation.root, depth + 1);
         },
         .MemberExpression => |member| {
             try writer.print("MemberExpression #{} object=#{} property=\"{s}\" optional={} {}..{}\n", .{ node_id, member.object, member.property, member.optional, node.span.start, node.span.end });
@@ -457,7 +534,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             for (switch_case.consequent) |statement| try printAstNode(writer, tree, statement, depth + 1);
         },
         .ImportDeclaration => |decl| {
-            try writer.print("ImportDeclaration #{} source=\"{s}\" names=[", .{ node_id, decl.source });
+            try writer.print("ImportDeclaration #{} source=\"{s}\" kind={s} type_only={} names=[", .{ node_id, decl.source, @tagName(decl.kind), decl.type_only });
             try printStringList(writer, decl.names);
             try writer.print("]", .{});
             if (decl.specifiers.len > 0) {
@@ -468,9 +545,11 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
         },
         .ExportDeclaration => |decl| {
-            try writer.print("ExportDeclaration #{}", .{node_id});
+            try writer.print("ExportDeclaration #{} kind={s} type_only={}", .{ node_id, @tagName(decl.kind), decl.type_only });
             if (decl.declaration != ast_mod.invalid_node) try writer.print(" declaration=#{}", .{decl.declaration});
+            if (decl.expression != ast_mod.invalid_node) try writer.print(" expression=#{}", .{decl.expression});
             if (decl.default_name) |name| try writer.print(" default=\"{s}\"", .{name});
+            if (decl.source.len > 0) try writer.print(" source=\"{s}\"", .{decl.source});
             if (decl.specifiers.len > 0) {
                 try writer.print(" specifiers=[", .{});
                 try printExportSpecifiers(writer, decl.specifiers);
@@ -478,28 +557,29 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             }
             try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
             if (decl.declaration != ast_mod.invalid_node) try printAstNode(writer, tree, decl.declaration, depth + 1);
+            if (decl.expression != ast_mod.invalid_node) try printAstNode(writer, tree, decl.expression, depth + 1);
         },
         .ObjectExpression => |obj_expr| {
             try writer.print("ObjectExpression #{} props=[", .{node_id});
             for (obj_expr.properties, 0..) |prop, i| {
                 if (i > 0) try writer.print(", ", .{});
-                if (prop.spread) try writer.print("...", .{}) else try writer.print("{s}", .{prop.key});
+                try writer.print("{s}:", .{@tagName(prop.kind)});
+                if (prop.computed_key) |key| try writer.print("#{}", .{key}) else if (prop.kind == .spread) try writer.writeAll("...") else try writer.print("{s}", .{prop.key});
             }
             try writer.print("] {}..{}\n", .{ node.span.start, node.span.end });
             for (obj_expr.properties) |prop| {
+                if (prop.computed_key) |key| try printAstNode(writer, tree, key, depth + 1);
                 try printAstNode(writer, tree, prop.value, depth + 1);
             }
         },
         .ArrayExpression => |arr_expr| {
             try writer.print("ArrayExpression #{} elements=[", .{node_id});
-            for (arr_expr.elements, 0..) |elem, i| {
+            for (arr_expr.elements, 0..) |maybe_elem, i| {
                 if (i > 0) try writer.print(", ", .{});
-                try writer.print("#{}", .{elem});
+                if (maybe_elem) |elem| try writer.print("#{}", .{elem}) else try writer.writeAll("<hole>");
             }
             try writer.print("] {}..{}\n", .{ node.span.start, node.span.end });
-            for (arr_expr.elements) |elem| {
-                try printAstNode(writer, tree, elem, depth + 1);
-            }
+            for (arr_expr.elements) |maybe_elem| if (maybe_elem) |elem| try printAstNode(writer, tree, elem, depth + 1);
         },
     }
 }
@@ -524,14 +604,14 @@ fn printSymbols(writer: *Io.Writer, bind: binder.BindResult, diags: []const diag
     try writer.print("\nSymbols\n", .{});
     for (bind.symbols) |symbol| {
         try writer.print(
-            "  symbol {} name=\"{s}\" kind={s} scope={} node={} span={}..{}\n",
-            .{ symbol.id, symbol.name, @tagName(symbol.kind), symbol.scope, symbol.declaration, symbol.span.start, symbol.span.end },
+            "  symbol {} name=\"{s}\" kind={s} namespace={s} scope={} node={} span={}..{}\n",
+            .{ symbol.id, symbol.name, @tagName(symbol.kind), @tagName(symbol.namespace), symbol.scope, symbol.declaration, symbol.span.start, symbol.span.end },
         );
     }
 
     try writer.print("\nImports\n", .{});
     for (bind.module.imports) |import| {
-        try writer.print("  {s} from \"{s}\"\n", .{ import.local_name, import.source });
+        try writer.print("  {s} from \"{s}\" kind={s} type_only={}\n", .{ import.local_name, import.source, @tagName(import.kind), import.type_only });
     }
 
     try writer.print("\nExports\n", .{});
@@ -626,8 +706,8 @@ fn printModules(writer: *Io.Writer, graph: modules.ModuleGraph) !void {
                 .local => unreachable,
             }
             try writer.print(
-                " specifier=\"{s}\" status={s}\n",
-                .{ edge.specifier, @tagName(edge.status) },
+                " specifier=\"{s}\" kind={s} type_only={} status={s}\n",
+                .{ edge.specifier, @tagName(edge.kind), edge.type_only, @tagName(edge.status) },
             );
         }
     }
@@ -789,8 +869,8 @@ fn printImportSpecifiers(writer: *Io.Writer, values: []const ast_mod.ImportSpeci
     for (values, 0..) |value, i| {
         if (i > 0) try writer.print(", ", .{});
         try writer.print(
-            "{{imported=\"{s}\", local=\"{s}\"}}",
-            .{ value.imported_name, value.local_name },
+            "{{kind={s}, imported=\"{s}\", local=\"{s}\"}}",
+            .{ @tagName(value.kind), value.imported_name, value.local_name },
         );
     }
 }
@@ -884,6 +964,67 @@ test "printExportSpecifiers shows local and exported names" {
     );
 }
 
+test "printAst shows import declaration and specifier metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\import type main, { value as localValue } from "./dep";
+        \\import "./side-effect";
+    }, .{});
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+
+    var buffer: [2048]u8 = undefined;
+    var writer = Io.Writer.fixed(&buffer);
+    try printAst(&writer, result.ast);
+    const output = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "kind=mixed type_only=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "{kind=default, imported=\"default\", local=\"main\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "{kind=named, imported=\"value\", local=\"localValue\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "kind=side_effect type_only=false") != null);
+}
+
+test "printAst shows extended object property kinds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\const value = 1;
+        \\const key = "k";
+        \\const other = {};
+        \\const object = { value, [key]: value, ...other, method() {}, async load() {}, get item() {}, set item(next) {} };
+    }, .{});
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+
+    var buffer: [8192]u8 = undefined;
+    var writer = Io.Writer.fixed(&buffer);
+    try printAst(&writer, result.ast);
+    const output = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "shorthand:value") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "computed:#") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "spread:...") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "method:method") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "async_method:load") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "getter:item") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "setter:item") != null);
+}
+
+test "printAst shows array holes and spread elements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\const items = [];
+        \\const array = [1, , ...items];
+    }, .{});
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+
+    var buffer: [4096]u8 = undefined;
+    var writer = Io.Writer.fixed(&buffer);
+    try printAst(&writer, result.ast);
+    const output = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "elements=[#") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, ", <hole>, #") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "SpreadElement #") != null);
+}
+
 fn printIdList(writer: *Io.Writer, values: []const u32) !void {
     for (values, 0..) |value, i| {
         if (i > 0) try writer.print(", ", .{});
@@ -969,6 +1110,8 @@ test "printModules emits deterministic shape with module ids and status labels" 
             .from = 0,
             .to = 1,
             .specifier = "./a",
+            .kind = .named,
+            .type_only = false,
             .status = .local,
             .span = tokens.Span{ .start = 0, .end = 3, .line = 1, .column = 1 },
         },
@@ -977,6 +1120,8 @@ test "printModules emits deterministic shape with module ids and status labels" 
             .from = 0,
             .to = null,
             .specifier = "console",
+            .kind = .side_effect,
+            .type_only = false,
             .status = .external,
             .span = tokens.Span{ .start = 0, .end = 8, .line = 2, .column = 1 },
         },
@@ -985,6 +1130,8 @@ test "printModules emits deterministic shape with module ids and status labels" 
             .from = 0,
             .to = null,
             .specifier = "./nonexistent",
+            .kind = .named,
+            .type_only = true,
             .status = .missing,
             .span = tokens.Span{ .start = 0, .end = 13, .line = 3, .column = 1 },
         },
@@ -1013,10 +1160,10 @@ test "printModules emits deterministic shape with module ids and status labels" 
     try std.testing.expect(std.mem.indexOf(u8, out, "module 0 path=\"main.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "module 1 path=\"a.ts\"") != null);
 
-    // Import edges show target as module id / external / missing, plus status=.
-    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> module 1 specifier=\"./a\" status=local") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> external specifier=\"console\" status=external") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> missing specifier=\"./nonexistent\" status=missing") != null);
+    // Import edges show target, declaration metadata, and resolution status.
+    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> module 1 specifier=\"./a\" kind=named type_only=false status=local") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> external specifier=\"console\" kind=side_effect type_only=false status=external") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> missing specifier=\"./nonexistent\" kind=named type_only=true status=missing") != null);
 
     // Diagnostics section still present.
     try std.testing.expect(std.mem.indexOf(u8, out, "\nDiagnostics\n") != null);
@@ -1103,10 +1250,16 @@ fn nodeKindName(tree: ast_mod.Ast, id: ast_mod.NodeId) []const u8 {
         .RegExpLiteral => return "RegExpLiteral",
         .TemplateExpression => return "TemplateExpression",
         .VariableDeclaration => return "VariableDeclaration",
+        .TypeAliasDeclaration => return "TypeAliasDeclaration",
+        .InterfaceDeclaration => return "InterfaceDeclaration",
         .VariableDeclarator => return "VariableDeclarator",
         .FunctionDeclaration => return "FunctionDeclaration",
         .FunctionExpression => return "FunctionExpression",
         .ArrowFunctionExpression => return "ArrowFunctionExpression",
+        .ClassDeclaration => return "ClassDeclaration",
+        .ClassExpression => return "ClassExpression",
+        .ClassField => return "ClassField",
+        .ClassMethod => return "ClassMethod",
         .Parameter => return "Parameter",
         .SpreadElement => return "SpreadElement",
         .ReturnStatement => return "ReturnStatement",

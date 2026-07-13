@@ -23,7 +23,7 @@ const types = @import("../types/root.zig");
 /// Resolves an AST TypeAnnotation name to a builtin TypeId, emitting a VZG6004
 /// diagnostic when the name is not one of the known builtins. Always returns a
 /// valid TypeId.
-fn resolveAnnotation(
+fn resolveAnnotationName(
     allocator_: std.mem.Allocator,
     diag_list: *std.ArrayList(diagnostics_mod.Diagnostic),
     name: []const u8,
@@ -47,6 +47,17 @@ fn resolveAnnotation(
     });
 
     return types.builtin_instance.unknown;
+}
+
+fn resolveAnnotation(
+    allocator_: std.mem.Allocator,
+    diag_list: *std.ArrayList(diagnostics_mod.Diagnostic),
+    tree: ast_mod.Ast,
+    annotation: ast_mod.TypeAnnotation,
+    source_path: ?[]const u8,
+) !types.TypeId {
+    const name = tree.annotationName(annotation) orelse return types.builtin_instance.unknown;
+    return resolveAnnotationName(allocator_, diag_list, name, annotation.span, source_path);
 }
 
 /// Per-symbol declared-type snapshot. Stored inline in TypeInfoCollectResult —
@@ -99,7 +110,8 @@ pub fn collectDeclaredTypes(
     _ = builtins; // reserved — kept for API compatibility with the existing plan
 
     var diag_list: std.ArrayList(diagnostics_mod.Diagnostic) = .empty;
-    errdefer diag_list.deinit(allocator); {
+    errdefer diag_list.deinit(allocator);
+    {
         var i: usize = 0;
         while (i < diag_list.items.len) : (i += 1) {} // diagnostics are non-owning — nothing to destroy on error
     }
@@ -137,11 +149,8 @@ pub fn collectDeclaredTypes(
                             .VariableDeclarator => |vd| {
                                 if (vd.type_annotation == null) continue;
                                 const ann = vd.type_annotation.?;
-                                const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
-                                _ = appendOrOom(&out_list, allocator, .{
-                                    .symbol_id = symbol.id,
-                                    .declared_type = t
-                                 });
+                                const t = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path);
+                                _ = appendOrOom(&out_list, allocator, .{ .symbol_id = symbol.id, .declared_type = t });
                             },
                             else => {},
                         }
@@ -150,7 +159,7 @@ pub fn collectDeclaredTypes(
                 .VariableDeclarator => |vd| {
                     if (vd.type_annotation == null) continue;
                     const ann = vd.type_annotation.?;
-                    const t = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
+                    const t = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path);
                     _ = appendOrOom(&out_list, allocator, .{
                         .symbol_id = symbol.id,
                         .declared_type = t,
@@ -172,7 +181,7 @@ pub fn collectDeclaredTypes(
                                 .Parameter => |param| {
                                     // Untyped parameters carry no annotation and are added to the signature under `unknown` so callers can see them. Annotated-but-unknown names still route through resolveAnnotation, which emits VZG6004 on unknown types — preserving that diagnostic even when the declaration is a function param.
                                     const type_id: types.TypeId = if (param.type_annotation) |ann|
-                                        try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path)
+                                        try resolveAnnotation(allocator, &diag_list, tree, ann, source.path)
                                     else
                                         types.builtin_instance.unknown;
 
@@ -189,7 +198,7 @@ pub fn collectDeclaredTypes(
                     // Resolve the declared return type per goal policy: use `unknown` when no annotation is present (i.e. "no return" cannot be distinguished from "return void") and fall through to resolveAnnotation for annotated names, which emits VZG6004 on unknown types. The final type_id is always a valid builtin or `unknown`.
                     var return_type: types.TypeId = undefined;
                     if (decl.return_type) |ann| {
-                        return_type = try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path);
+                        return_type = try resolveAnnotation(allocator, &diag_list, tree, ann, source.path);
                     } else {
                         return_type = types.builtin_instance.unknown;
                     }
@@ -211,7 +220,7 @@ pub fn collectDeclaredTypes(
                 .Parameter => |param| {
                     // Per-goal policy: unannotated parameters use `unknown` as a safe fallback; annotated-but-unknown names still flow through resolveAnnotation which emits VZG6004 for invalid type names. Each parameter gets its own DeclaredSymbolType entry so downstream passes can inspect the per-symbol declared-type map without re-walking signatures.
                     const type_id: types.TypeId = if (param.type_annotation) |ann|
-                        try resolveAnnotation(allocator, &diag_list, ann.name, ann.span, source.path)
+                        try resolveAnnotation(allocator, &diag_list, tree, ann, source.path)
                     else
                         types.builtin_instance.unknown;
 

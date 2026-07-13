@@ -113,10 +113,21 @@ pub fn inferLiteralNodeTypes(
             .BlockStatement => |block| for (block.statements) |s| try stack.append(allocator, s),
             .ExpressionStatement => |expr_stmt| _ = try stack.append(allocator, expr_stmt.expression),
             .VariableDeclaration => |decl| for (decl.declarations) |d| try stack.append(allocator, d),
+            .TypeAliasDeclaration, .InterfaceDeclaration => {},
             .VariableDeclarator => |vd| if (vd.init) |i| try stack.append(allocator, i),
             .FunctionDeclaration => |fn_decl| try stack.append(allocator, fn_decl.body),
             .FunctionExpression => |fn_expr| try stack.append(allocator, fn_expr.body),
             .ArrowFunctionExpression => |arrow| try stack.append(allocator, arrow.body),
+            .ClassDeclaration => |class_decl| {
+                if (class_decl.super_class) |super_class| try stack.append(allocator, super_class);
+                for (class_decl.members) |member| try stack.append(allocator, member);
+            },
+            .ClassExpression => |class_expr| {
+                if (class_expr.super_class) |super_class| try stack.append(allocator, super_class);
+                for (class_expr.members) |member| try stack.append(allocator, member);
+            },
+            .ClassField => |field| if (field.initializer) |initializer| try stack.append(allocator, initializer),
+            .ClassMethod => |method| try stack.append(allocator, method.body),
             .Parameter => {},
             .SpreadElement => |spread| try stack.append(allocator, spread.argument),
             .ReturnStatement => |ret| {
@@ -217,12 +228,18 @@ pub fn inferLiteralNodeTypes(
             // ast invalid_node sentinel.
             .ExportDeclaration => |ed| {
                 if (ed.declaration != ast_mod.invalid_node) _ = try stack.append(allocator, ed.declaration);
+                if (ed.expression != ast_mod.invalid_node) _ = try stack.append(allocator, ed.expression);
             },
             .ObjectExpression => |obj_expr| {
-                for (obj_expr.properties) |prop| _ = try stack.append(allocator, prop.value);
+                for (obj_expr.properties) |prop| {
+                    if (prop.computed_key) |key| _ = try stack.append(allocator, key);
+                    _ = try stack.append(allocator, prop.value);
+                }
             },
             .ArrayExpression => |arr| {
-                for (arr.elements) |elem| _ = try stack.append(allocator, elem);
+                for (arr.elements) |maybe_elem| {
+                    if (maybe_elem) |elem| _ = try stack.append(allocator, elem);
+                }
             },
         }
     }

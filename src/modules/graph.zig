@@ -42,6 +42,9 @@ pub const ImportEdge = struct {
     from: ModuleId,
     to: ?ModuleId,
     specifier: []const u8,
+    kind: ast_mod.ImportKind,
+    type_only: bool,
+    re_export: bool = false,
     status: ImportStatus,
     span: tokens.Span,
 };
@@ -197,6 +200,8 @@ const Builder = struct {
                             .from = module_id,
                             .to = null,
                             .specifier = import_decl.source,
+                            .kind = import_decl.kind,
+                            .type_only = import_decl.type_only,
                             .status = .external,
                             .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                         });
@@ -210,6 +215,8 @@ const Builder = struct {
                             .from = module_id,
                             .to = null,
                             .specifier = import_decl.source,
+                            .kind = import_decl.kind,
+                            .type_only = import_decl.type_only,
                             .status = .missing,
                             .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                         });
@@ -235,6 +242,8 @@ const Builder = struct {
                         .from = module_id,
                         .to = target_id,
                         .specifier = import_decl.source,
+                        .kind = import_decl.kind,
+                        .type_only = import_decl.type_only,
                         .status = .local,
                         .span = if (import_decl.source.len > 0) import_decl.source_span else node.span,
                     });
@@ -254,8 +263,85 @@ const Builder = struct {
 
                     try self.validateNamedImports(module, self.modules.items[@intCast(target_id)], import_decl);
                 },
+                .ExportDeclaration => |export_decl| {
+                    if (export_decl.source.len > 0) {
+                        try self.processReExport(module_id, module, node.span, export_decl);
+                    }
+                },
                 else => {},
             }
+        }
+    }
+
+    fn processReExport(self: *Builder, module_id: ModuleId, module: Module, node_span: tokens.Span, export_decl: ast_mod.ExportDeclaration) !void {
+        const span = export_decl.source_span orelse node_span;
+        const edge_kind: ast_mod.ImportKind = if (export_decl.kind == .export_all) .namespace else .named;
+
+        if (!module_resolver.isRelativeSpecifier(export_decl.source)) {
+            _ = self.tryLoadExternalModule(export_decl.source, span);
+            try self.imports.append(self.allocator, .{
+                .id = @intCast(self.imports.items.len),
+                .from = module_id,
+                .to = null,
+                .specifier = export_decl.source,
+                .kind = edge_kind,
+                .type_only = export_decl.type_only,
+                .re_export = true,
+                .status = .external,
+                .span = span,
+            });
+            return;
+        }
+
+        const resolved = try self.resolver.resolveRelative(module.path, export_decl.source);
+        if (resolved == null) {
+            try self.imports.append(self.allocator, .{
+                .id = @intCast(self.imports.items.len),
+                .from = module_id,
+                .to = null,
+                .specifier = export_decl.source,
+                .kind = edge_kind,
+                .type_only = export_decl.type_only,
+                .re_export = true,
+                .status = .missing,
+                .span = span,
+            });
+            try self.diagnostics_list.append(self.allocator, .{
+                .severity = .@"error",
+                .code = .module_not_found,
+                .phase = .module_graph,
+                .message = try std.fmt.allocPrint(self.allocator, "cannot find module '{s}'", .{export_decl.source}),
+                .span = span,
+                .label = "module specifier could not be resolved",
+                .path = module.display_path,
+            });
+            return;
+        }
+
+        const target_path = resolved.?;
+        const target_id = self.findModule(target_path) orelse try self.analyzeModule(target_path, target_path, module.path);
+        try self.imports.append(self.allocator, .{
+            .id = @intCast(self.imports.items.len),
+            .from = module_id,
+            .to = target_id,
+            .specifier = export_decl.source,
+            .kind = edge_kind,
+            .type_only = export_decl.type_only,
+            .re_export = true,
+            .status = .local,
+            .span = span,
+        });
+
+        if (self.states.items[@intCast(target_id)] == .visiting) {
+            try self.diagnostics_list.append(self.allocator, .{
+                .severity = .@"error",
+                .code = .circular_import,
+                .phase = .module_graph,
+                .message = try std.fmt.allocPrint(self.allocator, "circular import detected through '{s}'", .{export_decl.source}),
+                .span = span,
+                .label = "this re-export participates in a cycle",
+                .path = module.display_path,
+            });
         }
     }
 
@@ -273,6 +359,7 @@ const Builder = struct {
 
     fn validateNamedImports(self: *Builder, source: Module, target: Module, import_decl: ast_mod.ImportDeclaration) !void {
         for (import_decl.specifiers) |specifier| {
+            if (specifier.kind == .namespace) continue;
             if (!moduleExportsName(target, specifier.imported_name)) {
                 try self.diagnostics_list.append(self.allocator, .{
                     .severity = .@"error",
@@ -368,7 +455,7 @@ const Builder = struct {
                             if (edge.to.? == mod.id) break :blk_target_loop mod;
                         } else continue;
                         for (decl.specifiers) |spec| {
-                            const sym = findExportedSymbol(target_mod, spec.imported_name);
+                            const sym = if (spec.kind == .namespace) null else findExportedSymbol(target_mod, spec.imported_name);
                             const id_after: u32 = @intCast(items.items.len);
                             try items.append(self.allocator, .{
                                 .id = id_after,
@@ -379,7 +466,11 @@ const Builder = struct {
                                 .imported_name = spec.imported_name,
                                 .target_module = target_mod.id,
                                 .target_symbol = sym,
-                                .kind = if (sym) |_| .named else .unresolved,
+                                .kind = switch (spec.kind) {
+                                    .named => if (sym != null) .named else .unresolved,
+                                    .default => if (sym != null) .default else .unresolved,
+                                    .namespace => .namespace,
+                                },
                                 .span = spec.local_span,
                             });
                         }
@@ -550,6 +641,8 @@ test "ImportEdge accepts an id field" {
         .from = @as(ModuleId, 1),
         .to = @as(?ModuleId, 2),
         .specifier = "x",
+        .kind = .named,
+        .type_only = false,
         .status = .local,
         .span = .{ .start = 0, .end = 1, .line = 0, .column = 0 },
     };
@@ -562,6 +655,8 @@ test "ImportEdge accepts an id field" {
         .from = @as(ModuleId, 0),
         .to = null,
         .specifier = "y",
+        .kind = .side_effect,
+        .type_only = false,
         .status = .external,
         .span = .{ .start = 2, .end = 3, .line = 0, .column = 1 },
     };

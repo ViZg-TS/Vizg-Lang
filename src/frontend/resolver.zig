@@ -75,7 +75,9 @@ const Resolver = struct {
             .ExportDeclaration => |export_decl| {
                 if (export_decl.declaration != ast_mod.invalid_node) {
                     try self.resolveNode(export_decl.declaration, scope);
-                } else {
+                } else if (export_decl.expression != ast_mod.invalid_node) {
+                    try self.resolveNode(export_decl.expression, scope);
+                } else if (export_decl.source.len == 0) {
                     for (export_decl.specifiers) |specifier| {
                         const local_node = if (specifier.local != ast_mod.invalid_node) specifier.local else node_id;
                         try self.addReference(local_node, specifier.local_name, scope, .export_ref);
@@ -91,6 +93,23 @@ const Resolver = struct {
                 const function_scope = self.takeScope();
                 try self.resolveNode(function_expr.body, function_scope);
             },
+            .ClassDeclaration => |class_decl| {
+                if (class_decl.super_class) |super_class| try self.resolveNode(super_class, scope);
+                const class_scope = self.takeScope();
+                for (class_decl.members) |member| try self.resolveNode(member, class_scope);
+            },
+            .ClassExpression => |class_expr| {
+                if (class_expr.super_class) |super_class| try self.resolveNode(super_class, scope);
+                const class_scope = self.takeScope();
+                for (class_expr.members) |member| try self.resolveNode(member, class_scope);
+            },
+            .ClassField => |field| {
+                if (field.initializer) |initializer| try self.resolveNode(initializer, scope);
+            },
+            .ClassMethod => |method| {
+                const function_scope = self.takeScope();
+                try self.resolveNode(method.body, function_scope);
+            },
             .ArrowFunctionExpression => |arrow| {
                 const function_scope = self.takeScope();
                 try self.resolveNode(arrow.body, function_scope);
@@ -102,6 +121,7 @@ const Resolver = struct {
             .VariableDeclaration => |var_decl| {
                 for (var_decl.declarations) |declaration| try self.resolveNode(declaration, scope);
             },
+            .TypeAliasDeclaration, .InterfaceDeclaration => {},
             .VariableDeclarator => |declarator| {
                 if (declarator.init) |initializer| try self.resolveNode(initializer, scope);
             },
@@ -208,10 +228,13 @@ const Resolver = struct {
                 for (switch_case.consequent) |statement| try self.resolveNode(statement, scope);
             },
             .ObjectExpression => |obj_expr| {
-                for (obj_expr.properties) |prop| try self.resolveNode(prop.value, scope);
+                for (obj_expr.properties) |prop| {
+                    if (prop.computed_key) |key| try self.resolveNode(key, scope);
+                    try self.resolveNode(prop.value, scope);
+                }
             },
             .ArrayExpression => |arr| {
-                for (arr.elements) |elem| try self.resolveNode(elem, scope);
+                for (arr.elements) |maybe_elem| if (maybe_elem) |elem| try self.resolveNode(elem, scope);
             },
         }
     }

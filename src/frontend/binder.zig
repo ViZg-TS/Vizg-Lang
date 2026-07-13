@@ -11,6 +11,7 @@ pub const SymbolId = u32;
 pub const ScopeKind = enum {
     global,
     function,
+    class,
     block,
 };
 
@@ -19,6 +20,16 @@ pub const SymbolKind = enum {
     function,
     parameter,
     import,
+    type_alias,
+    interface,
+    class,
+    field,
+    method,
+};
+
+pub const SymbolNamespace = enum {
+    value,
+    type,
 };
 
 pub const Scope = struct {
@@ -32,6 +43,7 @@ pub const Symbol = struct {
     id: SymbolId,
     name: []const u8,
     kind: SymbolKind,
+    namespace: SymbolNamespace,
     scope: ScopeId,
     declaration: NodeId,
     span: tokens.Span,
@@ -45,12 +57,17 @@ pub const NodeSymbol = struct {
 pub const ImportRecord = struct {
     local_name: []const u8,
     source: []const u8,
+    kind: ast_mod.ImportSpecifierKind,
+    type_only: bool,
 };
 
 pub const ExportRecord = struct {
     name: []const u8,
     local_name: []const u8,
     node: NodeId,
+    kind: ast_mod.ExportKind = .local,
+    type_only: bool = false,
+    source: []const u8 = "",
 };
 
 pub const ModuleInfo = struct {
@@ -118,11 +135,13 @@ const Binder = struct {
                 for (program.statements) |statement| try self.bindNode(statement, scope);
             },
             .ImportDeclaration => |import_decl| {
-                for (import_decl.names) |name| {
-                    _ = try self.declare(scope, name, .import, node_id, node.span);
+                for (import_decl.specifiers) |specifier| {
+                    _ = try self.declareInNamespace(scope, specifier.local_name, .import, if (import_decl.type_only) .type else .value, node_id, specifier.local_span);
                     try self.imports.append(self.allocator, .{
-                        .local_name = name,
+                        .local_name = specifier.local_name,
                         .source = import_decl.source,
+                        .kind = specifier.kind,
+                        .type_only = import_decl.type_only,
                     });
                 }
             },
@@ -133,13 +152,15 @@ const Binder = struct {
                     try self.recordDeclarationExports(declaration);
                 } else {
                     for (export_decl.specifiers) |specifier| {
-                        try self.appendExport(specifier.exported_name, specifier.local_name, node_id);
+                        try self.appendExportDetails(specifier.exported_name, specifier.local_name, node_id, export_decl.kind, export_decl.type_only, export_decl.source);
                     }
                 }
 
+                if (export_decl.expression != ast_mod.invalid_node) try self.bindNode(export_decl.expression, scope);
+
                 // Any export record — default or named — counts toward module exports.
-                if (export_decl.default_name != null) {
-                    _ = try self.appendExport("default", export_decl.default_name.?, node_id);
+                if (export_decl.default_name != null or export_decl.kind == .default_expression) {
+                    _ = try self.appendExportDetails("default", export_decl.default_name orelse "", node_id, export_decl.kind, export_decl.type_only, export_decl.source);
                 }
             },
             .FunctionDeclaration => |function_decl| {
@@ -171,6 +192,38 @@ const Binder = struct {
                 }
                 try self.bindNode(function_expr.body, function_scope);
             },
+            .ClassDeclaration => |class_decl| {
+                const value_symbol = try self.declareInNamespace(scope, class_decl.name, .class, .value, node_id, node.span);
+                _ = try self.declareInNamespace(scope, class_decl.name, .class, .type, node_id, node.span);
+                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = value_symbol });
+                if (class_decl.super_class) |super_class| try self.bindNode(super_class, scope);
+                const class_scope = try self.addScope(.class, scope);
+                for (class_decl.members) |member| try self.bindNode(member, class_scope);
+            },
+            .ClassExpression => |class_expr| {
+                if (class_expr.super_class) |super_class| try self.bindNode(super_class, scope);
+                const class_scope = try self.addScope(.class, scope);
+                if (class_expr.name) |name| {
+                    const symbol_id = try self.declare(class_scope, name, .class, node_id, node.span);
+                    try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                }
+                for (class_expr.members) |member| try self.bindNode(member, class_scope);
+            },
+            .ClassField => |field| {
+                const symbol_id = try self.declare(scope, field.name, .field, node_id, node.span);
+                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                if (field.initializer) |initializer| try self.bindNode(initializer, scope);
+            },
+            .ClassMethod => |method| {
+                const symbol_id = try self.declare(scope, method.name, .method, node_id, node.span);
+                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                const function_scope = try self.addScope(.function, scope);
+                for (method.params) |param_id| switch (self.ast.node(param_id).data) {
+                    .Parameter => |param| _ = try self.declare(function_scope, param.name, .parameter, param_id, self.ast.node(param_id).span),
+                    else => {},
+                };
+                try self.bindNode(method.body, function_scope);
+            },
             .ArrowFunctionExpression => |arrow| {
                 const function_scope = try self.addScope(.function, scope);
                 for (arrow.params) |param_id| {
@@ -188,6 +241,14 @@ const Binder = struct {
             },
             .VariableDeclaration => |var_decl| {
                 for (var_decl.declarations) |declaration_id| try self.bindNode(declaration_id, scope);
+            },
+            .TypeAliasDeclaration => |decl| {
+                const symbol_id = try self.declareInNamespace(scope, decl.name, .type_alias, .type, node_id, node.span);
+                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+            },
+            .InterfaceDeclaration => |decl| {
+                const symbol_id = try self.declareInNamespace(scope, decl.name, .interface, .type, node_id, node.span);
+                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
             },
             .VariableDeclarator => |declarator| {
                 const symbol_id = try self.declare(scope, declarator.name, .variable, node_id, node.span);
@@ -282,10 +343,13 @@ const Binder = struct {
                 for (switch_case.consequent) |statement| try self.bindNode(statement, scope);
             },
             .ObjectExpression => |obj_expr| {
-                for (obj_expr.properties) |prop| try self.bindNode(prop.value, scope);
+                for (obj_expr.properties) |prop| {
+                    if (prop.computed_key) |key| try self.bindNode(key, scope);
+                    try self.bindNode(prop.value, scope);
+                }
             },
             .ArrayExpression => |arr| {
-                for (arr.elements) |elem| try self.bindNode(elem, scope);
+                for (arr.elements) |maybe_elem| if (maybe_elem) |elem| try self.bindNode(elem, scope);
             },
             else => {},
         }
@@ -298,10 +362,14 @@ const Binder = struct {
     }
 
     fn declare(self: *Binder, scope_id: ScopeId, name: []const u8, kind: SymbolKind, declaration: NodeId, span: tokens.Span) !SymbolId {
+        return self.declareInNamespace(scope_id, name, kind, .value, declaration, span);
+    }
+
+    fn declareInNamespace(self: *Binder, scope_id: ScopeId, name: []const u8, kind: SymbolKind, namespace: SymbolNamespace, declaration: NodeId, span: tokens.Span) !SymbolId {
         const scope = &self.scopes.items[@intCast(scope_id)];
         for (scope.symbols.items) |existing_id| {
             const existing = self.symbols.items[@intCast(existing_id)];
-            if (std.mem.eql(u8, existing.name, name)) {
+            if (existing.namespace == namespace and std.mem.eql(u8, existing.name, name)) {
                 try self.diagnostic_list.append(self.allocator, .{
                     .severity = .@"error",
                     .code = .duplicate_declaration,
@@ -318,6 +386,7 @@ const Binder = struct {
             .id = id,
             .name = name,
             .kind = kind,
+            .namespace = namespace,
             .scope = scope_id,
             .declaration = declaration,
             .span = span,
@@ -334,11 +403,18 @@ const Binder = struct {
                 for (var_decl.declarations) |declaration_id| try self.recordDeclarationExports(declaration_id);
             },
             .VariableDeclarator => |declarator| try self.appendExport(declarator.name, declarator.name, node_id),
+            .TypeAliasDeclaration => |decl| try self.appendExportDetails(decl.name, decl.name, node_id, .declaration, true, ""),
+            .InterfaceDeclaration => |decl| try self.appendExportDetails(decl.name, decl.name, node_id, .declaration, true, ""),
+            .ClassDeclaration => |decl| try self.appendExport(decl.name, decl.name, node_id),
             else => {},
         }
     }
 
     fn appendExport(self: *Binder, name: []const u8, local_name: []const u8, node_id: NodeId) !void {
+        return self.appendExportDetails(name, local_name, node_id, .declaration, false, "");
+    }
+
+    fn appendExportDetails(self: *Binder, name: []const u8, local_name: []const u8, node_id: NodeId, kind: ast_mod.ExportKind, type_only: bool, source: []const u8) !void {
         for (self.exports.items) |export_record| {
             if (std.mem.eql(u8, export_record.name, name)) {
                 try self.diagnostic_list.append(self.allocator, .{
@@ -356,6 +432,9 @@ const Binder = struct {
             .name = name,
             .local_name = local_name,
             .node = node_id,
+            .kind = kind,
+            .type_only = type_only,
+            .source = source,
         });
     }
 };
@@ -430,4 +509,104 @@ test "binder binds iteration variables in loop header scopes" {
         };
         try std.testing.expect(found);
     }
+}
+
+test "binder separates type declarations from values and rejects type duplicates" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator,
+        \\export type User = { name: string };
+        \\interface Profile { name: string; age?: number; }
+        \\export interface Admin extends User, Profile {}
+        \\const User = "value";
+    , true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const alias_id = parsed.ast.node(statements[0]).data.ExportDeclaration.declaration;
+    const alias = parsed.ast.node(alias_id).data.TypeAliasDeclaration;
+    const alias_members = parsed.ast.typeNode(alias.type_annotation.root).data.Object;
+    try std.testing.expectEqualStrings("name", alias_members[0].name);
+
+    const profile = parsed.ast.node(statements[1]).data.InterfaceDeclaration;
+    try std.testing.expect(parsed.ast.typeNode(profile.body).data.Object[1].optional);
+    const admin_id = parsed.ast.node(statements[2]).data.ExportDeclaration.declaration;
+    const admin = parsed.ast.node(admin_id).data.InterfaceDeclaration;
+    try std.testing.expectEqual(@as(usize, 2), admin.extends.len);
+    try std.testing.expectEqualStrings("User", parsed.ast.typeNode(admin.extends[0]).data.Named.name);
+
+    const bound = try bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
+    var type_user = false;
+    var value_user = false;
+    for (bound.symbols) |symbol| if (std.mem.eql(u8, symbol.name, "User")) {
+        type_user = type_user or symbol.namespace == .type;
+        value_user = value_user or symbol.namespace == .value;
+    };
+    try std.testing.expect(type_user and value_user);
+    try std.testing.expectEqual(@as(usize, 2), bound.module.exports.len);
+    try std.testing.expect(bound.module.exports[0].type_only);
+    try std.testing.expect(bound.module.exports[1].type_only);
+
+    const duplicate_scan = try scanner.scanAll(allocator, "type Same = string; interface Same {}", true);
+    const duplicate_parse = try parser.parse(allocator, duplicate_scan.tokens, .{});
+    const duplicate_bound = try bind(allocator, duplicate_parse.ast);
+    try std.testing.expectEqual(@as(usize, 1), duplicate_bound.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.duplicate_declaration, duplicate_bound.diagnostics[0].code);
+}
+
+test "classes bind dual declarations member and function scopes" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    const resolver = @import("resolver.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator,
+        \\class User {
+        \\  public name: string;
+        \\  constructor(name: string) { this.name = name; }
+        \\  greet(): string { return this.name; }
+        \\  static count: number = 0;
+        \\}
+        \\class Admin extends User {}
+        \\const Factory = class Named extends User { protected build() { return super.greet(); } };
+    , true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const bound = try bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+
+    var user_value = false;
+    var user_type = false;
+    var class_scopes: usize = 0;
+    var function_scopes: usize = 0;
+    for (bound.symbols) |symbol| if (std.mem.eql(u8, symbol.name, "User")) {
+        user_value = user_value or symbol.namespace == .value;
+        user_type = user_type or symbol.namespace == .type;
+    };
+    for (bound.scopes) |scope| switch (scope.kind) {
+        .class => class_scopes += 1,
+        .function => function_scopes += 1,
+        else => {},
+    };
+    try std.testing.expect(user_value and user_type);
+    try std.testing.expectEqual(@as(usize, 3), class_scopes);
+    try std.testing.expectEqual(@as(usize, 3), function_scopes);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const user = parsed.ast.node(statements[0]).data.ClassDeclaration;
+    try std.testing.expectEqual(@as(usize, 4), user.members.len);
+    try std.testing.expectEqual(ast_mod.AccessModifier.public, parsed.ast.node(user.members[0]).data.ClassField.access);
+    try std.testing.expectEqual(ast_mod.ClassMethodKind.constructor, parsed.ast.node(user.members[1]).data.ClassMethod.kind);
+    try std.testing.expect(parsed.ast.node(user.members[3]).data.ClassField.is_static);
+    try std.testing.expect(parsed.ast.node(statements[1]).data.ClassDeclaration.super_class != null);
 }

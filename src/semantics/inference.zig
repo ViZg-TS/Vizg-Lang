@@ -64,7 +64,7 @@ fn walkDeclarations(node_id: ast_mod.NodeId, tree: *const ast_mod.Ast, snapshot:
             switch (decl_node.data) {
                 .VariableDeclarator => |d| {
                     if (d.type_annotation == null or d.name.len == 0) continue;
-                    const ann_name = d.type_annotation.?.name;
+                    const ann_name = tree.annotationName(d.type_annotation.?) orelse continue;
                     const type_id = lookupBuiltinIdByName(ann_name) orelse continue;
 
                     snapshot.addDeclared(d.name, type_id);
