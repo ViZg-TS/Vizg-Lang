@@ -656,7 +656,7 @@ const Parser = struct {
 
         var params: std.ArrayList(NodeId) = .empty;
         errdefer params.deinit(self.allocator);
-        try self.parseParameterList(&params);
+        try self.parseParameterList(&params, false);
         _ = self.expect(.RParen, "expected )");
         const return_type: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
 
@@ -688,7 +688,7 @@ const Parser = struct {
 
         var params: std.ArrayList(NodeId) = .empty;
         errdefer params.deinit(self.allocator);
-        try self.parseParameterList(&params);
+        try self.parseParameterList(&params, false);
         _ = self.expect(.RParen, "expected )");
         const return_type: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
         const flags: ast_mod.FunctionFlags = .{ .is_async = is_async, .is_generator = is_generator };
@@ -796,7 +796,8 @@ const Parser = struct {
         if (self.eat(.LParen)) {
             var params: std.ArrayList(NodeId) = .empty;
             errdefer params.deinit(self.allocator);
-            try self.parseParameterList(&params);
+            const is_constructor = std.mem.eql(u8, name_token.lexeme, "constructor");
+            try self.parseParameterList(&params, is_constructor);
             _ = self.expect(.RParen, "expected )");
             const return_type = try self.parseOptionalTypeAnnotation();
             const flags: ast_mod.FunctionFlags = .{ .is_async = is_async, .is_generator = is_generator };
@@ -813,17 +814,20 @@ const Parser = struct {
                     .return_type = return_type,
                     .is_static = is_static,
                     .access = access,
-                    .kind = if (std.mem.eql(u8, name_token.lexeme, "constructor")) .constructor else .method,
+                    .kind = if (is_constructor) .constructor else .method,
                     .flags = flags,
                 } },
             });
         }
+        const optional_token: ?Token = if (self.at(.Question)) self.advance() else null;
+        const definite_token: ?Token = if (self.at(.Exclamation)) self.advance() else null;
+        if (optional_token != null and definite_token != null) self.reportAt(definite_token.?, "class field cannot be both optional and definite", .unexpected_token);
         const type_annotation = try self.parseOptionalTypeAnnotation();
         const initializer: ?NodeId = if (self.eat(.Equal)) try self.parseAssignmentExpression() else null;
         _ = self.eat(.Semicolon);
         return self.addNode(.{
             .span = joinSpans(start, self.previousOrCurrent().span),
-            .data = .{ .ClassField = .{ .name = name_token.lexeme, .type_annotation = type_annotation, .initializer = initializer, .is_static = is_static, .access = access } },
+            .data = .{ .ClassField = .{ .name = name_token.lexeme, .type_annotation = type_annotation, .initializer = initializer, .is_static = is_static, .access = access, .optional = optional_token != null, .definite = definite_token != null } },
         });
     }
 
@@ -1091,8 +1095,27 @@ const Parser = struct {
         return self.type_nodes.items[@intCast(id)].span;
     }
 
-    fn parseParameterList(self: *Parser, params: *std.ArrayList(NodeId)) !void {
+    fn parseParameterList(self: *Parser, params: *std.ArrayList(NodeId), allow_parameter_properties: bool) !void {
         while (!self.at(.RParen) and !self.at(.EOF)) {
+            var access: ast_mod.AccessModifier = .none;
+            var readonly = false;
+            var modifier_span: ?tokens.Span = null;
+            var first_modifier: ?Token = null;
+            while (self.at(.Identifier)) {
+                const token = self.current();
+                const next_access: ?ast_mod.AccessModifier = if (std.mem.eql(u8, token.lexeme, "public")) .public else if (std.mem.eql(u8, token.lexeme, "private")) .private else if (std.mem.eql(u8, token.lexeme, "protected")) .protected else null;
+                if (next_access) |value| {
+                    if (access != .none) self.reportAt(token, "duplicate parameter property access modifier", .unexpected_token);
+                    access = value;
+                } else if (std.mem.eql(u8, token.lexeme, "readonly")) {
+                    if (readonly) self.reportAt(token, "duplicate readonly modifier", .unexpected_token);
+                    readonly = true;
+                } else break;
+                if (first_modifier == null) first_modifier = token;
+                modifier_span = if (modifier_span) |span| joinSpans(span, token.span) else token.span;
+                _ = self.advance();
+            }
+            if (first_modifier != null and !allow_parameter_properties) self.reportAt(first_modifier.?, "parameter properties are only allowed in constructors", .unsupported_ts_syntax);
             const rest_token: ?Token = if (self.at(.Spread)) self.advance() else null;
             const param_token = self.expectIdentifierLike("expected parameter name");
             const optional_token: ?Token = if (self.at(.Question)) self.advance() else null;
@@ -1107,13 +1130,15 @@ const Parser = struct {
             }
             const end_span = if (initializer) |id| self.nodes.items[@intCast(id)].span else if (param_type) |annotation| annotation.span else if (optional_token) |token| token.span else param_token.span;
             try params.append(self.allocator, try self.addNode(.{
-                .span = joinSpans(if (rest_token) |token| token.span else param_token.span, end_span),
+                .span = joinSpans(if (modifier_span) |span| span else if (rest_token) |token| token.span else param_token.span, end_span),
                 .data = .{ .Parameter = .{
                     .name = param_token.lexeme,
                     .type_annotation = param_type,
                     .rest = rest_token != null,
                     .optional = optional_token != null,
                     .initializer = initializer,
+                    .access = access,
+                    .readonly = readonly,
                 } },
             }));
             if (!self.eat(.Comma)) break;
@@ -1616,7 +1641,7 @@ const Parser = struct {
         errdefer params.deinit(self.allocator);
         var return_type: ?ast_mod.TypeAnnotation = null;
         if (self.eat(.LParen)) {
-            try self.parseParameterList(&params);
+            try self.parseParameterList(&params, false);
             _ = self.expect(.RParen, "expected )");
             return_type = try self.parseOptionalTypeAnnotation();
         } else {
@@ -2057,7 +2082,7 @@ const Parser = struct {
         _ = self.expect(.LParen, "expected (");
         var params: std.ArrayList(NodeId) = .empty;
         errdefer params.deinit(self.allocator);
-        try self.parseParameterList(&params);
+        try self.parseParameterList(&params, false);
         _ = self.expect(.RParen, "expected )");
         const return_type = try self.parseOptionalTypeAnnotation();
         const flags: ast_mod.FunctionFlags = .{ .is_async = is_async, .is_generator = is_generator };
@@ -3512,4 +3537,34 @@ test "parser preserves optional and default parameters across callable forms" {
     var found_rest_last = false;
     for (malformed.diagnostics) |diagnostic| found_rest_last = found_rest_last or std.mem.eql(u8, diagnostic.message, "rest parameter must be last");
     try std.testing.expect(found_rest_last);
+}
+
+test "parser preserves constructor parameter properties and class field markers" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator,
+        \\class Item {
+        \\  value!: string;
+        \\  optional?: string;
+        \\  constructor(public name: string, readonly id: number) {}
+        \\}
+    , true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const class_decl = parsed.ast.node(parsed.ast.node(parsed.ast.root).data.Program.statements[0]).data.ClassDeclaration;
+    try std.testing.expect(parsed.ast.node(class_decl.members[0]).data.ClassField.definite);
+    try std.testing.expect(!parsed.ast.node(class_decl.members[0]).data.ClassField.optional);
+    try std.testing.expect(parsed.ast.node(class_decl.members[1]).data.ClassField.optional);
+    try std.testing.expect(!parsed.ast.node(class_decl.members[1]).data.ClassField.definite);
+    const constructor = parsed.ast.node(class_decl.members[2]).data.ClassMethod;
+    try std.testing.expectEqual(ast_mod.AccessModifier.public, parsed.ast.node(constructor.params[0]).data.Parameter.access);
+    try std.testing.expect(parsed.ast.node(constructor.params[1]).data.Parameter.readonly);
+
+    const invalid_scan = try scanner.scanAll(allocator, "function bad(public value: string) {} class C { method(readonly value: string) {} }", true);
+    const invalid = try parse(allocator, invalid_scan.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 2), invalid.diagnostics.len);
+    for (invalid.diagnostics) |diagnostic| try std.testing.expectEqualStrings("parameter properties are only allowed in constructors", diagnostic.message);
 }

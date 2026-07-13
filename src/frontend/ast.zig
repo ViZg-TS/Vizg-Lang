@@ -237,6 +237,8 @@ pub const Parameter = struct {
     rest: bool = false,
     optional: bool = false,
     initializer: ?NodeId = null,
+    access: AccessModifier = .none,
+    readonly: bool = false,
 };
 
 pub const AccessModifier = enum { none, public, private, protected };
@@ -260,6 +262,8 @@ pub const ClassField = struct {
     initializer: ?NodeId = null,
     is_static: bool = false,
     access: AccessModifier = .none,
+    optional: bool = false,
+    definite: bool = false,
 };
 
 pub const ClassMethodKind = enum { method, constructor };

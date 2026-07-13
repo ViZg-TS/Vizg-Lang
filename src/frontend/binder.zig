@@ -231,7 +231,13 @@ const Binder = struct {
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
                 const function_scope = try self.addScope(.function, scope);
                 for (method.params) |param_id| switch (self.ast.node(param_id).data) {
-                    .Parameter => |param| _ = try self.declare(function_scope, param.name, .parameter, param_id, self.ast.node(param_id).span),
+                    .Parameter => |param| {
+                        _ = try self.declare(function_scope, param.name, .parameter, param_id, self.ast.node(param_id).span);
+                        if (method.kind == .constructor and (param.access != .none or param.readonly)) {
+                            const property_symbol = try self.declare(scope, param.name, .field, param_id, self.ast.node(param_id).span);
+                            try self.node_symbols.append(self.allocator, .{ .node = param_id, .symbol = property_symbol });
+                        }
+                    },
                     else => {},
                 };
                 try self.bindParameterInitializers(method.params, function_scope);
@@ -672,6 +678,30 @@ test "classes bind dual declarations member and function scopes" {
     try std.testing.expectEqual(ast_mod.ClassMethodKind.constructor, parsed.ast.node(user.members[1]).data.ClassMethod.kind);
     try std.testing.expect(parsed.ast.node(user.members[3]).data.ClassField.is_static);
     try std.testing.expect(parsed.ast.node(statements[1]).data.ClassDeclaration.super_class != null);
+}
+
+test "constructor parameter properties bind class members and diagnose conflicts" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator, "class Item { constructor(public name: string, readonly id: number) {} }", true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    const bound = try bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
+    var property_count: usize = 0;
+    for (bound.symbols) |symbol| if (symbol.kind == .field and (std.mem.eql(u8, symbol.name, "name") or std.mem.eql(u8, symbol.name, "id"))) {
+        property_count += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), property_count);
+
+    const duplicate_scan = try scanner.scanAll(allocator, "class Conflict { name: string; constructor(public name: string) {} }", true);
+    const duplicate_parse = try parser.parse(allocator, duplicate_scan.tokens, .{});
+    const duplicate_bound = try bind(allocator, duplicate_parse.ast);
+    try std.testing.expectEqual(@as(usize, 1), duplicate_bound.diagnostics.len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.duplicate_declaration, duplicate_bound.diagnostics[0].code);
 }
 
 test "enums bind value type and member namespaces" {

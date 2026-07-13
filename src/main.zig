@@ -421,7 +421,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             for (expr.members) |member| try printAstNode(writer, tree, member, depth + 1);
         },
         .ClassField => |field| {
-            try writer.print("ClassField #{} name=\"{s}\" static={} access={s} {}..{}\n", .{ node_id, field.name, field.is_static, @tagName(field.access), node.span.start, node.span.end });
+            try writer.print("ClassField #{} name=\"{s}\" static={} access={s} optional={} definite={} {}..{}\n", .{ node_id, field.name, field.is_static, @tagName(field.access), field.optional, field.definite, node.span.start, node.span.end });
             if (field.type_annotation) |annotation| try printTypeNode(writer, tree, annotation.root, depth + 1);
             if (field.initializer) |initializer| try printAstNode(writer, tree, initializer, depth + 1);
         },
@@ -438,7 +438,7 @@ fn printAstNode(writer: *Io.Writer, tree: ast_mod.Ast, node_id: ast_mod.NodeId, 
             try printAstNode(writer, tree, arrow.body, depth + 1);
         },
         .Parameter => |param| {
-            try writer.print("Parameter #{} name=\"{s}\" rest={} optional={}", .{ node_id, param.name, param.rest, param.optional });
+            try writer.print("Parameter #{} name=\"{s}\" rest={} optional={} access={s} readonly={}", .{ node_id, param.name, param.rest, param.optional, @tagName(param.access), param.readonly });
             if (param.type_annotation) |annotation| try writer.print(" type=#{}", .{annotation.root});
             if (param.initializer) |initializer| try writer.print(" initializer=#{}", .{initializer});
             try writer.print(" {}..{}\n", .{ node.span.start, node.span.end });
