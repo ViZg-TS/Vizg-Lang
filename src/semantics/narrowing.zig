@@ -113,17 +113,47 @@ const Analyzer = struct {
             .UnaryExpression => |value| try self.processExpr(value.argument, facts),
             .BinaryExpression => |value| {
                 try self.processExpr(value.left, facts);
-                try self.processExpr(value.right, facts);
+                switch (value.operator) {
+                    .AmpersandAmpersand, .BarBar, .QuestionQuestion => {
+                        var skipped = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                        defer skipped.deinit();
+                        var taken = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                        defer taken.deinit();
+                        if (value.operator == .QuestionQuestion) {
+                            try self.applyNullishGuard(value.left, true, &skipped);
+                            try self.applyNullishGuard(value.left, false, &taken);
+                        } else {
+                            const execute_when_truthy = value.operator == .AmpersandAmpersand;
+                            try self.applyGuard(value.left, !execute_when_truthy, &skipped);
+                            try self.applyGuard(value.left, execute_when_truthy, &taken);
+                        }
+                        try self.processExpr(value.right, &taken);
+                        try self.joinExpressionStates(facts, &skipped, &taken);
+                    },
+                    else => try self.processExpr(value.right, facts),
+                }
             },
             .AssignmentExpression => |value| {
-                try self.processExpr(value.right, facts);
                 try self.processExpr(value.left, facts);
-                if (self.symbolForNode(value.left)) |symbol| {
-                    const replacement = self.nodeType(node_id);
-                    if (replacement == self.store.builtins.unknown or replacement == self.store.builtins.any)
-                        self.removeFact(facts, symbol)
-                    else
-                        try self.setFact(facts, symbol, replacement);
+                if (value.operator == .AmpersandAmpersandEqual or value.operator == .BarBarEqual or value.operator == .QuestionQuestionEqual) {
+                    var skipped = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                    defer skipped.deinit();
+                    var taken = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                    defer taken.deinit();
+                    if (value.operator == .QuestionQuestionEqual) {
+                        try self.applyNullishGuard(value.left, true, &taken);
+                        try self.applyNullishGuard(value.left, false, &skipped);
+                    } else {
+                        const execute_when_truthy = value.operator == .AmpersandAmpersandEqual;
+                        try self.applyGuard(value.left, execute_when_truthy, &taken);
+                        try self.applyGuard(value.left, !execute_when_truthy, &skipped);
+                    }
+                    try self.processExpr(value.right, &taken);
+                    try self.replaceAssignmentFact(value.left, self.nodeType(value.right), &taken);
+                    try self.joinExpressionStates(facts, &skipped, &taken);
+                } else {
+                    try self.processExpr(value.right, facts);
+                    try self.replaceAssignmentFact(value.left, self.nodeType(node_id), facts);
                 }
             },
             .UpdateExpression => |value| {
@@ -132,9 +162,17 @@ const Analyzer = struct {
             },
             .CallExpression => |value| {
                 try self.processExpr(value.callee, facts);
-                for (value.arguments) |argument| try self.processExpr(argument, facts);
-                if (self.nodeType(value.callee) == self.store.builtins.unknown or self.nodeType(value.callee) == self.store.builtins.any)
-                    facts.clear();
+                if (self.optionalChainBase(value.callee) != null or value.optional) {
+                    var skipped = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                    defer skipped.deinit();
+                    var taken = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                    defer taken.deinit();
+                    const guard = self.optionalChainBase(value.callee) orelse value.callee;
+                    try self.applyNullishGuard(guard, true, &skipped);
+                    try self.applyNullishGuard(guard, false, &taken);
+                    try self.processCallTail(value.callee, value.arguments, &taken);
+                    try self.joinExpressionStates(facts, &skipped, &taken);
+                } else try self.processCallTail(value.callee, value.arguments, facts);
             },
             .NewExpression => |value| {
                 try self.processExpr(value.callee, facts);
@@ -143,7 +181,17 @@ const Analyzer = struct {
             .MemberExpression => |value| try self.processExpr(value.object, facts),
             .ElementAccessExpression => |value| {
                 try self.processExpr(value.object, facts);
-                try self.processExpr(value.index, facts);
+                if (self.optionalChainBase(value.object) != null or value.optional) {
+                    var skipped = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                    defer skipped.deinit();
+                    var taken = try dataflow.StateBuilder.initFrom(self.allocator, facts.facts.items);
+                    defer taken.deinit();
+                    const guard = self.optionalChainBase(value.object) orelse value.object;
+                    try self.applyNullishGuard(guard, true, &skipped);
+                    try self.applyNullishGuard(guard, false, &taken);
+                    try self.processExpr(value.index, &taken);
+                    try self.joinExpressionStates(facts, &skipped, &taken);
+                } else try self.processExpr(value.index, facts);
             },
             .AsExpression => |value| try self.processExpr(value.expression, facts),
             .SatisfiesExpression => |value| try self.processExpr(value.expression, facts),
@@ -158,6 +206,7 @@ const Analyzer = struct {
                 defer no.deinit();
                 try self.applyGuard(value.condition, false, &no);
                 try self.processExpr(value.alternate, &no);
+                try self.joinExpressionStates(facts, &yes, &no);
             },
             .SequenceExpression => |value| for (value.expressions) |child| try self.processExpr(child, facts),
             .ArrayExpression => |value| for (value.elements) |element| if (element) |child| try self.processExpr(child, facts),
@@ -166,6 +215,47 @@ const Analyzer = struct {
             .YieldExpression => |value| if (value.argument) |argument| try self.processExpr(argument, facts),
             else => {},
         }
+    }
+
+    fn processCallTail(self: *Analyzer, callee: ast.NodeId, arguments: []const ast.NodeId, facts: *dataflow.StateBuilder) !void {
+        for (arguments) |argument| try self.processExpr(argument, facts);
+        if (self.nodeType(callee) == self.store.builtins.unknown or self.nodeType(callee) == self.store.builtins.any)
+            facts.clear();
+    }
+
+    fn replaceAssignmentFact(self: *Analyzer, target: ast.NodeId, replacement: types.TypeId, facts: *dataflow.StateBuilder) !void {
+        const symbol = self.symbolForNode(target) orelse return;
+        if (replacement == self.store.builtins.unknown or replacement == self.store.builtins.any)
+            self.removeFact(facts, symbol)
+        else
+            try self.setFact(facts, symbol, replacement);
+    }
+
+    fn joinExpressionStates(self: *Analyzer, output: *dataflow.StateBuilder, left: *const dataflow.StateBuilder, right: *const dataflow.StateBuilder) !void {
+        var joined: dataflow.StateBuilder = .{ .allocator = self.allocator };
+        defer joined.deinit();
+        for (left.facts.items) |fact| {
+            const right_value = right.get(fact.key) orelse continue;
+            if (try self.mergeValues(fact.key, fact.value, right_value)) |value|
+                try joined.set(fact.key, value);
+        }
+        output.clear();
+        try output.facts.appendSlice(self.allocator, joined.facts.items);
+    }
+
+    fn applyNullishGuard(self: *Analyzer, node_id: ast.NodeId, keep_nullish: bool, facts: *dataflow.StateBuilder) !void {
+        const symbol = self.symbolForNode(node_id) orelse return;
+        try self.setFact(facts, symbol, try self.filterNullish(self.currentType(facts, symbol), keep_nullish));
+    }
+
+    fn optionalChainBase(self: *Analyzer, node_id: ast.NodeId) ?ast.NodeId {
+        if (!self.valid(node_id)) return null;
+        return switch (self.frontend_result.ast.node(node_id).data) {
+            .MemberExpression => |value| if (value.optional) value.object else self.optionalChainBase(value.object),
+            .ElementAccessExpression => |value| if (value.optional) value.object else self.optionalChainBase(value.object),
+            .CallExpression => |value| if (value.optional) value.callee else self.optionalChainBase(value.callee),
+            else => null,
+        };
     }
 
     fn applyGuard(self: *Analyzer, node_id: ast.NodeId, truthy: bool, facts: *dataflow.StateBuilder) anyerror!void {
@@ -266,6 +356,10 @@ const Analyzer = struct {
             .union_type => .maybe,
             .function, .promise, .generator, .array, .tuple, .object, .class, .class_constructor, .interface => .always_truthy,
             .intersection, .enum_type, .type_parameter => .maybe,
+            .applied_generic => blk: {
+                const target = self.store.resolveAppliedTarget(type_id) catch break :blk .maybe;
+                break :blk if (target == type_id) .maybe else self.classifyTruthiness(target);
+            },
         };
     }
 
@@ -322,6 +416,10 @@ const Analyzer = struct {
             },
             .class => |instance| self.classHasProperty(instance.identity, name, self.store.count() + 1),
             .interface => |interface| self.interfaceHasProperty(interface.identity, name, self.store.count() + 1),
+            .applied_generic => blk: {
+                const target = self.store.resolveAppliedTarget(type_id) catch break :blk false;
+                break :blk target != type_id and self.hasProperty(target, name);
+            },
             else => false,
         };
     }

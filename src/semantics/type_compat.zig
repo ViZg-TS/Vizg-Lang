@@ -100,12 +100,12 @@ pub fn isAssignable(
 }
 
 /// Full store-aware result used by assignments, calls, returns, and satisfies.
-pub fn check(source: types.TypeId, target: types.TypeId, store: *const types.TypeStore) CompatibilityResult {
+pub fn check(source: types.TypeId, target: types.TypeId, store: *types.TypeStore) CompatibilityResult {
     var checker = Checker{ .store = store };
     return checker.compare(source, target);
 }
 
-pub fn isAssignableInStore(source: types.TypeId, target: types.TypeId, store: *const types.TypeStore) bool {
+pub fn isAssignableInStore(source: types.TypeId, target: types.TypeId, store: *types.TypeStore) bool {
     return check(source, target, store).isCompatible();
 }
 
@@ -113,7 +113,7 @@ const Pair = struct { source: types.TypeId, target: types.TypeId };
 const max_pairs = 256;
 
 const Checker = struct {
-    store: *const types.TypeStore,
+    store: *types.TypeStore,
     active: [max_pairs]Pair = undefined,
     active_len: usize = 0,
     successful: [max_pairs]Pair = undefined,
@@ -144,6 +144,18 @@ const Checker = struct {
     }
 
     fn compareInner(self: *Checker, source: types.TypeId, target: types.TypeId) CompatibilityResult {
+        if (self.store.lookup(source)) |source_type| if (source_type.kind == .applied_generic) {
+            if (!self.isAppliedNominal(source_type.kind.applied_generic)) {
+                const resolved = self.store.resolveAppliedTarget(source) catch return self.fail(.invalid_type, source, target);
+                if (resolved != source) return self.compare(resolved, target);
+            }
+        };
+        if (self.store.lookup(target)) |target_type| if (target_type.kind == .applied_generic) {
+            if (!self.isAppliedNominal(target_type.kind.applied_generic)) {
+                const resolved = self.store.resolveAppliedTarget(target) catch return self.fail(.invalid_type, source, target);
+                if (resolved != target) return self.compare(source, resolved);
+            }
+        };
         const b = &self.store.builtins;
         const source_builtin = b.kindFor(source);
         const target_builtin = b.kindFor(target);
@@ -155,6 +167,9 @@ const Checker = struct {
 
         const source_type = self.store.lookup(source) orelse return self.fail(.invalid_type, source, target);
         const target_type = self.store.lookup(target) orelse return self.fail(.invalid_type, source, target);
+
+        if (target_type.kind == .applied_generic and self.appliedInterface(target_type.kind.applied_generic) != null)
+            return self.compareAppliedInterfaceTarget(source, target, target_type.kind.applied_generic, 0);
 
         if (source_type.kind == .union_type) {
             for (source_type.kind.union_type, 0..) |member, index| {
@@ -185,6 +200,12 @@ const Checker = struct {
             }
             return .compatible;
         }
+        // An intersection's structural surface is the combination of all of
+        // its constituents, not a choice of one constituent.
+        if (source_type.kind == .intersection and target_type.kind == .interface)
+            return self.compareInterfaceTarget(source, target, target_type.kind.interface, 0);
+        if (source_type.kind == .intersection and target_type.kind == .object)
+            return self.compareTargetProperties(source, target, target_type.kind.object);
         if (source_type.kind == .intersection) {
             for (source_type.kind.intersection, 0..) |member, index| {
                 self.push(.{ .source_union_member = index });
@@ -201,7 +222,7 @@ const Checker = struct {
             }
             return if (literalPrimitive(source_type.kind.literal, b) == target) .compatible else self.fail(.literal_mismatch, source, target);
         }
-        if (target_builtin == .object and isObjectLike(source_type.kind)) return .compatible;
+        if (target_builtin == .object and (isObjectLike(source_type.kind) or source_type.kind == .applied_generic)) return .compatible;
 
         // Interfaces are structural sinks. Anonymous object shapes, other
         // interfaces, and class instances may satisfy their required members.
@@ -209,7 +230,7 @@ const Checker = struct {
             return self.compareInterfaceTarget(source, target, target_type.kind.interface, 0);
         // Anonymous object annotations are also structural when the source is
         // a declared interface or class instance.
-        if (target_type.kind == .object and (source_type.kind == .interface or source_type.kind == .class))
+        if (target_type.kind == .object and (source_type.kind == .interface or source_type.kind == .class or source_type.kind == .applied_generic))
             return self.compareTargetProperties(source, target, target_type.kind.object);
 
         if (std.meta.activeTag(source_type.kind) != std.meta.activeTag(target_type.kind)) {
@@ -233,6 +254,7 @@ const Checker = struct {
             .class, .class_constructor, .enum_type, .type_parameter => if (self.store.structurallyEqual(source, target)) .compatible else self.fail(.incompatible_kind, source, target),
             .interface => unreachable,
             .union_type, .intersection => unreachable,
+            .applied_generic => if (self.store.structurallyEqual(source, target)) .compatible else self.fail(.incompatible_kind, source, target),
         };
     }
 
@@ -341,6 +363,53 @@ const Checker = struct {
         return .compatible;
     }
 
+    fn compareAppliedInterfaceTarget(
+        self: *Checker,
+        source: types.TypeId,
+        target: types.TypeId,
+        applied: types.AppliedGenericType,
+        depth: usize,
+    ) CompatibilityResult {
+        if (depth == max_path_segments) return self.fail(.recursion_limit, source, target);
+        const declaration = self.store.lookupGenericDeclaration(applied.declaration) orelse return self.fail(.invalid_type, source, target);
+        const interface = self.appliedInterface(applied) orelse return self.fail(.incompatible_kind, source, target);
+        const semantic = self.store.lookupInterfaceSemanticType(interface.identity);
+        const members = if (semantic) |value| value.members.members else interface.members.members;
+        for (members) |raw_member| {
+            var target_member = raw_member;
+            target_member.type_id = self.store.substitute(raw_member.type_id, declaration.parameters, applied.arguments) catch
+                return self.fail(.invalid_type, source, target);
+            const source_member = self.findStructuralMember(source, target_member.name, 0) orelse {
+                if (target_member.optional) continue;
+                self.push(.{ .property = target_member.name });
+                const result = self.fail(.missing_property, source, target);
+                self.pop();
+                return result;
+            };
+            self.push(.{ .property = target_member.name });
+            if (source_member.optional and !target_member.optional) {
+                const result = self.fail(.optional_mismatch, source_member.type_id, target_member.type_id);
+                self.pop();
+                return result;
+            }
+            if (source_member.readonly and !target_member.readonly) {
+                const result = self.fail(.readonly_mismatch, source_member.type_id, target_member.type_id);
+                self.pop();
+                return result;
+            }
+            const result = self.compare(source_member.type_id, target_member.type_id);
+            self.pop();
+            if (result != .compatible) return result;
+        }
+        if (semantic) |value| for (value.inheritance.extends) |raw_base| {
+            const base = self.store.substitute(raw_base, declaration.parameters, applied.arguments) catch
+                return self.fail(.invalid_type, source, target);
+            const result = self.compare(source, base);
+            if (result != .compatible) return result;
+        };
+        return .compatible;
+    }
+
     fn findStructuralMember(self: *Checker, source: types.TypeId, name: []const u8, depth: usize) ?types.SemanticMember {
         if (depth == max_path_segments) return null;
         const source_type = self.store.lookup(source) orelse return null;
@@ -366,8 +435,63 @@ const Checker = struct {
                     if (self.findStructuralMember(base, name, depth + 1)) |member| break :blk member;
                 break :blk null;
             },
+            .applied_generic => blk: {
+                const applied = source_type.kind.applied_generic;
+                const declaration = self.store.lookupGenericDeclaration(applied.declaration) orelse break :blk null;
+                if (self.appliedInterface(applied)) |interface| {
+                    const semantic = self.store.lookupInterfaceSemanticType(interface.identity);
+                    const members = if (semantic) |value| value.members.members else interface.members.members;
+                    for (members) |raw_member| if (std.mem.eql(u8, raw_member.name, name)) {
+                        var member = raw_member;
+                        member.type_id = self.store.substitute(raw_member.type_id, declaration.parameters, applied.arguments) catch break :blk null;
+                        break :blk member;
+                    };
+                    if (semantic) |value| for (value.inheritance.extends) |raw_base| {
+                        const base = self.store.substitute(raw_base, declaration.parameters, applied.arguments) catch continue;
+                        if (self.findStructuralMember(base, name, depth + 1)) |member| break :blk member;
+                    };
+                    break :blk null;
+                }
+                if (self.appliedClass(applied)) |class| {
+                    const semantic = self.store.lookupClassSemanticType(class.identity) orelse break :blk null;
+                    for (semantic.instance_members.members) |raw_member| if (std.mem.eql(u8, raw_member.name, name)) {
+                        var member = raw_member;
+                        member.type_id = self.store.substitute(raw_member.type_id, declaration.parameters, applied.arguments) catch break :blk null;
+                        break :blk member;
+                    };
+                    if (semantic.inheritance.extends) |raw_base| {
+                        const base = self.store.substitute(raw_base, declaration.parameters, applied.arguments) catch break :blk null;
+                        if (self.findStructuralMember(base, name, depth + 1)) |member| break :blk member;
+                    }
+                    break :blk null;
+                }
+                const resolved = self.store.resolveAppliedTarget(source) catch break :blk null;
+                if (resolved == source) break :blk null;
+                break :blk self.findStructuralMember(resolved, name, depth + 1);
+            },
+            .intersection => |members| blk: {
+                for (members) |member| if (self.findStructuralMember(member, name, depth + 1)) |property|
+                    break :blk property;
+                break :blk null;
+            },
             else => null,
         };
+    }
+
+    fn isAppliedNominal(self: *Checker, applied: types.AppliedGenericType) bool {
+        return self.appliedInterface(applied) != null or self.appliedClass(applied) != null;
+    }
+
+    fn appliedInterface(self: *Checker, applied: types.AppliedGenericType) ?types.InterfaceType {
+        const declaration = self.store.lookupGenericDeclaration(applied.declaration) orelse return null;
+        const template = self.store.lookup(declaration.template_type) orelse return null;
+        return if (template.kind == .interface) template.kind.interface else null;
+    }
+
+    fn appliedClass(self: *Checker, applied: types.AppliedGenericType) ?types.ClassInstanceType {
+        const declaration = self.store.lookupGenericDeclaration(applied.declaration) orelse return null;
+        const template = self.store.lookup(declaration.template_type) orelse return null;
+        return if (template.kind == .class) template.kind.class else null;
     }
 
     fn compareFunctions(self: *Checker, source: types.TypeId, target: types.TypeId) CompatibilityResult {
@@ -763,4 +887,19 @@ test "Goal 122 invalid error type suppresses cascades" {
     var store = types.TypeStore.init(arena.allocator());
     try testing.expect(check(types.invalid_type, store.builtins.number, &store).isCompatible());
     try testing.expect(check(store.builtins.number, types.invalid_type, &store).isCompatible());
+}
+
+test "Goal 156 source intersections combine structural members" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var store = types.TypeStore.init(arena.allocator());
+    const left = try store.intern(.{ .object = &.{.{ .name = "left", .type_id = store.builtins.number }} });
+    const right = try store.intern(.{ .object = &.{.{ .name = "right", .type_id = store.builtins.string }} });
+    const source = try store.intersectionOf(&.{ left, right });
+    const target = try store.intern(.{ .object = &.{
+        .{ .name = "left", .type_id = store.builtins.number },
+        .{ .name = "right", .type_id = store.builtins.string },
+    } });
+
+    try testing.expect(check(source, target, &store).isCompatible());
 }

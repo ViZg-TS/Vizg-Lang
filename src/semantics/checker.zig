@@ -3,12 +3,17 @@ const std = @import("std");
 const ast_mod = @import("../frontend/ast.zig");
 const frontend = @import("../frontend/frontend.zig");
 const binder = @import("../frontend/binder.zig");
+const function_like = @import("../frontend/function_like.zig");
 const tokens = @import("../frontend/tokens.zig");
 const diagnostics = @import("../diagnostics/root.zig");
 const types = @import("../types/root.zig");
 const type_compat = @import("type_compat.zig");
 const type_info_mod = @import("type_info.zig");
 const type_inference = @import("type_inference.zig");
+
+fn isValidNode(tree: *const ast_mod.Ast, node_id: ast_mod.NodeId) bool {
+    return node_id != ast_mod.invalid_node and @as(usize, node_id) < tree.nodes.len;
+}
 
 /// Checker v2 consumes the canonical semantic tables. It does not parse source,
 /// resolve annotation text, or infer expression types.
@@ -28,7 +33,7 @@ pub fn checkFile(
             .AssignmentExpression => |assignment| try checkAssignment(allocator, tree, type_info, store, node_id, assignment, &out),
             .CallExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, false, &out),
             .NewExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, true, &out),
-            .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression => try checkFunctionReturns(allocator, result, type_info, store, node_id, &out),
+            .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassMethod => try checkFunctionReturns(allocator, result, type_info, store, node_id, &out),
             else => try emitInferenceIssue(allocator, tree, type_info, node_id, &out),
         }
     }
@@ -187,30 +192,96 @@ fn checkFunctionReturns(
     out: *std.ArrayList(diagnostics.Diagnostic),
 ) !void {
     const node = result.ast.node(function_id);
-    const body: ast_mod.NodeId = switch (node.data) {
-        .FunctionDeclaration => |function| if (function.return_type != null) function.body else return,
-        .FunctionExpression => |function| if (function.return_type != null) function.body else return,
-        .ArrowFunctionExpression => |function| if (function.return_type != null) function.body else return,
-        else => return,
-    };
-    const expression_body = switch (node.data) {
-        .ArrowFunctionExpression => |function| function.expression_body,
-        else => false,
-    };
+    const function = function_like.describe(result.ast, function_id) orelse return;
+    try checkFunctionLikeRules(allocator, &result.ast, function, out);
+    // Recovery can retain the callable declaration while omitting its body.
+    if (!isValidNode(&result.ast, function.body)) return;
+    if (function.kind == .constructor or function.kind == .setter)
+        try checkForbiddenReturnValues(allocator, &result.ast, function.body, function.kind, node.span, out);
+    if (function.return_type == null) return;
     const function_type = functionType(result.bind, type_info, function_id) orelse return;
     const signature = store.lookupFunction(function_type) orelse return;
     const expected = unwrappedReturn(signature, store);
-    if (expression_body) {
-        const actual = resolvedNode(type_info, body, store) orelse return;
+    if (function.expression_body) {
+        const actual = resolvedNode(type_info, function.body, store) orelse return;
         if (!type_compat.check(actual, expected, store).isCompatible())
-            try appendDiagnostic(allocator, out, .type_mismatch, "returned expression is not assignable to the declared return type", "incompatible return", result.ast.node(body).span, node.span, "function return type is declared here");
+            try appendDiagnostic(allocator, out, .type_mismatch, "returned expression is not assignable to the declared return type", "incompatible return", result.ast.node(function.body).span, node.span, "function return type is declared here");
         return;
     }
-    try checkReturnsIn(allocator, &result.ast, type_info, store, body, expected, node.span, out);
+    try checkReturnsIn(allocator, &result.ast, type_info, store, function.body, expected, node.span, out);
     if (try type_inference.hasReachableFallthrough(allocator, function_id, result.ast, result.cfgs) and
         !type_compat.check(store.builtins.undefined, expected, store).isCompatible())
     {
-        try appendDiagnostic(allocator, out, .type_mismatch, "reachable function exit returns undefined", "incompatible fallthrough", result.ast.node(body).span, node.span, "function return type is declared here");
+        try appendDiagnostic(allocator, out, .type_mismatch, "reachable function exit returns undefined", "incompatible fallthrough", result.ast.node(function.body).span, node.span, "function return type is declared here");
+    }
+}
+
+fn checkFunctionLikeRules(
+    allocator: std.mem.Allocator,
+    tree: *const ast_mod.Ast,
+    function: function_like.Descriptor,
+    out: *std.ArrayList(diagnostics.Diagnostic),
+) !void {
+    const span = tree.node(function.node).span;
+    if ((function.kind == .constructor or function.isAccessor()) and
+        (function.flags.is_async or function.flags.is_generator))
+    {
+        try appendDiagnostic(allocator, out, .type_mismatch, "constructors and accessors cannot be async or generators", "invalid callable flags", span, span, "callable is declared here");
+    }
+    if (function.kind == .constructor and function.return_type != null)
+        try appendDiagnostic(allocator, out, .type_mismatch, "constructors cannot declare a return type", "invalid constructor return type", function.return_type.?.span, span, "constructor is declared here");
+    if (function.kind == .getter and function.params.len != 0)
+        try appendDiagnostic(allocator, out, .type_mismatch, "getters cannot declare parameters", "invalid getter parameters", if (isValidNode(tree, function.params[0])) tree.node(function.params[0]).span else span, span, "getter is declared here");
+    if (function.kind == .setter) {
+        if (function.return_type != null)
+            try appendDiagnostic(allocator, out, .type_mismatch, "setters cannot declare a return type", "invalid setter return type", function.return_type.?.span, span, "setter is declared here");
+        var valid_parameter = function.params.len == 1 and isValidNode(tree, function.params[0]);
+        if (valid_parameter) switch (tree.node(function.params[0]).data) {
+            .Parameter => |parameter| valid_parameter = !parameter.optional and parameter.initializer == null and !parameter.rest,
+            else => valid_parameter = false,
+        };
+        if (!valid_parameter)
+            try appendDiagnostic(allocator, out, .type_mismatch, "setters require exactly one required non-rest parameter", "invalid setter parameter", if (function.params.len != 0 and isValidNode(tree, function.params[0])) tree.node(function.params[0]).span else span, span, "setter is declared here");
+    }
+}
+
+fn checkForbiddenReturnValues(
+    allocator: std.mem.Allocator,
+    tree: *const ast_mod.Ast,
+    node_id: ast_mod.NodeId,
+    kind: function_like.Kind,
+    function_span: tokens.Span,
+    out: *std.ArrayList(diagnostics.Diagnostic),
+) !void {
+    if (!isValidNode(tree, node_id)) return;
+    const node = tree.node(node_id);
+    switch (node.data) {
+        .ReturnStatement => |statement| if (statement.argument) |argument| {
+            if (!isValidNode(tree, argument)) return;
+            const message = if (kind == .constructor) "constructors cannot return a value" else "setters cannot return a value";
+            try appendDiagnostic(allocator, out, .type_mismatch, message, "invalid return value", tree.node(argument).span, function_span, "callable is declared here");
+        },
+        .Program => |program| for (program.statements) |child| try checkForbiddenReturnValues(allocator, tree, child, kind, function_span, out),
+        .BlockStatement => |block| for (block.statements) |child| try checkForbiddenReturnValues(allocator, tree, child, kind, function_span, out),
+        .IfStatement => |statement| {
+            try checkForbiddenReturnValues(allocator, tree, statement.consequent, kind, function_span, out);
+            if (statement.alternate) |child| try checkForbiddenReturnValues(allocator, tree, child, kind, function_span, out);
+        },
+        .WhileStatement => |statement| try checkForbiddenReturnValues(allocator, tree, statement.body, kind, function_span, out),
+        .DoWhileStatement => |statement| try checkForbiddenReturnValues(allocator, tree, statement.body, kind, function_span, out),
+        .ForStatement => |statement| try checkForbiddenReturnValues(allocator, tree, statement.body, kind, function_span, out),
+        .SwitchStatement => |statement| for (statement.cases) |child| try checkForbiddenReturnValues(allocator, tree, child, kind, function_span, out),
+        .SwitchCase => |case| for (case.consequent) |child| try checkForbiddenReturnValues(allocator, tree, child, kind, function_span, out),
+        .TryStatement => |statement| {
+            try checkForbiddenReturnValues(allocator, tree, statement.block, kind, function_span, out);
+            if (statement.handler) |child| try checkForbiddenReturnValues(allocator, tree, child, kind, function_span, out);
+            if (statement.finalizer) |child| try checkForbiddenReturnValues(allocator, tree, child, kind, function_span, out);
+        },
+        .CatchClause => |clause| try checkForbiddenReturnValues(allocator, tree, clause.body, kind, function_span, out),
+        .FinallyClause => |clause| try checkForbiddenReturnValues(allocator, tree, clause.body, kind, function_span, out),
+        .LabeledStatement => |statement| try checkForbiddenReturnValues(allocator, tree, statement.body, kind, function_span, out),
+        .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassMethod, .ClassDeclaration, .ClassExpression => {},
+        else => {},
     }
 }
 
@@ -224,9 +295,11 @@ fn checkReturnsIn(
     function_span: tokens.Span,
     out: *std.ArrayList(diagnostics.Diagnostic),
 ) !void {
+    if (!isValidNode(tree, node_id)) return;
     const node = tree.node(node_id);
     switch (node.data) {
         .ReturnStatement => |statement| {
+            if (statement.argument) |argument| if (!isValidNode(tree, argument)) return;
             const actual = if (statement.argument) |argument| resolvedNode(type_info, argument, store) orelse return else store.builtins.undefined;
             if (type_compat.check(actual, expected, store).isCompatible()) return;
             const span = if (statement.argument) |argument| tree.node(argument).span else node.span;
@@ -251,7 +324,7 @@ fn checkReturnsIn(
         .CatchClause => |clause| try checkReturnsIn(allocator, tree, type_info, store, clause.body, expected, function_span, out),
         .FinallyClause => |clause| try checkReturnsIn(allocator, tree, type_info, store, clause.body, expected, function_span, out),
         .LabeledStatement => |statement| try checkReturnsIn(allocator, tree, type_info, store, statement.body, expected, function_span, out),
-        .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassDeclaration, .ClassExpression => {},
+        .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassMethod, .ClassDeclaration, .ClassExpression => {},
         else => {},
     }
 }
@@ -350,7 +423,7 @@ fn checkAggregateElementMismatch(
                 }
                 const actual_index = found orelse continue; // key missing in actual — keep generic diagnostic for now
                 const act_prop = actual_props[actual_index];
-                if (act_prop.type_id == exp_prop.type_id) continue;
+                if (type_compat.check(act_prop.type_id, exp_prop.type_id, store).isCompatible()) continue;
                 try appendDiagnostic(allocator, out, .type_mismatch, "object property is not assignable to the declared type", "property type mismatch", tree.node(initializer_id).span, expected_span, "declared property is here");
                 emitted = true;
             }
