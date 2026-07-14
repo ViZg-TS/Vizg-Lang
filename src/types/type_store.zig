@@ -2,6 +2,12 @@ const std = @import("std");
 const model = @import("model.zig");
 
 pub const TypeStore = struct {
+    /// Hard limits keep adversarial type shapes from causing unbounded work or
+    /// native-stack exhaustion. Callers receive error.TypeComplexityLimit.
+    pub const max_composite_members: usize = 1024;
+    pub const max_generic_arguments: usize = 256;
+    pub const max_substitution_depth: usize = 256;
+
     allocator: std.mem.Allocator,
     builtins: model.Builtins,
     records: std.ArrayList(StoredType),
@@ -11,6 +17,7 @@ pub const TypeStore = struct {
     /// colliding. Classes and interfaces have different semantic contracts.
     class_types: std.AutoHashMap(model.SemanticDeclId, model.ClassSemanticType),
     interface_types: std.AutoHashMap(model.SemanticDeclId, model.InterfaceSemanticType),
+    generic_declarations: std.AutoHashMap(model.SemanticDeclId, model.GenericDeclaration),
 
     const StoredType = struct {
         id: model.TypeId,
@@ -25,6 +32,173 @@ pub const TypeStore = struct {
             .signatures = .empty,
             .class_types = std.AutoHashMap(model.SemanticDeclId, model.ClassSemanticType).init(allocator),
             .interface_types = std.AutoHashMap(model.SemanticDeclId, model.InterfaceSemanticType).init(allocator),
+            .generic_declarations = std.AutoHashMap(model.SemanticDeclId, model.GenericDeclaration).init(allocator),
+        };
+    }
+
+    pub fn registerGenericDeclaration(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        template_type: model.TypeId,
+        parameters: []const model.GenericParameter,
+    ) !void {
+        if (parameters.len > max_generic_arguments) return error.TypeComplexityLimit;
+        const owned = try self.allocator.dupe(model.GenericParameter, parameters);
+        try self.generic_declarations.put(identity, .{
+            .identity = identity,
+            .template_type = template_type,
+            .parameters = owned,
+        });
+    }
+
+    pub fn lookupGenericDeclaration(self: *const TypeStore, identity: model.SemanticDeclId) ?model.GenericDeclaration {
+        return self.generic_declarations.get(identity);
+    }
+
+    pub fn updateGenericDeclaration(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        template_type: model.TypeId,
+        parameters: []const model.GenericParameter,
+    ) !void {
+        if (parameters.len > max_generic_arguments) return error.TypeComplexityLimit;
+        const declaration = self.generic_declarations.getPtr(identity) orelse return error.UnknownGenericDeclaration;
+        declaration.template_type = template_type;
+        declaration.parameters = try self.allocator.dupe(model.GenericParameter, parameters);
+    }
+
+    pub fn updateTypeParameter(
+        self: *TypeStore,
+        type_id: model.TypeId,
+        constraint: ?model.TypeId,
+        default: ?model.TypeId,
+    ) !void {
+        const record = self.storedMut(type_id) orelse return error.InvalidTypeId;
+        if (record.kind) |*kind| switch (kind.*) {
+            .type_parameter => |*parameter| {
+                parameter.constraint = constraint;
+                parameter.default = default;
+            },
+            else => return error.InvalidTypeParameter,
+        } else return error.InvalidTypeParameter;
+    }
+
+    pub fn instantiateGeneric(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        arguments: []const model.TypeId,
+    ) !model.TypeId {
+        if (arguments.len > max_generic_arguments) return error.TypeComplexityLimit;
+        const declaration = self.lookupGenericDeclaration(identity) orelse return error.UnknownGenericDeclaration;
+        if (arguments.len != declaration.parameters.len) return error.InvalidGenericArity;
+        return self.intern(.{ .applied_generic = .{
+            .declaration = identity,
+            .base_type = declaration.template_type,
+            .arguments = arguments,
+        } });
+    }
+
+    /// Substitute type parameters throughout a stored shape. Active ids are
+    /// returned unchanged, which makes recursive aliases and objects terminate.
+    pub fn substitute(
+        self: *TypeStore,
+        type_id: model.TypeId,
+        parameters: []const model.GenericParameter,
+        arguments: []const model.TypeId,
+    ) !model.TypeId {
+        if (parameters.len != arguments.len) return error.InvalidGenericArity;
+        if (parameters.len > max_generic_arguments) return error.TypeComplexityLimit;
+        var active: std.AutoHashMap(model.TypeId, void) = .init(self.allocator);
+        defer active.deinit();
+        return self.substituteInner(type_id, parameters, arguments, &active, 0);
+    }
+
+    pub fn resolveAppliedTarget(self: *TypeStore, type_id: model.TypeId) !model.TypeId {
+        const ty = self.lookup(type_id) orelse return type_id;
+        if (ty.kind != .applied_generic) return type_id;
+        const applied = ty.kind.applied_generic;
+        const declaration = self.lookupGenericDeclaration(applied.declaration) orelse return applied.base_type;
+        return self.substitute(declaration.template_type, declaration.parameters, applied.arguments);
+    }
+
+    fn substituteInner(
+        self: *TypeStore,
+        type_id: model.TypeId,
+        parameters: []const model.GenericParameter,
+        arguments: []const model.TypeId,
+        active: *std.AutoHashMap(model.TypeId, void),
+        depth: usize,
+    ) anyerror!model.TypeId {
+        if (depth >= max_substitution_depth) return error.TypeComplexityLimit;
+        for (parameters, arguments) |parameter, argument| {
+            if (type_id == parameter.type_id) return argument;
+        }
+        if (active.contains(type_id)) return type_id;
+        const ty = self.lookup(type_id) orelse return type_id;
+        try active.put(type_id, {});
+        defer _ = active.remove(type_id);
+        return switch (ty.kind) {
+            .primitive, .literal, .class, .class_constructor, .interface, .enum_type, .type_parameter => type_id,
+            .function => |signature_id| blk: {
+                const signature = self.lookupFunctionSignature(signature_id) orelse break :blk type_id;
+                const converted = try self.allocator.alloc(model.ParameterType, signature.parameters.len);
+                for (signature.parameters, 0..) |parameter, index| {
+                    converted[index] = parameter;
+                    converted[index].type_id = try self.substituteInner(parameter.type_id, parameters, arguments, active, depth + 1);
+                }
+                break :blk try self.addFunctionDetailed(
+                    converted,
+                    try self.substituteInner(signature.return_type, parameters, arguments, active, depth + 1),
+                    0,
+                    signature.flags,
+                );
+            },
+            .promise => |value| self.intern(.{ .promise = .{
+                .value_type = try self.substituteInner(value.value_type, parameters, arguments, active, depth + 1),
+            } }),
+            .generator => |value| self.intern(.{ .generator = .{
+                .yield_type = try self.substituteInner(value.yield_type, parameters, arguments, active, depth + 1),
+                .return_type = try self.substituteInner(value.return_type, parameters, arguments, active, depth + 1),
+            } }),
+            .union_type => |members| blk: {
+                const converted = try self.allocator.alloc(model.TypeId, members.len);
+                for (members, 0..) |member, index| converted[index] = try self.substituteInner(member, parameters, arguments, active, depth + 1);
+                break :blk try self.unionOf(converted);
+            },
+            .intersection => |members| blk: {
+                const converted = try self.allocator.alloc(model.TypeId, members.len);
+                for (members, 0..) |member, index| converted[index] = try self.substituteInner(member, parameters, arguments, active, depth + 1);
+                break :blk try self.intersectionOf(converted);
+            },
+            .array => |value| self.intern(.{ .array = .{
+                .element_type = try self.substituteInner(value.element_type, parameters, arguments, active, depth + 1),
+                .readonly = value.readonly,
+            } }),
+            .tuple => |value| blk: {
+                const elements = try self.allocator.alloc(model.TupleElement, value.elements.len);
+                for (value.elements, 0..) |element, index| {
+                    elements[index] = element;
+                    elements[index].type_id = try self.substituteInner(element.type_id, parameters, arguments, active, depth + 1);
+                }
+                break :blk try self.intern(.{ .tuple = .{ .elements = elements, .readonly = value.readonly } });
+            },
+            .object => |properties| blk: {
+                const converted = try self.allocator.alloc(model.ObjectProperty, properties.len);
+                for (properties, 0..) |property, index| {
+                    converted[index] = property;
+                    converted[index].type_id = try self.substituteInner(property.type_id, parameters, arguments, active, depth + 1);
+                }
+                break :blk try self.intern(.{ .object = converted });
+            },
+            .applied_generic => |applied| blk: {
+                const converted = try self.allocator.alloc(model.TypeId, applied.arguments.len);
+                for (applied.arguments, 0..) |argument, index| converted[index] = try self.substituteInner(argument, parameters, arguments, active, depth + 1);
+                break :blk try self.intern(.{ .applied_generic = .{
+                    .declaration = applied.declaration,
+                    .base_type = applied.base_type,
+                    .arguments = converted,
+                } });
+            },
         };
     }
 
@@ -70,13 +244,11 @@ pub const TypeStore = struct {
         self: *TypeStore,
         identity: model.SemanticDeclId,
         name: []const u8,
-        members: model.MemberTable,
     ) !model.InterfaceSemanticType {
         if (self.interface_types.get(identity)) |existing| return existing;
         const type_id = try self.intern(.{ .interface = .{
             .identity = identity,
             .name = name,
-            .members = members,
         } });
         const stored_interface = self.lookup(type_id).?.kind.interface;
         const result: model.InterfaceSemanticType = .{
@@ -107,6 +279,7 @@ pub const TypeStore = struct {
         inheritance: model.ClassInheritance,
     ) !void {
         const semantic = self.class_types.getPtr(identity) orelse return error.UnknownClassIdentity;
+        if (semantic.completed) return error.SemanticTypeAlreadyCompleted;
         semantic.static_members = try self.cloneMemberTable(static_members);
         semantic.instance_members = try self.cloneMemberTable(instance_members);
         semantic.constructor_signature = constructor_signature;
@@ -114,6 +287,30 @@ pub const TypeStore = struct {
             .extends = inheritance.extends,
             .implements = try self.allocator.dupe(model.TypeId, inheritance.implements),
         };
+        semantic.completed = true;
+    }
+
+    /// Refresh one callable class member after body inference while preserving
+    /// the class's nominal identity and stable member-table allocation.
+    pub fn updateClassCallableType(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        name: []const u8,
+        is_static: bool,
+        constructor: bool,
+        type_id: model.TypeId,
+    ) !void {
+        const semantic = self.class_types.getPtr(identity) orelse return error.UnknownClassIdentity;
+        if (constructor) {
+            semantic.constructor_signature = type_id;
+            return;
+        }
+        const members = @constCast(if (is_static) semantic.static_members.members else semantic.instance_members.members);
+        for (members) |*member| {
+            if (!std.mem.eql(u8, member.name, name)) continue;
+            member.type_id = type_id;
+            return;
+        }
     }
 
     /// Complete a predeclared interface while preserving its stable TypeId.
@@ -124,6 +321,7 @@ pub const TypeStore = struct {
         inheritance: model.InterfaceInheritance,
     ) !void {
         const semantic = self.interface_types.getPtr(identity) orelse return error.UnknownInterfaceIdentity;
+        if (semantic.completed) return error.SemanticTypeAlreadyCompleted;
         const owned_members = try self.cloneMemberTable(members);
         const record = self.storedMut(semantic.type_id) orelse return error.InvalidTypeId;
         if (record.kind) |*kind| switch (kind.*) {
@@ -132,6 +330,7 @@ pub const TypeStore = struct {
         } else return error.InvalidInterfaceType;
         semantic.members = owned_members;
         semantic.inheritance = .{ .extends = try self.allocator.dupe(model.TypeId, inheritance.extends) };
+        semantic.completed = true;
     }
 
     /// Reserve identity before its definition is available. References may safely
@@ -225,9 +424,13 @@ pub const TypeStore = struct {
             if (member == self.builtins.never) continue;
             const ty = self.lookup(member).?;
             if (ty.kind == .union_type) {
-                for (ty.kind.union_type) |nested| try appendSortedUnique(self.allocator, &normalized, nested);
+                for (ty.kind.union_type) |nested| {
+                    try appendSortedUnique(self.allocator, &normalized, nested);
+                    if (normalized.items.len > max_composite_members) return error.TypeComplexityLimit;
+                }
             } else {
                 try appendSortedUnique(self.allocator, &normalized, member);
+                if (normalized.items.len > max_composite_members) return error.TypeComplexityLimit;
             }
         }
         if (normalized.items.len == 0) return self.builtins.never;
@@ -245,9 +448,13 @@ pub const TypeStore = struct {
             if (member == self.builtins.any or member == self.builtins.unknown) continue;
             const ty = self.lookup(member).?;
             if (ty.kind == .intersection) {
-                for (ty.kind.intersection) |nested| try appendSortedUnique(self.allocator, &normalized, nested);
+                for (ty.kind.intersection) |nested| {
+                    try appendSortedUnique(self.allocator, &normalized, nested);
+                    if (normalized.items.len > max_composite_members) return error.TypeComplexityLimit;
+                }
             } else {
                 try appendSortedUnique(self.allocator, &normalized, member);
+                if (normalized.items.len > max_composite_members) return error.TypeComplexityLimit;
             }
         }
         if (normalized.items.len == 0) return self.builtins.unknown;
@@ -268,43 +475,159 @@ pub const TypeStore = struct {
         return kindsEqual(left_type.kind, right_type.kind);
     }
 
-    /// Debug rendering is deliberately lossy and must never drive type decisions.
+    /// Inspection rendering is cycle-safe and descriptive, but must never drive
+    /// type decisions. TypeIds remain visible so output can be correlated with
+    /// the semantic lookup APIs.
     pub fn formatDebugAlloc(self: *const TypeStore, allocator: std.mem.Allocator, id: model.TypeId) ![]u8 {
-        const ty = self.lookup(id) orelse return std.fmt.allocPrint(allocator, "<invalid:{d}>", .{id});
-        return switch (ty.kind) {
-            .primitive, .literal => std.fmt.allocPrint(allocator, "{s}#{d}", .{ ty.displayName(), id }),
-            .function => |signature_id| if (self.lookupFunctionSignature(signature_id)) |signature|
-                std.fmt.allocPrint(allocator, "function#{d}[parameters={d},return={d}]", .{ id, signature.parameters.len, signature.return_type })
-            else
-                std.fmt.allocPrint(allocator, "function#{d}[signature={d}]", .{ id, signature_id }),
-            .promise => |value| std.fmt.allocPrint(allocator, "promise#{d}[value={d}]", .{ id, value.value_type }),
-            .generator => |value| std.fmt.allocPrint(allocator, "generator#{d}[yield={d},return={d}]", .{ id, value.yield_type, value.return_type }),
-            .union_type => |members| std.fmt.allocPrint(allocator, "union#{d}[members={d}]", .{ id, members.len }),
-            .intersection => |members| std.fmt.allocPrint(allocator, "intersection#{d}[members={d}]", .{ id, members.len }),
-            .array => |value| std.fmt.allocPrint(allocator, "array#{d}[element={d},readonly={}]", .{ id, value.element_type, value.readonly }),
-            .tuple => |value| std.fmt.allocPrint(allocator, "tuple#{d}[elements={d},readonly={}]", .{ id, value.elements.len, value.readonly }),
-            .object => |properties| if (properties.len == 0)
-                std.fmt.allocPrint(allocator, "object#{d}[properties=0]", .{id})
-            else
-                std.fmt.allocPrint(allocator, "object#{d}[properties={d},first={s}:{d}]", .{ id, properties.len, properties[0].name, properties[0].type_id }),
-            .class => |value| formatNominalDebugAlloc(allocator, "class", value.name, id, value.identity),
-            .class_constructor => |value| std.fmt.allocPrint(
-                allocator,
-                "class-constructor {s}#{d}[module={d},declaration={d},instance={d}]",
-                .{ value.name, id, value.identity.module_id, value.identity.declaration_id, value.instance_type },
-            ),
-            .interface => |value| std.fmt.allocPrint(
-                allocator,
-                "interface {s}#{d}[module={d},declaration={d},members={d}]",
-                .{ value.name, id, value.identity.module_id, value.identity.declaration_id, value.members.members.len },
-            ),
-            .enum_type => |value| formatNominalDebugAlloc(allocator, "enum", value.name, id, value.identity),
-            .type_parameter => |value| std.fmt.allocPrint(
-                allocator,
-                "type-parameter {s}#{d}[module={d},declaration={d},parameter={d}]",
-                .{ value.name, id, value.identity.module_id, value.identity.declaration_id, value.parameter_id },
-            ),
-        };
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        errdefer output.deinit();
+        var stack: [32]model.TypeId = undefined;
+        try self.writeTypeDebug(&output.writer, id, &stack, 0);
+        var bytes = output.toArrayList();
+        return bytes.toOwnedSlice(allocator);
+    }
+
+    fn writeTypeDebug(
+        self: *const TypeStore,
+        writer: *std.Io.Writer,
+        id: model.TypeId,
+        stack: *[32]model.TypeId,
+        depth: usize,
+    ) anyerror!void {
+        if (depth == stack.len) return writer.print("<depth-limit#{d}>", .{id});
+        for (stack[0..depth]) |ancestor| if (ancestor == id)
+            return writer.print("<recursive#{d}>", .{id});
+        stack[depth] = id;
+
+        const ty = self.lookup(id) orelse return writer.print("<invalid:{d}>", .{id});
+        switch (ty.kind) {
+            .primitive => try writer.print("{s}#{d}", .{ ty.displayName(), id }),
+            .literal => |literal| {
+                switch (literal) {
+                    .boolean => |value| try writer.print("{}", .{value}),
+                    .number => |value| try writer.print("{d}", .{value}),
+                    .bigint => |value| try writer.print("{s}n", .{value}),
+                    .string => |value| try writer.print("\"{s}\"", .{value}),
+                }
+                try writer.print("#{d}", .{id});
+            },
+            .function => |signature_id| {
+                try writer.print("function#{d}(", .{id});
+                if (self.lookupFunctionSignature(signature_id)) |signature| {
+                    for (signature.parameters, 0..) |parameter, index| {
+                        if (index != 0) try writer.writeAll(", ");
+                        if (parameter.rest) try writer.writeAll("...");
+                        try writer.print("{s}{s}: ", .{ parameter.name, if (parameter.optional or parameter.has_default) "?" else "" });
+                        try self.writeTypeDebug(writer, parameter.type_id, stack, depth + 1);
+                    }
+                    try writer.writeAll(") -> ");
+                    try self.writeTypeDebug(writer, signature.return_type, stack, depth + 1);
+                    if (signature.type_parameter_count != 0)
+                        try writer.print(" [type-parameters={d}]", .{signature.type_parameter_count});
+                } else try writer.print("<missing-signature:{d}>)", .{signature_id});
+            },
+            .promise => |value| {
+                try writer.print("Promise#{d}<", .{id});
+                try self.writeTypeDebug(writer, value.value_type, stack, depth + 1);
+                try writer.writeAll(">");
+            },
+            .generator => |value| {
+                try writer.print("Generator#{d}<yield=", .{id});
+                try self.writeTypeDebug(writer, value.yield_type, stack, depth + 1);
+                try writer.writeAll(", return=");
+                try self.writeTypeDebug(writer, value.return_type, stack, depth + 1);
+                try writer.writeAll(">");
+            },
+            .union_type => |members| try self.writeTypeList(writer, "union", " | ", id, members, stack, depth),
+            .intersection => |members| try self.writeTypeList(writer, "intersection", " & ", id, members, stack, depth),
+            .array => |value| {
+                if (value.readonly) try writer.writeAll("readonly ");
+                try writer.print("array#{d}<", .{id});
+                try self.writeTypeDebug(writer, value.element_type, stack, depth + 1);
+                try writer.writeAll(">");
+            },
+            .tuple => |value| {
+                if (value.readonly) try writer.writeAll("readonly ");
+                try writer.print("tuple#{d}<[", .{id});
+                for (value.elements, 0..) |element, index| {
+                    if (index != 0) try writer.writeAll(", ");
+                    if (element.hole) {
+                        try writer.writeAll("<hole>");
+                        continue;
+                    }
+                    try self.writeTypeDebug(writer, element.type_id, stack, depth + 1);
+                    if (element.optional) try writer.writeAll("?");
+                }
+                try writer.writeAll("]>");
+            },
+            .object => |properties| {
+                try writer.print("object#{d}{{", .{id});
+                for (properties, 0..) |property, index| {
+                    if (index != 0) try writer.writeAll("; ");
+                    if (property.readonly) try writer.writeAll("readonly ");
+                    try writer.print("{s}{s}: ", .{ property.name, if (property.optional) "?" else "" });
+                    try self.writeTypeDebug(writer, property.type_id, stack, depth + 1);
+                }
+                try writer.writeAll("}");
+            },
+            .class => |value| try writeNominalDebug(writer, "class", value.name, id, value.identity),
+            .class_constructor => |value| {
+                try writeNominalDebug(writer, "class-constructor", value.name, id, value.identity);
+                try writer.writeAll(" instance=");
+                try self.writeTypeDebug(writer, value.instance_type, stack, depth + 1);
+            },
+            .interface => |value| {
+                try writeNominalDebug(writer, "interface", value.name, id, value.identity);
+                try writer.writeAll(" {");
+                for (value.members.members, 0..) |member, index| {
+                    if (index != 0) try writer.writeAll("; ");
+                    if (member.readonly) try writer.writeAll("readonly ");
+                    try writer.print("{s}{s}: ", .{ member.name, if (member.optional) "?" else "" });
+                    try self.writeTypeDebug(writer, member.type_id, stack, depth + 1);
+                }
+                try writer.writeAll("}");
+            },
+            .enum_type => |value| try writeNominalDebug(writer, "enum", value.name, id, value.identity),
+            .type_parameter => |value| {
+                try writeNominalDebug(writer, "type-parameter", value.name, id, value.identity);
+                try writer.print(" parameter={d}", .{value.parameter_id});
+                if (value.constraint) |constraint| {
+                    try writer.writeAll(" extends ");
+                    try self.writeTypeDebug(writer, constraint, stack, depth + 1);
+                }
+                if (value.default) |default| {
+                    try writer.writeAll(" default ");
+                    try self.writeTypeDebug(writer, default, stack, depth + 1);
+                }
+            },
+            .applied_generic => |value| {
+                try writer.print("generic#{d}[module={d},declaration={d}]<", .{ id, value.declaration.module_id, value.declaration.declaration_id });
+                for (value.arguments, 0..) |argument, index| {
+                    if (index != 0) try writer.writeAll(", ");
+                    try self.writeTypeDebug(writer, argument, stack, depth + 1);
+                }
+                try writer.writeAll("> base=");
+                try self.writeTypeDebug(writer, value.base_type, stack, depth + 1);
+            },
+        }
+    }
+
+    fn writeTypeList(
+        self: *const TypeStore,
+        writer: *std.Io.Writer,
+        name: []const u8,
+        separator: []const u8,
+        id: model.TypeId,
+        members: []const model.TypeId,
+        stack: *[32]model.TypeId,
+        depth: usize,
+    ) anyerror!void {
+        try writer.print("{s}#{d}<", .{ name, id });
+        for (members, 0..) |member, index| {
+            if (index != 0) try writer.writeAll(separator);
+            try self.writeTypeDebug(writer, member, stack, depth + 1);
+        }
+        try writer.writeAll(">");
     }
 
     fn stored(self: *const TypeStore, id: model.TypeId) ?*const StoredType {
@@ -374,6 +697,11 @@ pub const TypeStore = struct {
                 .constraint = parameter.constraint,
                 .default = parameter.default,
             } },
+            .applied_generic => |applied| .{ .applied_generic = .{
+                .declaration = applied.declaration,
+                .base_type = applied.base_type,
+                .arguments = try self.allocator.dupe(model.TypeId, applied.arguments),
+            } },
         };
     }
 
@@ -391,15 +719,14 @@ pub const TypeStore = struct {
     }
 };
 
-fn formatNominalDebugAlloc(
-    allocator: std.mem.Allocator,
+fn writeNominalDebug(
+    writer: *std.Io.Writer,
     kind_name: []const u8,
     name: []const u8,
     id: model.TypeId,
     identity: model.SemanticDeclId,
-) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
+) !void {
+    return writer.print(
         "{s} {s}#{d}[module={d},declaration={d}]",
         .{ kind_name, name, id, identity.module_id, identity.declaration_id },
     );
@@ -457,21 +784,13 @@ fn kindsEqual(left: model.TypeKind, right: model.TypeKind) bool {
         .class => |value| value.identity.eql(right.class.identity),
         .class_constructor => |value| value.identity.eql(right.class_constructor.identity) and
             value.instance_type == right.class_constructor.instance_type,
-        .interface => |value| value.identity.eql(right.interface.identity) and
-            memberTablesEqual(value.members, right.interface.members),
+        .interface => |value| value.identity.eql(right.interface.identity),
         .enum_type => |value| value.identity.eql(right.enum_type.identity),
         .type_parameter => |value| value.identity.eql(right.type_parameter.identity) and
             value.parameter_id == right.type_parameter.parameter_id,
+        .applied_generic => |value| value.declaration.eql(right.applied_generic.declaration) and
+            std.mem.eql(model.TypeId, value.arguments, right.applied_generic.arguments),
     };
-}
-
-fn memberTablesEqual(left: model.MemberTable, right: model.MemberTable) bool {
-    if (left.members.len != right.members.len) return false;
-    for (left.members, right.members) |a, b| {
-        if (!std.mem.eql(u8, a.name, b.name) or a.type_id != b.type_id or
-            a.visibility != b.visibility or a.readonly != b.readonly or a.optional != b.optional) return false;
-    }
-    return true;
 }
 
 fn tupleEqual(left: model.TupleType, right: model.TupleType) bool {
@@ -494,9 +813,11 @@ fn literalEqual(left: model.LiteralValue, right: model.LiteralValue) bool {
 
 fn propertiesEqual(left: []const model.ObjectProperty, right: []const model.ObjectProperty) bool {
     if (left.len != right.len) return false;
-    for (left, right) |a, b| {
-        if (!std.mem.eql(u8, a.name, b.name) or a.type_id != b.type_id or
-            a.optional != b.optional or a.readonly != b.readonly) return false;
+    for (left) |a| {
+        const b = for (right) |candidate| {
+            if (std.mem.eql(u8, a.name, candidate.name)) break candidate;
+        } else return false;
+        if (a.type_id != b.type_id or a.optional != b.optional or a.readonly != b.readonly) return false;
     }
     return true;
 }
@@ -581,8 +902,8 @@ test "Goal 136 qualified nominal identities isolate equal local declaration ids"
 
     const a_interface = model.SemanticDeclId.init(1, 43);
     const b_interface = model.SemanticDeclId.init(2, 43);
-    _ = try store.createInterfaceSemanticType(a_interface, "IA", .{});
-    _ = try store.createInterfaceSemanticType(b_interface, "IB", .{});
+    _ = try store.createInterfaceSemanticType(a_interface, "IA");
+    _ = try store.createInterfaceSemanticType(b_interface, "IB");
     try std.testing.expectEqualStrings("IA", store.interface_types.get(a_interface).?.name);
     try std.testing.expectEqualStrings("IB", store.interface_types.get(b_interface).?.name);
 
@@ -611,12 +932,13 @@ test "Goal 141 class and interface semantic foundations preserve identity and sh
     try std.testing.expect(class_type.inheritance.extends == null);
 
     const interface_identity = model.SemanticDeclId.init(7, 12);
-    const interface_type = try store.createInterfaceSemanticType(interface_identity, "Named", .{ .members = &.{
+    const interface_type = try store.createInterfaceSemanticType(interface_identity, "Named");
+    try store.completeInterfaceSemanticType(interface_identity, .{ .members = &.{
         .{ .name = "name", .type_id = store.builtins.string, .visibility = .public, .readonly = true },
         .{ .name = "secret", .type_id = store.builtins.string, .visibility = .protected, .optional = true },
         .{ .name = "hidden", .type_id = store.builtins.boolean, .visibility = .private },
         .{ .name = "plain", .type_id = store.builtins.number, .visibility = .none },
-    } });
+    } }, .{});
     const shape = store.lookup(interface_type.type_id).?.kind.interface;
     try std.testing.expectEqual(interface_identity, shape.identity);
     try std.testing.expectEqual(@as(usize, 4), shape.members.members.len);
@@ -628,6 +950,52 @@ test "Goal 141 class and interface semantic foundations preserve identity and sh
     const other_module = try store.createClassSemanticType(model.SemanticDeclId.init(8, 11), "Service");
     try std.testing.expect(other_module.instance_type != class_type.instance_type);
     try std.testing.expect(other_module.constructor_type != class_type.constructor_type);
+}
+
+test "Goal 155 nominal completion is one-shot and preserves stable identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+
+    const class_identity = model.SemanticDeclId.init(9, 1);
+    const class_before = try store.createClassSemanticType(class_identity, "Box");
+    const class_again = try store.createClassSemanticType(class_identity, "Ignored");
+    try std.testing.expectEqual(class_before.instance_type, class_again.instance_type);
+    try store.completeClassSemanticType(class_identity, .{}, .{}, null, .{});
+    try std.testing.expectError(error.SemanticTypeAlreadyCompleted, store.completeClassSemanticType(class_identity, .{}, .{}, null, .{}));
+    try std.testing.expectEqual(class_before.instance_type, store.lookupClassSemanticType(class_identity).?.instance_type);
+
+    const interface_identity = model.SemanticDeclId.init(9, 2);
+    const interface_before = try store.createInterfaceSemanticType(interface_identity, "Pair");
+    const interface_again = try store.createInterfaceSemanticType(interface_identity, "Ignored");
+    try std.testing.expectEqual(interface_before.type_id, interface_again.type_id);
+    try store.completeInterfaceSemanticType(interface_identity, .{ .members = &.{
+        .{ .name = "left", .type_id = store.builtins.number },
+    } }, .{});
+    try std.testing.expectError(error.SemanticTypeAlreadyCompleted, store.completeInterfaceSemanticType(interface_identity, .{}, .{}));
+    const completed = store.lookupInterfaceSemanticType(interface_identity).?;
+    try std.testing.expectEqual(interface_before.type_id, completed.type_id);
+    try std.testing.expectEqual(interface_before.type_id, try store.intern(.{ .interface = .{
+        .identity = interface_identity,
+        .name = "Pair",
+        .members = .{},
+    } }));
+}
+
+test "Goal 155 object shape keys ignore source property order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+
+    const first = try store.intern(.{ .object = &.{
+        .{ .name = "left", .type_id = store.builtins.number },
+        .{ .name = "right", .type_id = store.builtins.string, .readonly = true },
+    } });
+    const reordered = try store.intern(.{ .object = &.{
+        .{ .name = "right", .type_id = store.builtins.string, .readonly = true },
+        .{ .name = "left", .type_id = store.builtins.number },
+    } });
+    try std.testing.expectEqual(first, reordered);
 }
 
 test "TypeStore normalization and propagation rules are deterministic" {
@@ -644,6 +1012,42 @@ test "TypeStore normalization and propagation rules are deterministic" {
     try std.testing.expectEqual(b.number, try store.intersectionOf(&.{ b.unknown, b.number, b.number }));
 }
 
+test "Goal 158 TypeStore rejects adversarial composite and generic growth" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+
+    const members = try arena.allocator().alloc(model.TypeId, TypeStore.max_composite_members + 1);
+    for (members, 0..) |*member, index| {
+        member.* = try store.intern(.{ .literal = .{ .number = @floatFromInt(index) } });
+    }
+    try std.testing.expectError(error.TypeComplexityLimit, store.unionOf(members));
+    try std.testing.expectError(error.TypeComplexityLimit, store.intersectionOf(members));
+
+    const arguments = try arena.allocator().alloc(model.TypeId, TypeStore.max_generic_arguments + 1);
+    @memset(arguments, store.builtins.number);
+    const parameters = try arena.allocator().alloc(model.GenericParameter, TypeStore.max_generic_arguments + 1);
+    for (parameters) |*parameter| parameter.* = .{ .type_id = store.builtins.number };
+    try std.testing.expectError(
+        error.TypeComplexityLimit,
+        store.registerGenericDeclaration(model.SemanticDeclId.init(0, 998), store.builtins.number, parameters),
+    );
+    try std.testing.expectError(
+        error.TypeComplexityLimit,
+        store.instantiateGeneric(model.SemanticDeclId.init(0, 999), arguments),
+    );
+    try std.testing.expectError(
+        error.InvalidGenericArity,
+        store.substitute(store.builtins.number, &.{.{ .type_id = store.builtins.number }}, &.{}),
+    );
+
+    var nested = store.builtins.number;
+    for (0..TypeStore.max_substitution_depth + 1) |_| {
+        nested = try store.intern(.{ .array = .{ .element_type = nested } });
+    }
+    try std.testing.expectError(error.TypeComplexityLimit, store.substitute(nested, &.{}, &.{}));
+}
+
 test "TypeStore recursive references use reserve then define without loops" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -658,5 +1062,72 @@ test "TypeStore recursive references use reserve then define without loops" {
 
     const rendered = try store.formatDebugAlloc(arena.allocator(), recursive);
     try std.testing.expect(std.mem.startsWith(u8, rendered, "object#"));
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "first=next") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "next?: <recursive#") != null);
+}
+
+test "Goal 152 generic applications substitute nested shapes canonically and terminate recursively" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+
+    const identity = model.SemanticDeclId.init(4, 20);
+    const parameter = try store.intern(.{ .type_parameter = .{
+        .identity = identity,
+        .parameter_id = 0,
+        .name = "T",
+    } });
+    const function = try store.addFunction(&.{.{ .name = "value", .type_id = parameter }}, parameter);
+    const array = try store.intern(.{ .array = .{ .element_type = parameter } });
+    const tuple = try store.intern(.{ .tuple = .{ .elements = &.{.{ .type_id = parameter }} } });
+    const union_type = try store.unionOf(&.{ parameter, store.builtins.string });
+    const marker = try store.intern(.{ .object = &.{.{ .name = "marker", .type_id = store.builtins.boolean }} });
+    const intersection = try store.intern(.{ .intersection = &.{ parameter, marker } });
+    const template = try store.intern(.{ .object = &.{
+        .{ .name = "call", .type_id = function },
+        .{ .name = "array", .type_id = array },
+        .{ .name = "tuple", .type_id = tuple },
+        .{ .name = "union", .type_id = union_type },
+        .{ .name = "intersection", .type_id = intersection },
+    } });
+    try store.registerGenericDeclaration(identity, template, &.{.{ .type_id = parameter }});
+
+    const first = try store.instantiateGeneric(identity, &.{store.builtins.number});
+    const repeated = try store.instantiateGeneric(identity, &.{store.builtins.number});
+    const other = try store.instantiateGeneric(identity, &.{store.builtins.string});
+    try std.testing.expectEqual(first, repeated);
+    try std.testing.expect(first != other);
+
+    const rendered = try store.formatDebugAlloc(arena.allocator(), first);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "generic#") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "module=4,declaration=20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "number#") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "base=object#") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "call: function#") != null);
+
+    const resolved = store.lookup(try store.resolveAppliedTarget(first)).?.kind.object;
+    const signature = store.lookupFunction(resolved[0].type_id).?;
+    try std.testing.expectEqual(store.builtins.number, signature.parameters[0].type_id);
+    try std.testing.expectEqual(store.builtins.number, signature.return_type);
+    try std.testing.expectEqual(store.builtins.number, store.lookup(resolved[1].type_id).?.kind.array.element_type);
+    try std.testing.expectEqual(store.builtins.number, store.lookup(resolved[2].type_id).?.kind.tuple.elements[0].type_id);
+    try std.testing.expect(store.lookup(resolved[3].type_id).?.kind == .union_type);
+    try std.testing.expectEqual(store.builtins.number, store.lookup(resolved[4].type_id).?.kind.intersection[0]);
+
+    const recursive_identity = model.SemanticDeclId.init(4, 21);
+    const recursive_parameter = try store.intern(.{ .type_parameter = .{
+        .identity = recursive_identity,
+        .parameter_id = 0,
+        .name = "T",
+    } });
+    const shell = try store.reserve();
+    try store.registerGenericDeclaration(recursive_identity, shell, &.{.{ .type_id = recursive_parameter }});
+    const nested = try store.instantiateGeneric(recursive_identity, &.{recursive_parameter});
+    try store.defineReserved(shell, .{ .object = &.{
+        .{ .name = "value", .type_id = recursive_parameter },
+        .{ .name = "next", .type_id = nested, .optional = true },
+    } });
+    const recursive_number = try store.instantiateGeneric(recursive_identity, &.{store.builtins.number});
+    const recursive_target = store.lookup(try store.resolveAppliedTarget(recursive_number)).?.kind.object;
+    try std.testing.expectEqual(store.builtins.number, recursive_target[0].type_id);
+    try std.testing.expectEqual(recursive_number, recursive_target[1].type_id);
 }

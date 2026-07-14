@@ -34,6 +34,9 @@ pub const InterfaceInheritance = model.InterfaceInheritance;
 pub const ClassSemanticType = model.ClassSemanticType;
 pub const InterfaceSemanticType = model.InterfaceSemanticType;
 pub const TypeParameterType = model.TypeParameterType;
+pub const GenericParameter = model.GenericParameter;
+pub const GenericDeclaration = model.GenericDeclaration;
+pub const AppliedGenericType = model.AppliedGenericType;
 pub const FunctionSignature = model.FunctionSignature;
 
 pub const Builtins = model.Builtins;

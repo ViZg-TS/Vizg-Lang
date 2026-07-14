@@ -150,6 +150,27 @@ pub const TypeParameterType = struct {
     default: ?TypeId = null,
 };
 
+pub const GenericParameter = struct {
+    type_id: TypeId,
+    constraint: ?TypeId = null,
+    default: ?TypeId = null,
+};
+
+/// Canonical application of a generic declaration to concrete type arguments.
+/// The declaration identity prevents unrelated declarations with equal shapes
+/// from sharing an application.
+pub const AppliedGenericType = struct {
+    declaration: SemanticDeclId,
+    base_type: TypeId,
+    arguments: []const TypeId,
+};
+
+pub const GenericDeclaration = struct {
+    identity: SemanticDeclId,
+    template_type: TypeId,
+    parameters: []const GenericParameter,
+};
+
 pub const ClassInheritance = struct {
     extends: ?TypeId = null,
     implements: []const TypeId = &.{},
@@ -169,6 +190,7 @@ pub const ClassSemanticType = struct {
     instance_members: MemberTable = .{},
     constructor_signature: ?TypeId = null,
     inheritance: ClassInheritance = .{},
+    completed: bool = false,
 };
 
 /// Authoritative interface foundation. Its TypeId directly owns the structural table.
@@ -178,6 +200,7 @@ pub const InterfaceSemanticType = struct {
     type_id: TypeId,
     members: MemberTable = .{},
     inheritance: InterfaceInheritance = .{},
+    completed: bool = false,
 };
 /// Immutable function shape owned by TypeStore.
 pub const FunctionSignature = struct {
@@ -257,6 +280,7 @@ pub const TypeKind = union(enum) {
     interface: InterfaceType,
     enum_type: NominalType,
     type_parameter: TypeParameterType,
+    applied_generic: AppliedGenericType,
 };
 // ---------------------------------------------------------------------------
 // Type — a concrete type value consisting of an id and a kind.
@@ -300,6 +324,7 @@ pub const Type = struct {
             .interface => "interface",
             .enum_type => "enum",
             .type_parameter => "type parameter",
+            .applied_generic => "generic application",
         };
     }
 
