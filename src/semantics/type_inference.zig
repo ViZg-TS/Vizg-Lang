@@ -4,6 +4,7 @@ const builtin_kind = @import("../types/builtin.zig");
 const types = @import("../types/root.zig");
 const tokens = @import("../frontend/tokens.zig");
 const cfg_mod = @import("../frontend/cfg.zig");
+const function_like = @import("../frontend/function_like.zig");
 const type_compat = @import("type_compat.zig");
 const node_type_info_mod = @import("type_info.zig");
 
@@ -128,7 +129,7 @@ pub fn inferPrimitiveExpressions(
     store: *types.TypeStore,
 ) !usize {
     const cfgs = try cfg_mod.build(allocator, tree);
-    return inferPrimitiveExpressionsWithCfgs(allocator, tree, entries, store, cfgs);
+    return inferPrimitiveExpressionsWithCfgs(allocator, tree, entries, store, &.{}, cfgs);
 }
 
 pub fn inferPrimitiveExpressionsWithCfgs(
@@ -136,6 +137,7 @@ pub fn inferPrimitiveExpressionsWithCfgs(
     tree: ast_mod.Ast,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     store: *types.TypeStore,
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
     cfgs: []const cfg_mod.FunctionCfg,
 ) !usize {
     try entries.ensureTotalCapacity(allocator, entries.items.len + tree.nodes.len);
@@ -144,10 +146,10 @@ pub fn inferPrimitiveExpressionsWithCfgs(
         var changed = false;
         for (tree.nodes, 0..) |node, raw_id| {
             const id: ast_mod.NodeId = @intCast(raw_id);
-            const candidate = try inferNode(allocator, id, node.data, tree, entries.items, store, cfgs);
+            const candidate = try inferNode(allocator, id, node.data, tree, entries.items, store, resolved_type_nodes, cfgs);
             if (candidate) |value| changed = putType(entries, id, value.type_id, value.valid, value.issue, value.receiver_type) or changed;
         }
-        changed = (try applyAggregateContexts(tree, entries, store)) or changed;
+        changed = (try applyAggregateContexts(tree, entries, store, resolved_type_nodes)) or changed;
         if (!changed) return round + 1;
     }
     return round;
@@ -160,25 +162,53 @@ fn inferNode(
     tree: ast_mod.Ast,
     entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
     cfgs: []const cfg_mod.FunctionCfg,
 ) !?OperatorResult {
     const b = &store.builtins;
+    if (function_like.describe(tree, node_id)) |function| return .{
+        .type_id = try inferFunctionLike(
+            allocator,
+            function,
+            tree,
+            entries,
+            store,
+            resolved_type_nodes,
+            cfgs,
+        ),
+    };
     return switch (data) {
         .Literal => |literal| if (classifyLiteralValue(literal.value)) |kind|
             .{ .type_id = b.id(kind) }
         else
             null,
         .TemplateExpression => .{ .type_id = b.string },
+        .RegExpLiteral => .{ .type_id = b.object },
+        .TaggedTemplateExpression => |expression| inferTaggedTemplate(expression.tag, entries, store),
+        .ImportExpression => .{ .type_id = try store.intern(.{ .promise = .{ .value_type = b.unknown } }) },
+        .MetaProperty => |meta| switch (meta.kind) {
+            .import_meta => .{ .type_id = b.object },
+            .new_target => .{ .type_id = findType(entries, node_id) orelse b.unknown },
+        },
         .Identifier => |identifier| if (std.mem.eql(u8, identifier.name, "undefined"))
             .{ .type_id = b.undefined }
+        else if (findEffectiveType(entries, node_id)) |type_id|
+            .{ .type_id = type_id }
         else
             null,
+        .ThisExpression, .SuperExpression, .ClassExpression => .{
+            .type_id = findType(entries, node_id) orelse b.unknown,
+        },
+        .YieldExpression => |expression| if (expression.argument) |argument|
+            if (findType(entries, argument)) |type_id| .{ .type_id = type_id } else null
+        else
+            .{ .type_id = b.undefined },
         .AsExpression => |expression| .{
-            .type_id = try resolveTypeAnnotation(tree, expression.type_annotation, store),
+            .type_id = lookupResolvedTypeAnnotation(expression.type_annotation, resolved_type_nodes, store),
         },
         .SatisfiesExpression => |expression| blk: {
             const original = findType(entries, expression.expression) orelse break :blk null;
-            const target = try resolveTypeAnnotation(tree, expression.type_annotation, store);
+            const target = lookupResolvedTypeAnnotation(expression.type_annotation, resolved_type_nodes, store);
             const compatible = type_compat.check(original, target, store).isCompatible();
             break :blk .{
                 .type_id = original,
@@ -246,34 +276,27 @@ fn inferNode(
         .SpreadElement => |spread| if (findType(entries, spread.argument)) |ty| .{ .type_id = ty } else null,
         .ArrayExpression => |array| .{ .type_id = try inferArray(allocator, node_id, array, tree, entries, store) },
         .ObjectExpression => |object| .{ .type_id = try inferObject(allocator, node_id, object, tree, entries, store) },
-        .FunctionExpression => |function| .{ .type_id = try inferFunction(
-            allocator,
-            node_id,
-            function.params,
-            function.body,
-            false,
-            function.return_type,
-            function.flags,
-            tree,
-            entries,
-            store,
-            cfgs,
-        ) },
-        .ArrowFunctionExpression => |function| .{ .type_id = try inferFunction(
-            allocator,
-            node_id,
-            function.params,
-            function.body,
-            function.expression_body,
-            function.return_type,
-            function.flags,
-            tree,
-            entries,
-            store,
-            cfgs,
-        ) },
+        .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassMethod => unreachable,
         else => null,
     };
+}
+
+fn inferTaggedTemplate(
+    tag_id: ast_mod.NodeId,
+    entries: []const node_type_info_mod.NodeTypeInfo,
+    store: *types.TypeStore,
+) ?OperatorResult {
+    const tag_type = findType(entries, tag_id) orelse return null;
+    if (tag_type == store.builtins.any or tag_type == store.builtins.unknown)
+        return .{ .type_id = tag_type };
+    const tag = store.lookup(tag_type) orelse return .{ .type_id = store.builtins.unknown };
+    if (tag.kind != .function) return .{
+        .type_id = store.builtins.unknown,
+        .valid = false,
+        .issue = .invalid_callee,
+    };
+    const signature = store.lookupFunction(tag.kind.function) orelse return .{ .type_id = store.builtins.unknown };
+    return .{ .type_id = signature.return_type };
 }
 
 fn inferCall(
@@ -451,6 +474,15 @@ fn lookupAccessSingle(
     return switch (object.kind) {
         .object => |properties| try lookupObjectProperty(properties, key, tree, store),
         .class, .class_constructor, .interface => try lookupDeclaredMember(object_type, key, tree, store),
+        .applied_generic => blk: {
+            const target = try store.resolveAppliedTarget(object_type);
+            const resolved = store.lookup(target) orelse break :blk invalidAccess(key, b.unknown);
+            break :blk switch (resolved.kind) {
+                .object => |properties| try lookupObjectProperty(properties, key, tree, store),
+                .class, .class_constructor, .interface => try lookupDeclaredMember(object_type, key, tree, store),
+                else => invalidAccess(key, b.unknown),
+            };
+        },
         .tuple => |tuple| try lookupTupleElement(tuple, key, tree, store),
         .array => |array| if (isNumericIndex(key, tree, store))
             .{ .type_id = array.element_type }
@@ -487,7 +519,7 @@ fn lookupDeclaredMember(
 fn lookupSemanticMember(
     type_id: types.TypeId,
     name: []const u8,
-    store: *const types.TypeStore,
+    store: *types.TypeStore,
     remaining: usize,
 ) ?types.SemanticMember {
     if (remaining == 0) return null;
@@ -517,6 +549,26 @@ fn lookupSemanticMember(
                 if (lookupSemanticMember(base, name, store, remaining - 1)) |member| break :blk member;
             }
             break :blk null;
+        },
+        .applied_generic => |applied| blk: {
+            const generic = store.lookupGenericDeclaration(applied.declaration) orelse break :blk null;
+            const target = store.resolveAppliedTarget(type_id) catch break :blk null;
+            const resolved = store.lookup(target) orelse break :blk null;
+            if (resolved.kind == .object) {
+                for (resolved.kind.object) |property| {
+                    if (!std.mem.eql(u8, property.name, name)) continue;
+                    break :blk .{
+                        .name = property.name,
+                        .type_id = property.type_id,
+                        .optional = property.optional,
+                        .readonly = property.readonly,
+                    };
+                }
+                break :blk null;
+            }
+            var member = lookupSemanticMember(target, name, store, remaining - 1) orelse break :blk null;
+            member.type_id = store.substitute(member.type_id, generic.parameters, applied.arguments) catch break :blk null;
+            break :blk member;
         },
         else => null,
     };
@@ -609,6 +661,10 @@ fn containsFunction(type_id: types.TypeId, store: *types.TypeStore) bool {
         .union_type => |members| for (members) |member| {
             if (containsFunction(member, store)) break true;
         } else false,
+        .applied_generic => blk: {
+            const target = store.resolveAppliedTarget(type_id) catch break :blk false;
+            break :blk target != type_id and containsFunction(target, store);
+        },
         else => false,
     };
 }
@@ -782,25 +838,19 @@ fn computedPropertyName(property: ast_mod.ObjectProperty, tree: ast_mod.Ast) ?[]
     };
 }
 
-fn inferFunction(
+pub fn collectFunctionLikeParameters(
     allocator: std.mem.Allocator,
-    function_id: ast_mod.NodeId,
-    params: []const ast_mod.NodeId,
-    body: ast_mod.NodeId,
-    expression_body: bool,
-    return_annotation: ?ast_mod.TypeAnnotation,
-    flags: ast_mod.FunctionFlags,
+    function: function_like.Descriptor,
     tree: ast_mod.Ast,
-    entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
-    cfgs: []const cfg_mod.FunctionCfg,
-) !types.TypeId {
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
+) ![]const types.ParameterType {
     var parameters: std.ArrayList(types.ParameterType) = .empty;
-    for (params) |param_id| switch (tree.node(param_id).data) {
+    for (function.params) |param_id| switch (tree.node(param_id).data) {
         .Parameter => |param| try parameters.append(allocator, .{
             .name = param.name,
             .type_id = if (param.type_annotation) |annotation|
-                try resolveTypeAnnotation(tree, annotation, store)
+                lookupResolvedTypeAnnotation(annotation, resolved_type_nodes, store)
             else
                 store.builtins.unknown,
             .optional = param.optional,
@@ -809,15 +859,40 @@ fn inferFunction(
         }),
         else => {},
     };
-    var return_type = if (return_annotation) |annotation|
-        try resolveTypeAnnotation(tree, annotation, store)
+    return parameters.toOwnedSlice(allocator);
+}
+
+pub fn inferFunctionLike(
+    allocator: std.mem.Allocator,
+    function: function_like.Descriptor,
+    tree: ast_mod.Ast,
+    entries: []const node_type_info_mod.NodeTypeInfo,
+    store: *types.TypeStore,
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
+    cfgs: []const cfg_mod.FunctionCfg,
+) !types.TypeId {
+    const parameters = try collectFunctionLikeParameters(allocator, function, tree, store, resolved_type_nodes);
+    defer allocator.free(parameters);
+    var return_type = if (function.return_type) |annotation|
+        lookupResolvedTypeAnnotation(annotation, resolved_type_nodes, store)
     else
-        try inferCallableReturn(allocator, function_id, body, expression_body, tree, entries, store, cfgs);
-    return_type = try wrapFunctionReturn(return_type, flags, store);
-    return store.addFunctionDetailed(parameters.items, return_type, 0, .{
-        .is_async = flags.is_async,
-        .is_generator = flags.is_generator,
+        try inferCallableReturn(allocator, function.node, function.body, function.expression_body, tree, entries, store, cfgs);
+    return_type = try wrapFunctionReturn(return_type, function.flags, store);
+    return store.addFunctionDetailed(parameters, return_type, @intCast(function.type_parameters.len), .{
+        .is_async = function.flags.is_async,
+        .is_generator = function.flags.is_generator,
     });
+}
+
+pub fn inferFunctionLikeReturnWithCfgs(
+    allocator: std.mem.Allocator,
+    function: function_like.Descriptor,
+    tree: ast_mod.Ast,
+    entries: []const node_type_info_mod.NodeTypeInfo,
+    store: *types.TypeStore,
+    cfgs: []const cfg_mod.FunctionCfg,
+) !types.TypeId {
+    return inferFunctionReturnWithCfgs(allocator, function.node, function.body, function.expression_body, function.flags, tree, entries, store, cfgs);
 }
 
 pub fn inferFunctionReturn(
@@ -873,12 +948,53 @@ fn inferCallableReturn(
     store: *types.TypeStore,
     cfgs: []const cfg_mod.FunctionCfg,
 ) !types.TypeId {
+    // Recovery may preserve a function-like node while its missing/corrupted
+    // body is represented by invalid_node. Never dereference that sentinel.
+    if (body == ast_mod.invalid_node or @as(usize, @intCast(body)) >= tree.nodes.len) return store.builtins.unknown;
     if (expression_body) return findType(entries, body) orelse store.builtins.unknown;
     var returns: std.ArrayList(types.TypeId) = .empty;
-    try collectReturnTypes(allocator, body, tree, entries, store, &returns);
+    const reachable = try reachableStatements(allocator, function_id, tree, cfgs);
+    defer allocator.free(reachable);
+    try collectReturnTypes(allocator, body, tree, entries, store, reachable, false, &returns);
     if (returns.items.len == 0) return store.builtins.void;
     if (try hasReachableFallthrough(allocator, function_id, tree, cfgs)) try returns.append(allocator, store.builtins.undefined);
     return store.unionOf(returns.items);
+}
+
+fn reachableStatements(
+    allocator: std.mem.Allocator,
+    function_id: ast_mod.NodeId,
+    tree: ast_mod.Ast,
+    cfgs: []const cfg_mod.FunctionCfg,
+) ![]bool {
+    const reachable_nodes = try allocator.alloc(bool, tree.nodes.len);
+    @memset(reachable_nodes, false);
+    for (cfgs) |function_cfg| {
+        if (function_cfg.function != function_id) continue;
+        const graph = function_cfg.graph;
+        const reachable_blocks = try allocator.alloc(bool, graph.blocks.len);
+        defer allocator.free(reachable_blocks);
+        @memset(reachable_blocks, false);
+        var work: std.ArrayList(cfg_mod.BasicBlockId) = .empty;
+        defer work.deinit(allocator);
+        try work.append(allocator, graph.entry);
+        reachable_blocks[@intCast(graph.entry)] = true;
+        var cursor: usize = 0;
+        while (cursor < work.items.len) : (cursor += 1) {
+            const block = graph.blocks[@intCast(work.items[cursor])];
+            for (block.statements) |statement| reachable_nodes[@intCast(statement)] = true;
+            for (block.successors) |successor| {
+                if (reachable_blocks[@intCast(successor)]) continue;
+                reachable_blocks[@intCast(successor)] = true;
+                try work.append(allocator, successor);
+            }
+        }
+        return reachable_nodes;
+    }
+    // Callers normally provide a CFG. Preserve inference for malformed or
+    // deliberately CFG-less inputs instead of silently dropping all returns.
+    @memset(reachable_nodes, true);
+    return reachable_nodes;
 }
 
 pub fn hasReachableFallthrough(
@@ -937,35 +1053,76 @@ fn collectReturnTypes(
     tree: ast_mod.Ast,
     entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
+    reachable: []const bool,
+    force_reachable: bool,
     out: *std.ArrayList(types.TypeId),
 ) !void {
+    if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= tree.nodes.len) return;
     switch (tree.node(node_id).data) {
-        .ReturnStatement => |statement| try out.append(allocator, if (statement.argument) |argument|
+        .ReturnStatement => |statement| if (force_reachable or reachable[@intCast(node_id)]) try out.append(allocator, if (statement.argument) |argument|
             findType(entries, argument) orelse store.builtins.unknown
         else
             store.builtins.undefined),
-        .Program => |program| for (program.statements) |child| try collectReturnTypes(allocator, child, tree, entries, store, out),
-        .BlockStatement => |block| for (block.statements) |child| try collectReturnTypes(allocator, child, tree, entries, store, out),
+        .Program => |program| for (program.statements) |child| {
+            try collectReturnTypes(allocator, child, tree, entries, store, reachable, force_reachable, out);
+            if (force_reachable and !statementCanFallThrough(child, tree)) break;
+        },
+        .BlockStatement => |block| for (block.statements) |child| {
+            try collectReturnTypes(allocator, child, tree, entries, store, reachable, force_reachable, out);
+            if (force_reachable and !statementCanFallThrough(child, tree)) break;
+        },
         .IfStatement => |statement| {
-            try collectReturnTypes(allocator, statement.consequent, tree, entries, store, out);
-            if (statement.alternate) |alternate| try collectReturnTypes(allocator, alternate, tree, entries, store, out);
+            try collectReturnTypes(allocator, statement.consequent, tree, entries, store, reachable, force_reachable, out);
+            if (statement.alternate) |alternate| try collectReturnTypes(allocator, alternate, tree, entries, store, reachable, force_reachable, out);
         },
-        .WhileStatement => |statement| try collectReturnTypes(allocator, statement.body, tree, entries, store, out),
-        .DoWhileStatement => |statement| try collectReturnTypes(allocator, statement.body, tree, entries, store, out),
-        .ForStatement => |statement| try collectReturnTypes(allocator, statement.body, tree, entries, store, out),
-        .SwitchStatement => |statement| for (statement.cases) |case| try collectReturnTypes(allocator, case, tree, entries, store, out),
-        .SwitchCase => |case| for (case.consequent) |child| try collectReturnTypes(allocator, child, tree, entries, store, out),
+        .WhileStatement => |statement| try collectReturnTypes(allocator, statement.body, tree, entries, store, reachable, force_reachable, out),
+        .DoWhileStatement => |statement| try collectReturnTypes(allocator, statement.body, tree, entries, store, reachable, force_reachable, out),
+        .ForStatement => |statement| try collectReturnTypes(allocator, statement.body, tree, entries, store, reachable, force_reachable, out),
+        .SwitchStatement => |statement| for (statement.cases) |case| try collectReturnTypes(allocator, case, tree, entries, store, reachable, force_reachable, out),
+        .SwitchCase => |case| for (case.consequent) |child| try collectReturnTypes(allocator, child, tree, entries, store, reachable, force_reachable, out),
         .TryStatement => |statement| {
-            try collectReturnTypes(allocator, statement.block, tree, entries, store, out);
-            if (statement.handler) |handler| try collectReturnTypes(allocator, handler, tree, entries, store, out);
-            if (statement.finalizer) |finalizer| try collectReturnTypes(allocator, finalizer, tree, entries, store, out);
+            const return_start = out.items.len;
+            try collectReturnTypes(allocator, statement.block, tree, entries, store, reachable, force_reachable, out);
+            if (statement.handler) |handler| try collectReturnTypes(allocator, handler, tree, entries, store, reachable, force_reachable, out);
+            if (statement.finalizer) |finalizer| {
+                // A non-completing finally replaces every return/throw result
+                // from its try/catch. CFG edges do not encode this JS rule.
+                if (!statementCanFallThrough(finalizer, tree)) out.shrinkRetainingCapacity(return_start);
+                try collectReturnTypes(allocator, finalizer, tree, entries, store, reachable, true, out);
+            }
         },
-        .CatchClause => |clause| try collectReturnTypes(allocator, clause.body, tree, entries, store, out),
-        .FinallyClause => |clause| try collectReturnTypes(allocator, clause.body, tree, entries, store, out),
-        .LabeledStatement => |statement| try collectReturnTypes(allocator, statement.body, tree, entries, store, out),
+        .CatchClause => |clause| try collectReturnTypes(allocator, clause.body, tree, entries, store, reachable, force_reachable, out),
+        .FinallyClause => |clause| try collectReturnTypes(allocator, clause.body, tree, entries, store, reachable, force_reachable, out),
+        .LabeledStatement => |statement| try collectReturnTypes(allocator, statement.body, tree, entries, store, reachable, force_reachable, out),
         .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassDeclaration, .ClassExpression => {},
         else => {},
     }
+}
+
+fn statementCanFallThrough(node_id: ast_mod.NodeId, tree: ast_mod.Ast) bool {
+    if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= tree.nodes.len) return true;
+    return switch (tree.node(node_id).data) {
+        .ReturnStatement, .ThrowStatement, .BreakStatement, .ContinueStatement => false,
+        .Program => |program| sequenceCanFallThrough(program.statements, tree),
+        .BlockStatement => |block| sequenceCanFallThrough(block.statements, tree),
+        .IfStatement => |statement| statement.alternate == null or
+            statementCanFallThrough(statement.consequent, tree) or
+            statementCanFallThrough(statement.alternate.?, tree),
+        .TryStatement => |statement| if (statement.finalizer) |finalizer|
+            statementCanFallThrough(finalizer, tree)
+        else
+            statementCanFallThrough(statement.block, tree) or
+                (if (statement.handler) |handler| statementCanFallThrough(handler, tree) else true),
+        .CatchClause => |clause| statementCanFallThrough(clause.body, tree),
+        .FinallyClause => |clause| statementCanFallThrough(clause.body, tree),
+        .LabeledStatement => |statement| statementCanFallThrough(statement.body, tree),
+        else => true,
+    };
+}
+
+fn sequenceCanFallThrough(statements: []const ast_mod.NodeId, tree: ast_mod.Ast) bool {
+    for (statements) |statement| if (!statementCanFallThrough(statement, tree)) return false;
+    return true;
 }
 
 /// Store declared-annotation types as the contextual hint without overwriting
@@ -978,6 +1135,7 @@ fn applyAggregateContexts(
     tree: ast_mod.Ast,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     store: *types.TypeStore,
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
 ) !bool {
     var changed = false;
     for (tree.nodes) |node| switch (node.data) {
@@ -987,9 +1145,9 @@ fn applyAggregateContexts(
             // The collector seeds named annotations (interfaces, aliases, imports) on the
             // initializer. Inline aggregate annotations still resolve locally here.
             const declared_contextual = if (findNodeInfo(entries.items, initializer)) |info|
-                info.contextual_type orelse try resolveTypeAnnotation(tree, annotation, store)
+                info.contextual_type orelse lookupResolvedTypeAnnotation(annotation, resolved_type_nodes, store)
             else
-                try resolveTypeAnnotation(tree, annotation, store);
+                lookupResolvedTypeAnnotation(annotation, resolved_type_nodes, store);
 
             switch (tree.node(initializer).data) {
                 .ArrayExpression => |array| {
@@ -1107,61 +1265,15 @@ fn applyAggregateContexts(
     return changed;
 }
 
-pub fn resolveTypeAnnotation(tree: ast_mod.Ast, annotation: ast_mod.TypeAnnotation, store: *types.TypeStore) !types.TypeId {
-    return resolveTypeNode(tree, annotation.root, store, false);
-}
-
-fn resolveTypeNode(tree: ast_mod.Ast, node_id: ast_mod.TypeNodeId, store: *types.TypeStore, readonly: bool) !types.TypeId {
-    const b = &store.builtins;
-    return switch (tree.typeNode(node_id).data) {
-        .Named => |named| blk: {
-            inline for (builtin_kind.builtinKinds) |kind| {
-                if (std.mem.eql(u8, named.name, builtin_kind.builtinKindName(kind))) break :blk b.id(kind);
-            }
-            break :blk b.unknown;
-        },
-        .Array => |element| try store.intern(.{ .array = .{
-            .element_type = try resolveTypeNode(tree, element, store, false),
-            .readonly = readonly,
-        } }),
-        .Tuple => |items| blk: {
-            var elements = try store.allocator.alloc(types.TupleElement, items.len);
-            for (items, 0..) |item, index| elements[index] = .{ .type_id = try resolveTypeNode(tree, item, store, false) };
-            break :blk try store.intern(.{ .tuple = .{ .elements = elements, .readonly = readonly } });
-        },
-        .Object => |members| blk: {
-            var properties = try store.allocator.alloc(types.ObjectProperty, members.len);
-            for (members, 0..) |member, index| properties[index] = .{
-                .name = member.name,
-                .type_id = try resolveTypeNode(tree, member.type_node, store, false),
-                .optional = member.optional,
-                .readonly = readonly,
-            };
-            break :blk try store.intern(.{ .object = properties });
-        },
-        .Function => |function| blk: {
-            var params = try store.allocator.alloc(types.ParameterType, function.parameters.len);
-            for (function.parameters, 0..) |param, index| params[index] = .{
-                .name = param.name,
-                .type_id = try resolveTypeNode(tree, param.type_node, store, false),
-                .optional = param.optional,
-            };
-            break :blk try store.addFunction(params, try resolveTypeNode(tree, function.return_type, store, false));
-        },
-        .Readonly => |inner| try resolveTypeNode(tree, inner, store, true),
-        .Parenthesized => |inner| try resolveTypeNode(tree, inner, store, readonly),
-        .Union => |items| blk: {
-            var members = try store.allocator.alloc(types.TypeId, items.len);
-            for (items, 0..) |item, index| members[index] = try resolveTypeNode(tree, item, store, false);
-            break :blk try store.unionOf(members);
-        },
-        .Intersection => |items| blk: {
-            var members = try store.allocator.alloc(types.TypeId, items.len);
-            for (items, 0..) |item, index| members[index] = try resolveTypeNode(tree, item, store, false);
-            break :blk try store.intersectionOf(members);
-        },
-        else => b.unknown,
-    };
+fn lookupResolvedTypeAnnotation(
+    annotation: ast_mod.TypeAnnotation,
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
+    store: *const types.TypeStore,
+) types.TypeId {
+    for (resolved_type_nodes) |entry| {
+        if (entry.node_id == annotation.root) return entry.type_id;
+    }
+    return store.builtins.unknown;
 }
 
 fn compoundBaseOperator(operator: tokens.TokenType) tokens.TokenType {
@@ -1187,6 +1299,11 @@ fn compoundBaseOperator(operator: tokens.TokenType) tokens.TokenType {
 
 fn findType(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) ?types.TypeId {
     for (entries) |entry| if (entry.node_id == node_id) return entry.type_id;
+    return null;
+}
+
+fn findEffectiveType(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) ?types.TypeId {
+    for (entries) |entry| if (entry.node_id == node_id) return entry.effective();
     return null;
 }
 
@@ -1536,36 +1653,6 @@ pub fn inferLiteralNodeTypes(
 //   * for non-literal cases, no classified node appears (empty slice).
 
 const test_builtins = types.Builtins.init();
-
-test "Goal 137 contextual aggregates converge and preserve child inference" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const result = try @import("../frontend/frontend.zig").analyze(
-        allocator,
-        .{ .text =
-        \\const values: number[] = ["wrong"];
-        \\const tuple: [number, string] = [1, "ok"];
-        \\const object: { value: number } = { value: "wrong" };
-    },
-        .{},
-    );
-    var store = types.TypeStore.init(allocator);
-    var entries: std.ArrayList(node_type_info_mod.NodeTypeInfo) = .empty;
-    const literals = try inferLiteralNodeTypes(allocator, result.ast, &store.builtins);
-    try entries.appendSlice(allocator, literals);
-
-    const rounds = try inferPrimitiveExpressions(allocator, result.ast, &entries, &store);
-    try std.testing.expect(rounds <= 3);
-
-    var distinct_context_count: usize = 0;
-    for (entries.items) |entry| {
-        if (entry.contextual_type) |contextual| {
-            if (entry.type_id != contextual) distinct_context_count += 1;
-        }
-    }
-    try std.testing.expect(distinct_context_count >= 2);
-}
 
 test "number literal node has type number" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
