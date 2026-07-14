@@ -1,6 +1,9 @@
 # CLI
 
-The `vizg` CLI lives in `src/main.zig`. Most commands read one source file, run `frontend.analyze`, and print one inspection view. The `modules` command loads an entry file plus local imports and prints the module graph.
+The `vizg` CLI lives in `src/main.zig`. Single-file commands read source bytes
+once, call the source-only semantic API, and print one inspection view. The
+`modules` command drives the portable project API through the optional native
+`FsModuleHost` adapter.
 
 Build first:
 
@@ -46,7 +49,7 @@ commands:
   refs <file>       alias for references
   cfg <file>      print function control-flow graphs
   types <file>    print canonical semantic symbol and expression types
-  modules <file>  build module graph; print Modules, Imports, **Links**, and Diagnostics
+  modules <file>  build and print the portable module project
   help            print this help
 ```
 
@@ -230,20 +233,29 @@ Exit behavior: exits `0` when semantic analysis completes. Semantic diagnostics 
 
 ## `modules <file>`
 
-Purpose: build a minimal module graph from an entry file and print the Modules, Imports, Links, and Diagnostics sections.
+Purpose: drive a portable project from an entry file and print the Modules,
+Imports, Links, and Diagnostics sections.
 
-The resolver tries the exact specifier when it already ends in `.ts`, then `specifier + ".ts"`, then `specifier + "/index.ts"`. Non-relative imports are recorded as external edges; they are not loaded or export-validated (they surface through the Links section with status=external and no resolved target).
+`FsModuleHost` accepts relative specifiers and tries `.ts`, `.tsx`, `.js`, and
+`.jsx` files before matching `index` files. It confines canonical results to the
+root file's directory. Missing, denied, and failed loads become explicit project
+responses; cyclic requests terminate through the portable state machine.
 
-Cross-file import linking is performed by `src/modules/linker.zig` on top of the graph. Each static named/default/namespace import resolves to an exported symbol in a local module when available; external imports stay unresolved.
+The core derives imports, exports, graph diagnostics, and semantic links from
+host-supplied bytes. Output preserves each source logical path and import span.
 
 External declarations (optional):
 
 The CLI accepts two flags for registering externals — API contracts only, never executed or bundled:
 
 ```txt
-vizg modules <file> --add-external "name=path"
+vizg modules <file> --add-external "name"
 vizg modules <file> --externals-dir ./externals
 ```
+
+`--add-external name=label` remains accepted; only `name` is the specifier.
+`--externals-dir` registers each file basename as a source-less descriptor and
+does not read or execute file contents.
 
 Example:
 
@@ -255,26 +267,45 @@ Output shape:
 
 ```txt
 Modules
-  module 0 path="test/frontend/modules/manual/success.ts"
-  module 1 path="test/frontend/modules/manual/dep.ts"
+  module 1 path=".../success.ts" state=complete
+  module 2 path=".../dep.ts" state=complete
 
 Imports
-  module 0 -> module 1 specifier="./dep" status=local
-  module 0 -> external specifier="node:fs" status=external
+  module 1 -> module 2 specifier="./dep" kind=static import_kind=named status=resolved span=...
 
 Links
-  link 0 local="value" imported="value" from="./dep" status=local -> module 1 name="value"
-  link 1 local="readFile" imported="readFile" from="node:fs" status=external -> unresolved
+  link 0 module=1 local="value" imported="value" state=resolved span=...
 
 Diagnostics
+  none
 ```
 
-The Links section is omitted when there are no static named/default/namespace imports with an associated import symbol. When present, it prints one line per `LinkedImport`:
+The Links section appears when the finished project exposes semantic imports.
+Each line reports the owning module, local/imported names, portable link state,
+and original source span.
 
-- resolved link: `link <id> local="<local>" imported="<imported>" from="<specifier>" status=<status> -> module <target-id> name="<exported-name>"`
-- unresolved external or missing-export link: `link <id> local="<local>" imported="<imported>" from="<specifier>" status=<status> -> unresolved`
+Exit behavior: exits `0` when the project has no error diagnostics. Exits `1`
+for terminal host responses or semantic/module errors. Partial modules, edges,
+spans, and diagnostics remain printable.
 
-Exit behavior: exits `0` when the graph has no error diagnostics. Exits `1` for module graph errors such as `VZG5001 module_not_found`, `VZG5002 missing_export`, or `VZG5003 circular_import`.
+An embedding can replace `FsModuleHost` with any driver that submits root
+bytes, calls `Project.step()`, resolves requests, and supplies source, external,
+not-found, denied, or failed responses. No filesystem adapter is required by
+core.
+
+The driver must treat `ModuleId` as the only canonical source identity. Paths,
+URLs, logical names, and raw specifiers are presentation or lookup inputs, not
+graph keys. The core parses every supplied source and derives its imports and
+exports; a host must not submit an import/export table for source modules.
+External descriptors use `ExternalModuleId`, remain distinct from source
+modules, and describe only host-known exports and portable type metadata.
+
+For recovery, answer each request exactly once and call `step` again. A stale,
+foreign, duplicate, or out-of-order response is rejected without becoming a
+new request. Missing, denied, and failed responses are terminal graph facts but
+do not discard completed modules; `finish` exposes the partial project. Bounds
+or workspace exhaustion are not retry/rollback guarantees: destroy the project
+and restart with corrected inputs or capacity.
 
 ## Argument And Read Errors
 

@@ -8,10 +8,44 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
-- Added `zig build wasm`, producing a `wasm32-wasi` C ABI reactor module, and added WASI to generic/ABI cross-target compile validation. Freestanding browser runtimes remain unsupported because the file-analysis adapter requires WASI filesystem APIs.
+- Closed the Goal 188 adversarial audit with no unresolved in-scope finding:
+  hardened ABI range, alias, stale-handle, and scratch-lifetime validation;
+  removed the native filesystem path-reopen race; added mutation, replacement,
+  lifecycle, parallel-workspace, and executable-stack regressions; and opened
+  HIR planning while leaving implementation to a separate executable goal.
+- Closed the portable-core ABI v1 release candidate: audited public ownership,
+  identity, host-resolution, recovery, partial-result, and limit contracts;
+  recorded exact native/WebAssembly symbol tables; made the native archive PIC
+  and libc-allocation-free; added a real default-PIE C link/run regression gate;
+  and removed the last dead prototype option and legacy internal terminology.
+- Replaced the WASI reactor package with an import-free
+  `wasm32-freestanding` official ABI v1 module. It exports only linear memory
+  and the official ABI allowlist; a JavaScript host validates the module table
+  and drives single, multi, missing, and external module flows through the same
+  project engine.
+- Promoted the memory-first host-driven project API to official ABI v1 with
+  `VIZG_ABI_VERSION = 1`, one caller-owned bounded workspace, fixed-width
+  layouts, and an exact exported-symbol allowlist. Removed every unpublished
+  pre-release ABI entry point, wrapper, filesystem status, alias, macro, test,
+  and example without a compatibility shim.
+- Migrated the CLI to memory-first APIs: single-file commands now call
+  source-only semantics after executable-owned reads, and `modules` drives the
+  portable project through `FsModuleHost` for local, missing, cyclic, and
+  registered external modules while preserving logical paths and import spans.
+- Added an optional native filesystem host for the portable project API with
+  canonical per-session module IDs, relative extension/index resolution,
+  root-directory traversal and symlink confinement, pre-read size/module
+  limits, and explicit portable responses for filesystem outcomes.
+- Added the memory-first C ABI engine with opaque project/result handles, host-driven source/external/failure responses, deterministic stepping, independent result ownership, platform-identical fixed-width layouts, no filesystem behavior, caller-owned workspace storage, and explicit resource limits.
+- Added copied external-module descriptors with distinct opaque identities, named/default/namespace/type-only export validation, portable builtin type metadata, explicit untyped-as-`unknown` and opt-in `any` policy, and missing-member diagnostics.
+- Added a deterministic pull-based project request state machine: project-local request IDs, FIFO single-request dispatch, equivalent-request deduplication, explicit source/external/not-found/denied/failed responses, stale/foreign/duplicate rejection, cycle-safe host driving, and guarded project finish.
+- Added the owned portable `Project` session with copied host sources, explicit module states, revision conflict rules, idempotent repeated analysis, independently inspectable partial results, and deterministic teardown.
+- Added the portable project identity/source/request contracts: host-assigned opaque module IDs, core-assigned request IDs, borrowed source and import metadata, explicit static/type-only/dynamic/re-export kinds, and logical names that never define identity.
+- Established `src/root.zig` as a freestanding-compilable portable core, moved native filesystem module loading under `src/adapters/native_fs/`, separated executable and ABI roots from the core, and registered `zig build lint-portable-core` in validation.
+- Superseded the old portability/ABI roadmap with the serial portable-core program: the memory-first host-driven API is official ABI v1, compatibility layers are forbidden, and HIR is blocked through the final Goal 188 audit.
 - Closed the adversarial Typed Semantics v2 audit: module parser-depth options now propagate, malformed recovered function bodies cannot trigger invalid-node dereferences, canonical composite/generic growth has controlled limits, and Debug safety mutation, lifecycle, parallel, ABI, cross-target, and validation gates are documented.
 - Closed Typed Semantics v2 for the supported subset: canonical structural and nominal CLI formatting, cross-module class/interface shape preservation, one inference/store ownership path, and removal of the obsolete alternative inference implementation. No HIR or backend layer was introduced.
-- Added the owned Zig `SemanticResult` API with single-pass analysis, explicit teardown, stable ID lookups, partial-result metadata, and deterministic syntax/semantic diagnostic views. C ABI v1 remains unchanged.
+- Added the owned Zig `SemanticResult` API with single-pass analysis, explicit teardown, stable ID lookups, partial-result metadata, and deterministic syntax/semantic diagnostic views.
 - Replaced competing type identity allocators with one canonical per-context `TypeStore`; all primitive, structural, nominal, and function-signature IDs share that store, and `TypeId` equality is meaningful only inside its owning semantic result/project.
 - Qualified class, interface, and enum declaration identity by module, preventing equal local AST node IDs in different files from colliding in type compatibility, semantic maps, or import/export links.
 - Split class constructor values from class instances, added authoritative static/instance member tables with four-state visibility and inheritance metadata, and made interfaces first-class structural member-bearing semantic types.
@@ -98,17 +132,15 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ### Added
 
-- `zig build android-aarch64-lib` packages the public C ABI as an Android AArch64/API 24 static archive and header, with a target-compiled minimal C consumer probe.
-- Versioned C ABI v1 with `VIZG_ABI_VERSION`, the exported
-  `vizg_abi_version()` runtime check, a header/runtime match test, and explicit
-  ownership, lifetime, pointer/length, thread-safety, status, size, and platform
-  validation documentation.
-- Status-returning `vizg_analyze_source_ex` C API with explicit out-of-memory reporting.
-- C-compatible static library at `zig-out/lib/libvizg.a` with its public header installed as `zig-out/include/vizg.h`.
-- Exported C ABI entry points for file analysis, in-memory source analysis, and result cleanup: `vizg_analyze_file`, `vizg_analyze_source`, and `vizg_free_result`.
+- `zig build android-aarch64-lib` packages the pre-release C surface as an Android AArch64/API 24 static archive and header, with a target-compiled minimal C consumer probe.
+- Added early pre-release ABI version, ownership, lifetime, pointer/length,
+  thread-safety, status, size, and platform validation contracts.
+- Added early status-returning source analysis with explicit out-of-memory reporting.
+- Added a C-compatible static library and installed header.
+- Added early file/source analysis and result cleanup entry points.
 - Memory-first analysis accepts source bytes and an optional diagnostic path without reading the filesystem.
-- C and Zig ABI examples for interop, diagnostic formatting, null-result handling, span validation, and token iteration under `example/`.
-- Portable `lint-silent` structural check integrated into `zig build test`, with runnable C consumer checks retained under `example/`.
+- Added early C and Zig ABI interop examples.
+- Added a portable silent-library structural check.
 - Portable `zig build validate` step that installs artifacts, runs tests, and exercises the CLI without shell or `/tmp` dependencies.
 - Scanner validation for string and template escape sequences, including `\\xNN`, `\\uNNNN`, and trailing backslashes, with diagnostic `VZG1005 invalid_escape_sequence`.
 - Forward type-inference groundwork with bounded fixpoint iteration in `src/semantics/inference.zig`; this remains experimental and is not yet wired into the public semantics pipeline.
@@ -144,7 +176,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 ### Removed
 
 - Redundant static-library wrapper modules `src/lib.zig` and `src/lib_abi.zig`.
-- Unconditional debug output from public C ABI operations.
+- Unconditional debug output from C ABI operations.
 
 ## [0.0.1] — 2026-07-10
 

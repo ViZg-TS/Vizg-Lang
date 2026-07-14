@@ -2,6 +2,15 @@
 
 *Created: 2026-07-10 — Informed by V8 engine architecture, JavaScriptCore Inspector protocol, TypeScript compiler design.*
 
+> **Superseded and non-executable.** This historical plan does not authorize
+> implementation work. Goals 174–188 replace the former portability sequence
+> and freeze the active architecture as a portable core with host-driven
+> modules and the official memory-first ABI v1. The earlier unpublished ABI was
+> removed. No shim, deprecated alias, compatibility library, or parallel ABI is
+> retained. Goal 188 closed on 2026-07-14, so HIR planning is authorized. This
+> historical document remains non-executable and does not authorize HIR
+> implementation.
+
 ## Architecture Reference
 
 ### V8 Engine Pipeline (Reference)

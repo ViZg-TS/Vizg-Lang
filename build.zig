@@ -4,26 +4,33 @@ const android = @import("android.build.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
+    // Keep the documented pre-0.16 spelling working while also accepting
+    // Zig 0.16's native `--release=safe` form.
+    const optimize = b.option(
+        std.builtin.OptimizeMode,
+        "optimize",
+        "Compatibility optimization mode (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall)",
+    ) orelse b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
 
-    // root.zig is both the public Zig package and the static-library root.
+    // Portable Zig package. It has no ABI or native-adapter dependency.
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
+        .link_libc = false,
+        .pic = true,
     });
     const vizg_cabi = b.addModule("vizg-abi", .{
         .root_source_file = b.path("Lib/vizg.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
+        .link_libc = false,
+        .pic = true,
     });
-    lib_mod.addImport("vizg-abi", vizg_cabi);
     vizg_cabi.addImport("vizg-impl", lib_mod);
     const vizg_lib = b.addLibrary(.{
         .name = "vizg",
-        .root_module = lib_mod,
+        .root_module = vizg_cabi,
     });
 
     // A fixed Debug build keeps runtime safety checks enabled regardless of the
@@ -40,11 +47,19 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
         .link_libc = true,
     });
-    safety_impl.addImport("vizg-abi", safety_abi);
     safety_abi.addImport("vizg-impl", safety_impl);
+    const safety_native_fs = b.createModule(.{
+        .root_source_file = b.path("src/native_fs_adapter.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    safety_native_fs.addImport("vizg-core", safety_impl);
     const safety_tests = b.addRunArtifact(b.addTest(.{ .root_module = safety_impl }));
+    const safety_native_tests = b.addRunArtifact(b.addTest(.{ .root_module = safety_native_fs }));
     const safety_step = b.step("audit-safety", "Run the full suite with Zig runtime safety enabled");
     safety_step.dependOn(&safety_tests.step);
+    safety_step.dependOn(&safety_native_tests.step);
 
     // Compile the OS-independent frontend/types/semantics layers for a small
     // representative target matrix. Objects are compiled only: no foreign
@@ -79,6 +94,19 @@ pub fn build(b: *std.Build) void {
         cross_check_step.dependOn(&probe.step);
     }
 
+    const portable_core_probe = b.addObject(.{
+        .name = "vizg-portable-core-lint",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("portable_core_check.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
+            .optimize = .Debug,
+        }),
+    });
+    const portable_core_lint_step = b.step(
+        "lint-portable-core",
+        "Reject OS, native-adapter, and ABI dependencies in src/root.zig",
+    );
+    portable_core_lint_step.dependOn(&portable_core_probe.step);
     // Compile the same static-library graph installed for consumers, plus a C
     // translation unit that includes the public header, for every matrix target.
     // This is compile-only: no foreign archive is installed or executed.
@@ -89,15 +117,16 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = cross_target_resolved,
             .optimize = .Debug,
-            .link_libc = true,
+            .link_libc = false,
+            .pic = true,
         });
         const cross_abi = b.createModule(.{
             .root_source_file = b.path("Lib/vizg.zig"),
             .target = cross_target_resolved,
             .optimize = .Debug,
-            .link_libc = true,
+            .link_libc = false,
+            .pic = true,
         });
-        cross_impl.addImport("vizg-abi", cross_abi);
         cross_abi.addImport("vizg-impl", cross_impl);
         cross_abi.addIncludePath(b.path("Lib"));
         cross_abi.addCSourceFile(.{
@@ -106,7 +135,7 @@ pub fn build(b: *std.Build) void {
         });
         const cross_archive = b.addLibrary(.{
             .name = b.fmt("vizg-abi-cross-{s}", .{cross_target.name}),
-            .root_module = cross_impl,
+            .root_module = cross_abi,
         });
         abi_cross_check_step.dependOn(&cross_archive.step);
     }
@@ -119,19 +148,20 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = android_target,
         .optimize = .ReleaseFast,
-        .link_libc = true,
+        .link_libc = false,
+        .pic = true,
     });
     const android_abi = b.createModule(.{
         .root_source_file = b.path("Lib/vizg.zig"),
         .target = android_target,
         .optimize = .ReleaseFast,
-        .link_libc = true,
+        .link_libc = false,
+        .pic = true,
     });
-    android_impl.addImport("vizg-abi", android_abi);
     android_abi.addImport("vizg-impl", android_impl);
     const android_lib = b.addLibrary(.{
         .name = "vizg",
-        .root_module = android_impl,
+        .root_module = android_abi,
     });
 
     const android_consumer_source = b.addWriteFiles().add("android_minimal.c",
@@ -168,42 +198,48 @@ pub fn build(b: *std.Build) void {
     android_lib_step.dependOn(&install_android_header.step);
     android_lib_step.dependOn(&android_consumer.step);
 
-    // Link the public C ABI as a WASI reactor. It retains @export declarations
-    // and exposes _initialize instead of a CLI-style _start function.
+    // Link the official ABI v1 without WASI, libc, or an entry point. The host
+    // grows exported linear memory and supplies workspace/input ranges.
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
-        .os_tag = .wasi,
+        .os_tag = .freestanding,
     });
     const wasm_impl = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = wasm_target,
         .optimize = optimize,
-        .link_libc = true,
     });
     const wasm_abi = b.createModule(.{
         .root_source_file = b.path("Lib/vizg.zig"),
         .target = wasm_target,
         .optimize = optimize,
-        .link_libc = true,
     });
-    wasm_impl.addImport("vizg-abi", wasm_abi);
     wasm_abi.addImport("vizg-impl", wasm_impl);
     const wasm_module = b.addExecutable(.{
         .name = "vizg",
         .root_module = wasm_abi,
     });
     wasm_module.entry = .disabled;
-    wasm_module.wasi_exec_model = .reactor;
     wasm_module.rdynamic = true;
+    wasm_module.export_memory = true;
 
     const install_wasm = b.addInstallArtifact(wasm_module, .{
-        .dest_dir = .{ .override = .{ .custom = "wasm" } },
+        .dest_dir = .{ .override = .{ .custom = "wasm-freestanding" } },
     });
-    const wasm_step = b.step(
-        "wasm",
-        "Build wasm32-wasi module: zig-out/wasm/vizg.wasm",
+    const wasm_host_test = b.addSystemCommand(&.{
+        "node",
+        "test/wasm/official_abi_v1.mjs",
+    });
+    wasm_host_test.addArtifactArg(wasm_module);
+    const wasm_freestanding_step = b.step(
+        "wasm-freestanding",
+        "Build and test the official ABI v1 for wasm32-freestanding",
     );
-    wasm_step.dependOn(&install_wasm.step);
+    wasm_freestanding_step.dependOn(&portable_core_probe.step);
+    wasm_freestanding_step.dependOn(&install_wasm.step);
+    wasm_freestanding_step.dependOn(&wasm_host_test.step);
+    const wasm_step = b.step("wasm", "Alias for the wasm32-freestanding ABI build");
+    wasm_step.dependOn(wasm_freestanding_step);
 
     // -------------------------------------------------------------------
     // 2. Install step — default prefix is zig-out/.
@@ -229,6 +265,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    run_mod.addImport("vizg-core", lib_mod);
 
     const main_exe = b.addExecutable(.{
         .name = "vizg",
@@ -261,7 +298,29 @@ pub fn build(b: *std.Build) void {
     lint_silent_step.dependOn(&lint_silent.step);
 
     // 4b. Final test step: portable structural, unit, ABI, and helper tests.
-    const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = lib_mod }));
+    const unit_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const native_fs_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/native_fs_adapter.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    native_fs_test_mod.addImport("vizg-core", unit_test_mod);
+    const cli_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    cli_test_mod.addImport("vizg-core", unit_test_mod);
+    const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = unit_test_mod }));
+    const run_native_fs_tests = b.addRunArtifact(b.addTest(.{ .root_module = native_fs_test_mod }));
+    const run_cli_tests = b.addRunArtifact(b.addTest(.{ .root_module = cli_test_mod }));
     const abi_lifecycle_mod = b.createModule(.{
         .root_source_file = b.path("test/abi_lifecycle.zig"),
         .target = target,
@@ -272,6 +331,9 @@ pub fn build(b: *std.Build) void {
     abi_lifecycle_mod.linkLibrary(vizg_lib);
     const abi_lifecycle_tests = b.addRunArtifact(b.addTest(.{
         .root_module = abi_lifecycle_mod,
+    }));
+    const abi_internal_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = vizg_cabi,
     }));
     const abi_layout_mod = b.createModule(.{
         .root_source_file = b.path("test/c_abi/layout_test.zig"),
@@ -290,6 +352,103 @@ pub fn build(b: *std.Build) void {
     }));
     const abi_layout_step = b.step("abi-layout-test", "Compare Zig and C public ABI layouts");
     abi_layout_step.dependOn(&abi_layout_tests.step);
+    const abi_symbols = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        \\set -eu
+        \\archive="$1"
+        \\actual="$(nm -g --defined-only "$archive" | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^vizg_/ { print $3 }' | sort -u)"
+        \\expected='vizg_project_add_source
+        \\vizg_project_analyze_source
+        \\vizg_project_create
+        \\vizg_project_destroy
+        \\vizg_project_finish
+        \\vizg_project_respond_external
+        \\vizg_project_respond_failure
+        \\vizg_project_respond_source
+        \\vizg_project_result_destroy
+        \\vizg_project_result_summary
+        \\vizg_project_step
+        \\vizg_project_workspace_alignment
+        \\vizg_project_workspace_overhead'
+        \\if [ "$actual" != "$expected" ]; then
+        \\    echo "unexpected public ABI symbols:" >&2
+        \\    printf '%s\n' "$actual" >&2
+        \\    exit 1
+        \\fi
+        \\imports="$(nm -g --undefined-only "$archive" | awk 'NF && $NF !~ /:$/ { print $NF }' | sort -u)"
+        \\expected_imports="$2"
+        \\if [ "$imports" != "$expected_imports" ]; then
+        \\    echo "unexpected native archive imports:" >&2
+        \\    printf '%s\n' "$imports" >&2
+        \\    exit 1
+        \\fi
+        ,
+        "abi-symbols",
+    });
+    abi_symbols.addArtifactArg(vizg_lib);
+    abi_symbols.addArg(switch (optimize) {
+        .Debug =>
+        \\_DYNAMIC
+        \\__divti3
+        \\__modti3
+        \\__tls_get_addr
+        \\getauxval
+        \\memcpy
+        \\memmove
+        ,
+        .ReleaseSafe =>
+        \\_DYNAMIC
+        \\__divti3
+        \\__tls_get_addr
+        \\__zig_probe_stack
+        \\getauxval
+        \\memcpy
+        \\memmove
+        \\memset
+        ,
+        .ReleaseFast, .ReleaseSmall =>
+        \\memcpy
+        \\memmove
+        \\memset
+        ,
+    });
+    const abi_symbols_step = b.step("abi-symbols-test", "Enforce the official ABI v1 symbol allowlist");
+    abi_symbols_step.dependOn(&abi_symbols.step);
+
+    // Regression gate: the installed archive must link into the default PIE
+    // produced by the documented native C compiler command.
+    const native_consumer_source = b.addWriteFiles().add("official_abi_v1_consumer.c",
+        \\#include "vizg.h"
+        \\int main(void) {
+        \\    return vizg_project_workspace_alignment() == 0 ? 1 : 0;
+        \\}
+    );
+    const native_consumer_link = b.addSystemCommand(&.{ "cc", "-std=c11", "-I", "Lib" });
+    if (target.result.os.tag == .linux) native_consumer_link.addArg("-Wl,-z,noexecstack");
+    native_consumer_link.addFileArg(native_consumer_source);
+    native_consumer_link.addArtifactArg(vizg_lib);
+    native_consumer_link.addArg("-o");
+    const native_consumer_exe = native_consumer_link.addOutputFileArg("official_abi_v1_consumer");
+    const native_consumer_run = b.addSystemCommand(&.{ "sh", "-c", "exec \"$1\"", "native-consumer" });
+    native_consumer_run.addFileArg(native_consumer_exe);
+    const native_consumer_step = b.step("abi-native-consumer-test", "Link and run the official ABI v1 from C");
+    native_consumer_step.dependOn(&native_consumer_run.step);
+    if (target.result.os.tag == .linux) {
+        const native_stack_check = b.addSystemCommand(&.{
+            "sh",
+            "-c",
+            \\set -eu
+            \\flags="$(readelf -W -l "$1" | awk '$1 == "GNU_STACK" { print $(NF - 1) }')"
+            \\case "$flags" in
+            \\    *E*|'') echo "native ABI consumer has an executable or missing GNU_STACK" >&2; exit 1 ;;
+            \\esac
+            ,
+            "native-stack-check",
+        });
+        native_stack_check.addFileArg(native_consumer_exe);
+        native_consumer_step.dependOn(&native_stack_check.step);
+    }
     const android_helper_tests = b.addRunArtifact(b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("android.build.zig"),
@@ -299,9 +458,15 @@ pub fn build(b: *std.Build) void {
     }));
     const test_step = b.step("test", "Compile & run all unit tests");
     test_step.dependOn(lint_silent_step);
+    test_step.dependOn(portable_core_lint_step);
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_native_fs_tests.step);
+    test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&abi_lifecycle_tests.step);
+    test_step.dependOn(&abi_internal_tests.step);
     test_step.dependOn(abi_layout_step);
+    test_step.dependOn(abi_symbols_step);
+    test_step.dependOn(native_consumer_step);
     test_step.dependOn(&android_helper_tests.step);
 
     // 5. Portable validation: install public artifacts, run all tests, and
