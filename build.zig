@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "x86_64-windows", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows } },
         .{ .name = "aarch64-macos", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
         .{ .name = "x86_64-macos", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos } },
+        .{ .name = "wasm32-wasi", .query = .{ .cpu_arch = .wasm32, .os_tag = .wasi } },
         .{ .name = "aarch64-linux-android.24", .query = .{
             .cpu_arch = .aarch64,
             .os_tag = .linux,
@@ -166,6 +167,43 @@ pub fn build(b: *std.Build) void {
     android_lib_step.dependOn(&install_android_lib.step);
     android_lib_step.dependOn(&install_android_header.step);
     android_lib_step.dependOn(&android_consumer.step);
+
+    // Link the public C ABI as a WASI reactor. It retains @export declarations
+    // and exposes _initialize instead of a CLI-style _start function.
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+    });
+    const wasm_impl = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const wasm_abi = b.createModule(.{
+        .root_source_file = b.path("Lib/vizg.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    wasm_impl.addImport("vizg-abi", wasm_abi);
+    wasm_abi.addImport("vizg-impl", wasm_impl);
+    const wasm_module = b.addExecutable(.{
+        .name = "vizg",
+        .root_module = wasm_abi,
+    });
+    wasm_module.entry = .disabled;
+    wasm_module.wasi_exec_model = .reactor;
+    wasm_module.rdynamic = true;
+
+    const install_wasm = b.addInstallArtifact(wasm_module, .{
+        .dest_dir = .{ .override = .{ .custom = "wasm" } },
+    });
+    const wasm_step = b.step(
+        "wasm",
+        "Build wasm32-wasi module: zig-out/wasm/vizg.wasm",
+    );
+    wasm_step.dependOn(&install_wasm.step);
 
     // -------------------------------------------------------------------
     // 2. Install step — default prefix is zig-out/.

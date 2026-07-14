@@ -37,6 +37,18 @@ zig-out/lib/libvizg.a  static library
 zig-out/include/vizg.h public C header
 ```
 
+Build the WebAssembly C ABI module with:
+
+```sh
+zig build wasm
+```
+
+This installs `zig-out/wasm/vizg.wasm`, targeting `wasm32-wasi`. The reactor
+exports the C ABI functions from `Lib/vizg.h` and `_initialize`, not `_start`.
+It requires a WASI host because `vizg_analyze_file` uses filesystem APIs;
+`wasm32-freestanding` and browser-only runtimes are not currently supported.
+The in-memory `vizg_analyze_source_ex` path itself does not read files.
+
 ## Test
 
 ```sh
@@ -60,7 +72,7 @@ zig build abi-cross-check
 
 `cross-check` builds the generic frontend, types, and semantics layers as objects. `abi-cross-check` builds the same static-library graph used by consumers, rooted at `src/root.zig` with the C ABI implementation in `Lib/vizg.zig`, and compiles a C translation unit against `Lib/vizg.h` for every target. The ABI archives are compile probes and are not installed as packages.
 
-Both steps cover `x86_64-linux`, `aarch64-linux`, `x86_64-windows`, `x86_64-macos`, `aarch64-macos`, and `aarch64-linux-android.24`. They compile only and never run foreign code. Passing proves compile portability and header neutrality, not runtime behavior. The CLI and packaging remain outside the matrix. Android compilation uses Zig's target query and does not require an NDK; Android runtime validation remains separate work.
+Both steps cover `x86_64-linux`, `aarch64-linux`, `x86_64-windows`, `x86_64-macos`, `aarch64-macos`, `wasm32-wasi`, and `aarch64-linux-android.24`. They compile only and never run foreign code. Passing proves compile portability and header neutrality, not runtime behavior. The CLI and packaging remain outside the matrix. Android compilation uses Zig's target query and does not require an NDK; Android runtime validation remains separate work.
 
 Build the packaged Android AArch64/API 24 static library with:
 

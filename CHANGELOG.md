@@ -8,6 +8,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Added `zig build wasm`, producing a `wasm32-wasi` C ABI reactor module, and added WASI to generic/ABI cross-target compile validation. Freestanding browser runtimes remain unsupported because the file-analysis adapter requires WASI filesystem APIs.
 - Closed the adversarial Typed Semantics v2 audit: module parser-depth options now propagate, malformed recovered function bodies cannot trigger invalid-node dereferences, canonical composite/generic growth has controlled limits, and Debug safety mutation, lifecycle, parallel, ABI, cross-target, and validation gates are documented.
 - Closed Typed Semantics v2 for the supported subset: canonical structural and nominal CLI formatting, cross-module class/interface shape preservation, one inference/store ownership path, and removal of the obsolete alternative inference implementation. No HIR or backend layer was introduced.
 - Added the owned Zig `SemanticResult` API with single-pass analysis, explicit teardown, stable ID lookups, partial-result metadata, and deterministic syntax/semantic diagnostic views. C ABI v1 remains unchanged.

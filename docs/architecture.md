@@ -57,8 +57,14 @@ and available memory. File input may report `VIZG_STATUS_FILE_TOO_LARGE`.
 
 The default host-target static library is produced by `zig build`, and the host
 is the only target with runtime ABI validation through `zig build test`.
+`zig build wasm` links the same C ABI as a `wasm32-wasi` reactor module at
+`zig-out/wasm/vizg.wasm`. Its explicit ABI functions are WebAssembly exports.
+The module requires a WASI host because `vizg_analyze_file` instantiates Zig's
+filesystem adapter. In-memory analysis remains filesystem-independent, but the
+whole ABI module is not currently compatible with `wasm32-freestanding` or a
+browser-only runtime.
 `zig build abi-cross-check` compiles the same consumer library graph as a static
-archive for each listed Linux, Windows, macOS, and Android target. It also
+archive for each listed Linux, Windows, macOS, WASI, and Android target. It also
 compiles a C translation unit against `Lib/vizg.h` for each target. These are
 compile and header-neutrality probes, not foreign-target runtime claims.
 
@@ -287,7 +293,7 @@ The single-file pipeline does not require file system access except for CLI inpu
 
 ## Platform Boundary
 
-`cross_check.zig` references the public declarations in the frontend, types, and semantics layers. `zig build cross-check` compiles that generic probe as an object for representative Linux, Windows, macOS, and Android targets. `zig build abi-cross-check` separately compiles target static archives using the consumer dependency graph (`src/root.zig` and `Lib/vizg.zig`) and compiles the public C header probe. Neither step runs foreign code.
+`cross_check.zig` references the public declarations in the frontend, types, and semantics layers. `zig build cross-check` compiles that generic probe as an object for representative Linux, Windows, macOS, WASI, and Android targets. `zig build abi-cross-check` separately compiles target static archives using the consumer dependency graph (`src/root.zig` and `Lib/vizg.zig`) and compiles the public C header probe. Neither step runs foreign code.
 
 Generic layers must not branch on the target OS. Platform-dependent work stays in adapters such as `src/main.zig` for CLI interaction, `src/modules/loader.zig` for filesystem-backed loading, `Lib/vizg.zig` for the C ABI, and build/packaging helpers. The ABI matrix proves that its adapter compiles for the listed targets; it does not claim runtime validation there.
 
