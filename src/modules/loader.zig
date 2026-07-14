@@ -19,7 +19,8 @@ pub const BuildOptions = struct {
     // Maximum recursive descent depth during parser precedence-climbing (H4). Exceeded parses are
     // rejected with a diagnostic rather than crashing; defaults to 1024 which covers realistic code.
     max_parse_depth: usize = 1024,
-    // Maximum recursion depth for type inference / structural walk (H4). Same defensive rationale.
+    // Deprecated source-compatibility field. Semantic passes now use bounded
+    // worklists and TypeStore complexity limits rather than recursive inference.
     max_type_inference_depth: usize = 10_000,
 };
 
@@ -43,10 +44,30 @@ pub fn loadAndAnalyze(
     }, .{
         .collect_comments = options.collect_comments,
         .recover_errors = options.recover_errors,
+        .max_parse_depth = options.max_parse_depth,
     });
 
     return .{
         .text = text,
         .result = result,
     };
+}
+
+test "Goal 158 module loading forwards parser depth limits" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data = "const value = (((((((1)))))));\n" });
+    const path = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.ParseRecursionLimitReached, loadAndAnalyze(
+        arena.allocator(),
+        io,
+        path,
+        path,
+        .{ .max_parse_depth = 2 },
+    ));
 }

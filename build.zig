@@ -26,6 +26,26 @@ pub fn build(b: *std.Build) void {
         .root_module = lib_mod,
     });
 
+    // A fixed Debug build keeps runtime safety checks enabled regardless of the
+    // caller's selected optimization mode. It is the adversarial audit gate.
+    const safety_impl = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    const safety_abi = b.createModule(.{
+        .root_source_file = b.path("Lib/vizg.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    safety_impl.addImport("vizg-abi", safety_abi);
+    safety_abi.addImport("vizg-impl", safety_impl);
+    const safety_tests = b.addRunArtifact(b.addTest(.{ .root_module = safety_impl }));
+    const safety_step = b.step("audit-safety", "Run the full suite with Zig runtime safety enabled");
+    safety_step.dependOn(&safety_tests.step);
+
     // Compile the OS-independent frontend/types/semantics layers for a small
     // representative target matrix. Objects are compiled only: no foreign
     // executable is linked or run, and Android does not require an NDK here.

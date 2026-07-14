@@ -80,11 +80,16 @@ is limited to a simple value identifier with an explicit annotation, for
 example `const value: string = "x"; type Value = typeof value;`.
 
 Named generic references use the scope-aware type namespace and validate type
-argument arity. Generic instantiation and inference remain outside v1, so a
-valid application currently resolves to its declaration's canonical base
-`TypeId` after its arguments have been resolved. Unsupported operations emit a
-targeted `VZG6005` diagnostic and recover as `unknown`; no supported type-node
-variant reaches an implicit fallback.
+argument arity across local and imported declarations. An applied generic owns
+the declaration identity and canonical argument list, so equal applications
+reuse one `TypeId` while distinct arguments remain distinct. Defaults fill
+omitted trailing arguments and constraints are checked before instantiation.
+Substitution covers function parameters/returns, arrays, tuples, objects,
+unions, intersections, interface/class members, and nested applications; a
+recursion guard terminates self-referential aliases. Call-site generic inference
+remains outside v1. Unsupported operations emit a targeted `VZG6005` diagnostic
+and recover as `unknown`; no supported type-node variant reaches an implicit
+fallback.
 
 ### Node Representation
 
@@ -97,6 +102,13 @@ pub const TypeId = u32; // context-local index into TypeStore
 A `TypeId` is meaningful only within its owning `SemanticResult` or project
 semantic context. Numeric IDs from different contexts must never be compared or
 combined.
+
+Within one context, nominal declarations are keyed only by their module-qualified
+declaration identity and reserve one stable `TypeId`. Class and interface member
+tables complete exactly once without participating in that interning key. Object
+types use an order-insensitive property-set key: equivalent unique-name properties
+reuse one ID regardless of source order, while the first interned representation
+retains its original order for deterministic display.
 
 An initial concrete shape (pseudocode):
 
@@ -143,7 +155,8 @@ Rationale tied to the current pipeline:
 
 - A function type is a **closed signature**: parameter names and types, optional/default/rest metadata, return type, type-parameter count, and async/generator/constructor flags.
 - Signatures are compared by shape for equality: `(number, string) -> boolean`.
-- Declarations, expressions, arrows, and object methods use the same interned signature representation. Annotated returns win; otherwise return statements are unioned deterministically, expression-bodied arrows contribute an implicit return, and a CFG-reachable fallthrough adds `undefined` when a body has explicit value returns. A body with no value-producing return remains `void`.
+- Declarations, expressions, arrows, object methods/accessors, and class methods/constructors/accessors enter one function-like descriptor and use the same interned signature representation. Annotated returns win; otherwise return statements are unioned deterministically, expression-bodied arrows contribute an implicit return, and a CFG-reachable fallthrough adds `undefined` when a body has explicit value returns. A body with no value-producing return remains `void`.
+- Class receiver context types `this` and `super`. Constructors cannot declare or return a value; getters take no parameters; setters take exactly one required non-rest parameter and cannot declare or return a value. Async and generator flags remain part of the shared signature pipeline and wrap return categories deterministically.
 - Calls validate count and argument compatibility through the shared compatibility layer. Callable unions distribute the call across every non-nullish member; each remaining member must be callable and accept the arguments. An optional call removes `null`/`undefined` branches for validation and always adds `undefined` to the union of callable return types. Method calls retain receiver metadata. Class construction validates the canonical explicit constructor signature and returns the instance type; a missing constructor means an implicit zero-argument constructor.
 - Async returns are wrapped as `Promise<T>`. Generators use `Generator<unknown, T>`: yield-value inference and `next` input typing are deferred. In the minimal v1 model an async generator is categorized as `Generator<unknown, Promise<T>>`; a distinct `AsyncGenerator` model is deferred.
 - Recursive functions use their stable declaration signature. Overload sets and overload resolution are intentionally deferred; duplicate same-scope declarations retain the binder diagnostic.
@@ -190,6 +203,11 @@ primitive types remain conservative in both branches. Facts join conservatively
 at branches and loops. Assignment replaces the target
 fact with the assigned type when known; update discards it, and calls through
 `any` or `unknown` discard all current facts.
+Expression-level control flow uses the same fact lattice: ternary branches,
+`&&`, `||`, `??`, logical assignments, and optional-chain execution/skip paths
+join their outgoing states before the next reference. Side effects from a
+short-circuited operand or skipped optional-chain index/argument therefore do
+not leak into paths where that operand was not evaluated.
 Early exits preserve the surviving branch for following statements, and
 expression-bodied arrows receive a normalized non-empty CFG body.
 
@@ -221,9 +239,14 @@ or incompatible inherited members retain the full property path for checker
 diagnostics. Class, constructor, enum, and type-parameter identities remain
 nominal under the v1 policy.
 
+Source intersections expose the combined member surface of every constituent
+when checked against structural object and interface targets. Detailed aggregate
+diagnostics use the same compatibility engine as their enclosing assignment, so
+compatible literal and structural property types are not reported as mismatches.
+
 ## 5. How Node Types Are Stored
 
-AST nodes remain pure parser output. `src/semantics/type_info.zig` owns value-based `NodeTypeInfo`, `SymbolTypeInfo`, and `FlowTypeInfo` mappings. The semantic checker consumes these mappings after inference and does not reparse or duplicate type inference.
+AST nodes remain pure parser output. `src/semantics/type_info.zig` defines value-based `NodeTypeInfo`, `SymbolTypeInfo`, and `FlowTypeInfo` mappings owned directly by `SemanticResult`. No public parallel builder owns semantic mappings. The semantic checker consumes these mappings after inference and does not reparse or duplicate type inference.
 
 Expression facts keep three roles separate. `NodeTypeInfo.type_id` is the
 source-inferred type, `contextual_type` is an optional expected type from an
@@ -239,11 +262,35 @@ contextual type before aggregate inference. This preserves imported, aliased,
 and inherited semantic identity while the initializer keeps its independently
 inferred source type.
 
+Every executable expression accepted by the parser receives `NodeTypeInfo`.
+Primitive, aggregate, access, call, function, control-flow, and class-context
+expressions use their semantic type. RegExp and `import.meta` use the builtin
+object type; dynamic import uses `Promise<unknown>`; `yield` uses its value or
+`undefined`; tagged templates use the tag's return type. Class expressions have
+separate canonical constructor and instance identities. Instance `this` uses the
+enclosing class instance and `super` uses its base instance. If an accepted
+expression has no implemented semantic rule, the pipeline records a resolved
+`unknown` recovery type and emits one targeted warning instead of omitting the
+node mapping.
+
+Callable return inference consumes only return statements in reachable CFG
+blocks. A reachable function exit contributes `undefined`; unreachable returns
+do not affect the union. A non-completing `finally` return or throw overrides
+the return results collected from its associated `try` and `catch` paths.
+
+Adversarial type construction has explicit `TypeStore` ceilings: normalized
+unions and intersections contain at most 1024 members, generic declarations and
+applications contain at most 256 parameters or arguments, and recursive generic
+substitution is limited to 256 levels. Crossing a ceiling returns the controlled
+`error.TypeComplexityLimit`; recursive stored shapes also retain active-type
+cycle detection. Callers must propagate this error rather than recover as a
+silent `unknown`.
+
 A single-file `SemanticResult` owns one arena, one `FrontendResult`, one canonical `TypeStore`, and its mappings. A `ProjectSemanticResult` owns its `ModuleGraph`, one project semantic arena, one canonical store shared by every module, and every cross-module semantic record. All stored slices remain valid until the owning result is deinitialized.
 
 ## 6. How Symbol Types Are Stored
 
-Binder symbols remain syntax/scope records and do not contain context-dependent `TypeId` values. `SymbolTypeInfo` is keyed by binder `SymbolId` and records declared type, inferred type, and resolution state. This avoids coupling the frontend to semantics and prevents a symbol from retaining an ID from a destroyed or different type context.
+Binder symbols remain syntax/scope records and do not contain context-dependent `TypeId` values. `SymbolTypeInfo` is keyed by binder `SymbolId` and records declared type, inferred type, and resolution state. Every binder symbol kind has an entry: variables, functions, parameters, imports, aliases, interfaces, classes, enums, enum members, type parameters, fields, and methods. Deferred inference is represented explicitly as `unknown`; no symbol kind is silently excluded. This avoids coupling the frontend to semantics and prevents a symbol from retaining an ID from a destroyed or different type context.
 
 `TypeResolutionContext` resolves annotations through binder scopes in the type namespace. Builtins come from the canonical `TypeStore`; local aliases, interfaces, classes, and enums resolve through binder `SymbolId` and module-qualified semantic declaration identity. Generic declarations predeclare a lexical type-parameter environment, and each parameter has a stable owner declaration plus binder-symbol identity. Generic references therefore resolve before module/global names and use one `TypeId` consistently across parameters and returns. Value-only names are rejected as types, lexical declarations shadow outer declarations, and unresolved names remain structured results that emit one deterministic `VZG6004` diagnostic at the annotation span.
 
@@ -278,6 +325,32 @@ ModuleGraph owns FrontendResult[] and LinkedImport[]
 Aliases and re-exports preserve the target's qualified declaration identity. Named and aliased imports used in annotations reuse the exported target `TypeId`; declaration-level type-only imports do not create runtime bindings. Default imports resolve the default export. External, missing, and incomplete cyclic imports receive stable `unknown` placeholders, so collection terminates while known declarations remain available and the project is marked partial.
 
 Namespace-import policy for v1 is intentionally narrow: runtime namespace objects contain value exports only. A type-only namespace import has no runtime binding, and qualified namespace type-member lookup is deferred; v1 does not merge value and type namespaces.
+
+During project fixed-point propagation, namespace object shapes are rebuilt from
+the current export identities before dependent import, reference, expression,
+and export facts are refreshed. No module retains a `TypeId` from an earlier
+semantic context or a stale pre-propagation namespace shape.
+
+### Supported semantic type operators
+
+The v1 operator subset reads only canonical `TypeStore` shapes and linked
+symbol identities:
+
+- `T[K]` supports string properties on objects, interfaces, class instances,
+  inherited shapes, and generic applications. Numeric indexing supports arrays
+  and tuples. Optional properties/elements add `undefined`; readonly metadata
+  remains on the canonical member even though value lookup does not remove it.
+- `keyof T` reads canonical member tables. For unions it returns keys present
+  on every branch; for intersections it returns the union of branch keys.
+  Imported and inherited members follow semantic identities without reopening
+  another module's AST.
+- `typeof name` supports a resolved value identifier. It uses that symbol's
+  effective `SymbolTypeInfo`, including inferred and imported value types.
+  `typeof import()` and compound query expressions remain unsupported.
+
+Unsupported keys, indexes, non-object `keyof` operands, and unresolved query
+targets emit targeted diagnostics and recover as `unknown`; an empty valid key
+set is `never`.
 
 ## 8. Diagnostic Code Range VZG6xxx
 
@@ -361,11 +434,11 @@ missing exports as a structural module-graph check.
 
 ## 11. Required Test Contract
 
-Tests cover primitives, generic parameter/return identity, functions, aggregates, access, calls, flow narrowing, compatibility, checker diagnostics, imported and re-exported aliases, namespaces, default and star/named re-exports, type-only imports without runtime bindings, missing exports, cyclic type placeholders, repeated rebuild/teardown, and equal local declaration IDs in distinct modules. Project tests assert qualified identity and `TypeId` equality only within one owning result.
+Tests cover primitives, generic parameter/return identity, canonical generic applications, defaults, constraints, recursive substitution, functions, aggregates, access, calls, flow narrowing, compatibility, checker diagnostics, imported and re-exported aliases and generics, namespaces, default and star/named re-exports, type-only imports without runtime bindings, missing exports, cyclic type placeholders, repeated rebuild/teardown, and equal local declaration IDs in distinct modules. Project tests assert qualified identity and `TypeId` equality only within one owning result.
 
 ## 12. Remaining Limits
 
-Complete TypeScript compatibility, package resolution, generic inference, overload resolution, richer class member semantics, and advanced type forms remain outside v1. HIR is not implemented and must consume these semantic contracts rather than duplicate parsing, binding, inference, or type storage.
+Complete TypeScript compatibility, package resolution, generic inference, overload resolution, decorator-aware class semantics, and advanced type forms remain outside v1. HIR is not implemented and must consume these semantic contracts rather than duplicate parsing, binding, inference, or type storage.
 
 ## Final Result
 

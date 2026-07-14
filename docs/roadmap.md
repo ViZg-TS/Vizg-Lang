@@ -79,16 +79,17 @@ No HIR implementation was introduced while closing Typed Semantics v2.
 - [x] Full test, validation, cross-target, Android, and ABI gates are green.
 - [x] Future HIR must consume semantic results. It must not parse, bind, infer again, or create a competing `TypeStore`.
 
-### Typed Semantics v2 Closure Verification — 2026-07-13
+### Typed Semantics v2 closure verification — 2026-07-13
 
-- `zig build test` — PASS, exit 0, no command output. The registered suite reports 403/403 tests passed with `zig build test --summary all`.
-- `zig build validate` — PASS, exit 0: `test/frontend/vizg_capabilities_test.ts` produced 0 errors and 0 warnings.
-- `zig build cross-check` — PASS, exit 0, no command output.
-- `zig build abi-cross-check` — PASS, exit 0, no command output.
-- `zig build abi-layout-test` — PASS, exit 0, no command output.
-- `zig build android-aarch64-lib` — PASS, exit 0, no command output; produced the Android AArch64 static library.
-- `zig build run -- types test/frontend/satisfies-expression-test.ts` — PASS, exit 0; output included `interface Config#1000[module=0,declaration=0,members=1]` and `object#1001[properties=1,first=enabled:106]`, with no structural `<unknown>` placeholder.
-- `git diff --check` — PASS, exit 0, no output.
+The complete release-candidate contract matrices, ownership rules, lookup API
+inventory, current CLI format, and exact gate output live in
+[`typed-semantics-v2-rc.md`](typed-semantics-v2-rc.md). This replaces stale
+intermediate test counts and inspection-output examples.
+
+The mandatory post-RC bug, security, and correctness audit is closed with all
+confirmed findings remediated. Its attack classes, finding severity, fixes,
+limits, and final gate evidence live in
+[`typed-semantics-v2-audit.md`](typed-semantics-v2-audit.md).
 
 ## Future Milestone: Runtime Or Compiler Backend
 
