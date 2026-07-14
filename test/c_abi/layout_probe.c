@@ -1,73 +1,73 @@
 #include "vizg.h"
-
 #include <stddef.h>
 
-#define VIZG_LAYOUT_TYPE(type)                       \
+#define LAYOUT(type) \
     size_t vizg_c_sizeof_##type(void) { return sizeof(type); } \
     size_t vizg_c_alignof_##type(void) { return _Alignof(type); }
 
-#define VIZG_LAYOUT_FIELD(type, field) \
-    size_t vizg_c_offsetof_##type##_##field(void) { return offsetof(type, field); }
+LAYOUT(Vizg_ProjectStatus)
+LAYOUT(Vizg_ProjectSourceKind)
+LAYOUT(Vizg_ProjectStepKind)
+LAYOUT(Vizg_ProjectRequestKind)
+LAYOUT(Vizg_ProjectFailureKind)
+LAYOUT(Vizg_ExternalExportKind)
+LAYOUT(Vizg_ExternalType)
+LAYOUT(Vizg_ProjectConfig)
+LAYOUT(Vizg_ProjectSource)
+LAYOUT(Vizg_ProjectSpan)
+LAYOUT(Vizg_ProjectRequestAttribute)
+LAYOUT(Vizg_ProjectStep)
+LAYOUT(Vizg_ExternalExport)
+LAYOUT(Vizg_ExternalModule)
+LAYOUT(Vizg_ProjectResultSummary)
 
-VIZG_LAYOUT_TYPE(Vizg_Result)
-VIZG_LAYOUT_FIELD(Vizg_Result, token_count)
-VIZG_LAYOUT_FIELD(Vizg_Result, diagnostic_count)
-VIZG_LAYOUT_FIELD(Vizg_Result, tokens_ptr)
-VIZG_LAYOUT_FIELD(Vizg_Result, diagnostics_ptr)
+#define F(type, field, weight) (offsetof(type, field) * (weight))
 
-VIZG_LAYOUT_TYPE(Vizg_Span)
-VIZG_LAYOUT_FIELD(Vizg_Span, start_offset)
-VIZG_LAYOUT_FIELD(Vizg_Span, end_offset)
-VIZG_LAYOUT_FIELD(Vizg_Span, line_start)
-VIZG_LAYOUT_FIELD(Vizg_Span, col_start)
+size_t vizg_c_fields_Vizg_ProjectConfig(void) {
+    return F(Vizg_ProjectConfig, workspace_ptr, 1) + F(Vizg_ProjectConfig, workspace_len, 2) +
+        F(Vizg_ProjectConfig, max_source_bytes, 3) + F(Vizg_ProjectConfig, max_modules, 4) +
+        F(Vizg_ProjectConfig, max_diagnostics, 5) + F(Vizg_ProjectConfig, max_graph_depth, 6) +
+        F(Vizg_ProjectConfig, max_semantic_types, 7);
+}
+size_t vizg_c_fields_Vizg_ProjectSource(void) {
+    return F(Vizg_ProjectSource, module_id, 1) + F(Vizg_ProjectSource, logical_name_ptr, 2) +
+        F(Vizg_ProjectSource, logical_name_len, 3) + F(Vizg_ProjectSource, source_ptr, 4) +
+        F(Vizg_ProjectSource, source_len, 5) + F(Vizg_ProjectSource, kind, 6) +
+        F(Vizg_ProjectSource, is_root, 7) + F(Vizg_ProjectSource, reserved, 8) +
+        F(Vizg_ProjectSource, revision, 9);
+}
+size_t vizg_c_fields_Vizg_ProjectSpan(void) {
+    return F(Vizg_ProjectSpan, start, 1) + F(Vizg_ProjectSpan, end, 2) +
+        F(Vizg_ProjectSpan, line, 3) + F(Vizg_ProjectSpan, column, 4);
+}
+size_t vizg_c_fields_Vizg_ProjectRequestAttribute(void) {
+    return F(Vizg_ProjectRequestAttribute, key_ptr, 1) + F(Vizg_ProjectRequestAttribute, key_len, 2) +
+        F(Vizg_ProjectRequestAttribute, value_ptr, 3) + F(Vizg_ProjectRequestAttribute, value_len, 4) +
+        F(Vizg_ProjectRequestAttribute, span, 5);
+}
+size_t vizg_c_fields_Vizg_ProjectStep(void) {
+    return F(Vizg_ProjectStep, kind, 1) + F(Vizg_ProjectStep, request_id, 2) +
+        F(Vizg_ProjectStep, importer_module_id, 3) + F(Vizg_ProjectStep, specifier_ptr, 4) +
+        F(Vizg_ProjectStep, specifier_len, 5) + F(Vizg_ProjectStep, request_kind, 6) +
+        F(Vizg_ProjectStep, attributes_ptr, 7) + F(Vizg_ProjectStep, attribute_count, 8) +
+        F(Vizg_ProjectStep, span, 9);
+}
+size_t vizg_c_fields_Vizg_ExternalExport(void) {
+    return F(Vizg_ExternalExport, name_ptr, 1) + F(Vizg_ExternalExport, name_len, 2) +
+        F(Vizg_ExternalExport, kind, 3) + F(Vizg_ExternalExport, type_only, 4) +
+        F(Vizg_ExternalExport, has_type_metadata, 5) + F(Vizg_ExternalExport, reserved, 6) +
+        F(Vizg_ExternalExport, type_metadata, 7);
+}
+size_t vizg_c_fields_Vizg_ExternalModule(void) {
+    return F(Vizg_ExternalModule, external_module_id, 1) + F(Vizg_ExternalModule, logical_name_ptr, 2) +
+        F(Vizg_ExternalModule, logical_name_len, 3) + F(Vizg_ExternalModule, exports_ptr, 4) +
+        F(Vizg_ExternalModule, export_count, 5);
+}
+size_t vizg_c_fields_Vizg_ProjectResultSummary(void) {
+    return F(Vizg_ProjectResultSummary, module_count, 1) + F(Vizg_ProjectResultSummary, has_failures, 2) +
+        F(Vizg_ProjectResultSummary, reserved, 3);
+}
 
-VIZG_LAYOUT_TYPE(Vizg_Diagnostic)
-VIZG_LAYOUT_FIELD(Vizg_Diagnostic, severity)
-VIZG_LAYOUT_FIELD(Vizg_Diagnostic, code)
-VIZG_LAYOUT_FIELD(Vizg_Diagnostic, phase)
-VIZG_LAYOUT_FIELD(Vizg_Diagnostic, message_ptr)
-VIZG_LAYOUT_FIELD(Vizg_Diagnostic, message_len)
-VIZG_LAYOUT_FIELD(Vizg_Diagnostic, span)
-VIZG_LAYOUT_FIELD(Vizg_Diagnostic, path_ptr)
-VIZG_LAYOUT_FIELD(Vizg_Diagnostic, path_len)
-
-VIZG_LAYOUT_TYPE(Vizg_Token)
-VIZG_LAYOUT_FIELD(Vizg_Token, kind)
-VIZG_LAYOUT_FIELD(Vizg_Token, span)
-VIZG_LAYOUT_FIELD(Vizg_Token, lexeme_ptr)
-VIZG_LAYOUT_FIELD(Vizg_Token, lexeme_len)
-VIZG_LAYOUT_FIELD(Vizg_Token, contextual_kind)
-
-VIZG_LAYOUT_TYPE(Vizg_SourceInput)
-VIZG_LAYOUT_FIELD(Vizg_SourceInput, text_ptr)
-VIZG_LAYOUT_FIELD(Vizg_SourceInput, text_len)
-VIZG_LAYOUT_FIELD(Vizg_SourceInput, path_ptr)
-VIZG_LAYOUT_FIELD(Vizg_SourceInput, path_len)
-
-VIZG_LAYOUT_TYPE(Vizg_Severity)
-VIZG_LAYOUT_TYPE(Vizg_DiagnosticCode)
-VIZG_LAYOUT_TYPE(Vizg_DiagnosticPhase)
-VIZG_LAYOUT_TYPE(Vizg_TokenType)
-VIZG_LAYOUT_TYPE(Vizg_ContextualKeyword)
-VIZG_LAYOUT_TYPE(Vizg_Status)
-
-int vizg_c_value_severity_hint(void) { return VIZG_SEVERITY_HINT; }
-int vizg_c_value_diag_invalid_escape(void) { return VIZG_DIAG_INVALID_ESCAPE_SEQUENCE; }
-int vizg_c_value_diag_invalid_utf8(void) { return VIZG_DIAG_INVALID_UTF8; }
-int vizg_c_value_diag_unsupported_syntax(void) { return VIZG_DIAG_UNSUPPORTED_SYNTAX; }
-int vizg_c_value_diag_unsupported_ts_syntax(void) { return VIZG_DIAG_UNSUPPORTED_TS_SYNTAX; }
-int vizg_c_value_diag_unsupported_jsx(void) { return VIZG_DIAG_UNSUPPORTED_JSX; }
-int vizg_c_value_diag_unknown_property(void) { return VIZG_DIAG_UNKNOWN_PROPERTY; }
-int vizg_c_value_diag_invalid_index(void) { return VIZG_DIAG_INVALID_INDEX; }
-int vizg_c_value_diag_invalid_argument_count(void) { return VIZG_DIAG_INVALID_ARGUMENT_COUNT; }
-int vizg_c_value_diag_invalid_argument_type(void) { return VIZG_DIAG_INVALID_ARGUMENT_TYPE; }
-int vizg_c_value_phase_internal(void) { return VIZG_PHASE_INTERNAL; }
-int vizg_c_value_token_invalid(void) { return VIZG_TOKEN_INVALID; }
-int vizg_c_value_token_identifier(void) { return VIZG_TOKEN_IDENTIFIER; }
-int vizg_c_value_token_finally(void) { return VIZG_TOKEN_KEYWORD_FINALLY; }
-int vizg_c_value_token_eof(void) { return VIZG_TOKEN_END_OF_FILE; }
-int vizg_c_value_contextual_none(void) { return VIZG_CONTEXTUAL_KEYWORD_NONE; }
-int vizg_c_value_contextual_as(void) { return VIZG_CONTEXTUAL_KEYWORD_AS; }
-int vizg_c_value_contextual_get(void) { return VIZG_CONTEXTUAL_KEYWORD_GET; }
-int vizg_c_value_status_ok(void) { return VIZG_STATUS_OK; }
-int vizg_c_value_status_file_too_large(void) { return VIZG_STATUS_FILE_TOO_LARGE; }
+uint32_t vizg_c_value_project_status_internal_error(void) { return VIZG_PROJECT_STATUS_INTERNAL_ERROR; }
+uint32_t vizg_c_value_project_request_re_export(void) { return VIZG_PROJECT_REQUEST_RE_EXPORT; }
+uint32_t vizg_c_value_external_type_object(void) { return VIZG_EXTERNAL_TYPE_OBJECT; }

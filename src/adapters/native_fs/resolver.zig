@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 
+/// Native filesystem-backed module resolver.
 pub const Resolver = struct {
     allocator: std.mem.Allocator,
     io: Io,

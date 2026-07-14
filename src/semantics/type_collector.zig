@@ -65,7 +65,7 @@ pub const TypeNameResolution = union(enum) {
 /// Inputs and mutable semantic state needed to resolve one annotation.
 pub const TypeResolutionContext = struct {
     allocator: std.mem.Allocator,
-    current_module: u32,
+    current_module: u64,
     scope: binder.ScopeId,
     symbols: []const binder.Symbol,
     scopes: []const binder.Scope,
@@ -96,7 +96,7 @@ pub fn collectDeclaredTypesInModule(
     source: frontend.SourceFile,
     tree: ast_mod.Ast,
     bind: binder.BindResult,
-    module_id: u32,
+    module_id: u64,
     type_store: *types.TypeStore,
 ) !TypeInfoCollectResult {
     return collectDeclaredTypesInModuleWithImports(allocator, source, tree, bind, module_id, type_store, &.{}, true);
@@ -107,7 +107,7 @@ pub fn collectDeclaredTypesInModuleWithImports(
     source: frontend.SourceFile,
     tree: ast_mod.Ast,
     bind: binder.BindResult,
-    module_id: u32,
+    module_id: u64,
     type_store: *types.TypeStore,
     imported_types: []const ImportedTypeBinding,
     complete_nominals: bool,
@@ -122,7 +122,7 @@ pub fn collectDeclaredTypesInModuleWithImportsAndValues(
     source: frontend.SourceFile,
     tree: ast_mod.Ast,
     bind: binder.BindResult,
-    module_id: u32,
+    module_id: u64,
     type_store: *types.TypeStore,
     imported_types: []const ImportedTypeBinding,
     value_symbol_types: []const type_info_mod.SymbolTypeInfo,

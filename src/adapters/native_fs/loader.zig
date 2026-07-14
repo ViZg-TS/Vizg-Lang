@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const frontend = @import("../frontend/frontend.zig");
+const frontend = @import("vizg-core").frontend;
 
 pub const max_source_bytes = 64 * 1024 * 1024;
 
@@ -19,9 +19,6 @@ pub const BuildOptions = struct {
     // Maximum recursive descent depth during parser precedence-climbing (H4). Exceeded parses are
     // rejected with a diagnostic rather than crashing; defaults to 1024 which covers realistic code.
     max_parse_depth: usize = 1024,
-    // Deprecated source-compatibility field. Semantic passes now use bounded
-    // worklists and TypeStore complexity limits rather than recursive inference.
-    max_type_inference_depth: usize = 10_000,
 };
 
 pub const LoadedModule = struct {

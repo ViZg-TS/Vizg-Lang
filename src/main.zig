@@ -3,22 +3,24 @@ const Io = std.Io;
 
 // Dev/testing imports — direct file paths so `zig build run` works without
 // needing an installed vizg package (the library is only needed for C-ABI consumers).
-const front = @import("frontend/frontend.zig");
-const ast_mod = @import("frontend/ast.zig");
-const binder = @import("frontend/binder.zig");
-const cfg = @import("frontend/cfg.zig");
-const diagnostics = @import("diagnostics/root.zig");
-const modules = @import("modules/root.zig");
-const resolver_mod = @import("frontend/resolver.zig");
-const tokens_mod = @import("frontend/tokens.zig");
-const semantics = @import("semantics/root.zig");
-const types_pkg = @import("types/root.zig");
+const core = @import("vizg-core");
+const front = core.frontend;
+const ast_mod = core.ast;
+const binder = core.binder;
+const cfg = core.cfg;
+const diagnostics = core.diagnostics;
+const fs_adapter = @import("adapters/fs_module_host.zig");
+const resolver_mod = core.resolver;
+const tokens_mod = core.tokens;
+const semantics = core.semantics;
+const types_pkg = core.types;
 
 // Backward-compat aliases matching main.zig's existing names.
 const frontend = front;
 const resolver = resolver_mod;
 const tokens = tokens_mod;
-const Registry = modules.Registry;
+const FsModuleHost = fs_adapter.FsModuleHost;
+const ExternalBinding = fs_adapter.ExternalBinding;
 
 const max_source_bytes = 64 * 1024 * 1024;
 
@@ -84,31 +86,21 @@ pub fn main(init: std.process.Init) !void {
 
     const path = args[2];
 
-    // Parse --add-external "name=path" flags. These populate the externals
-    // registry used by the module graph to validate non-relative imports.
-    var externals: ?*Registry = null;
-    defer if (externals) |reg| reg.deinit(arena);
-    externals = parseExternalsArgs(args, arena, io) catch |err| {
+    const externals = parseExternalBindings(args, arena, io) catch |err| {
         try stderr.print("external configuration error: {s}\n", .{@errorName(err)});
         try stderr.flush();
         std.process.exit(1);
     };
 
     if (command == .modules) {
-        const graph = modules.build(arena, io, path, .{
-            .collect_comments = false,
-            .recover_errors = true,
-            .max_source_bytes = max_source_bytes,
-            // Defaults from loader.BuildOptions for H4 depth limits — sufficient for real code.
-            .max_parse_depth = 1024,
-            .max_module_graph_depth = 10_000,
-        }, externals) catch |err| {
+        var host = buildProjectHost(arena, io, path, externals) catch |err| {
             try stderr.print("{s}: module graph error: {s}\n", .{ path, @errorName(err) });
             try stderr.flush();
             std.process.exit(1);
         };
-        try printModules(stdout, graph);
-        if (hasErrors(graph.diagnostics)) {
+        defer host.deinit();
+        try printModules(stdout, &host.project);
+        if (projectHasErrors(&host.project)) {
             try stdout.flush();
             std.process.exit(1);
         }
@@ -121,14 +113,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
-    var semantic_result = semantics.analyzeSource(std.heap.page_allocator, .{
-        .path = path,
-        .text = text,
-        .kind = .module,
-    }, .{
-        .collect_comments = false,
-        .recover_errors = true,
-    }) catch |err| {
+    var semantic_result = analyzeSourceBytes(arena, path, text) catch |err| {
         try stderr.print("{s}: semantic analysis error: {s}\n", .{ path, @errorName(err) });
         try stderr.flush();
         std.process.exit(1);
@@ -182,6 +167,33 @@ fn parseCommand(text: []const u8) ?Command {
     if (std.mem.eql(u8, text, "--help")) return .help;
     if (std.mem.eql(u8, text, "-h")) return .help;
     return null;
+}
+
+fn analyzeSourceBytes(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !semantics.SemanticResult {
+    return semantics.analyzeSource(allocator, .{
+        .path = path,
+        .text = bytes,
+        .kind = .module,
+    }, .{
+        .collect_comments = false,
+        .recover_errors = true,
+    });
+}
+
+fn buildProjectHost(
+    allocator: std.mem.Allocator,
+    io: Io,
+    root_path: []const u8,
+    externals: []const ExternalBinding,
+) !FsModuleHost {
+    var host = try FsModuleHost.init(allocator, io, .{
+        .max_source_bytes = max_source_bytes,
+        .externals = externals,
+    });
+    errdefer host.deinit();
+    _ = try host.loadRoot(root_path);
+    _ = try host.drive();
+    return host;
 }
 
 fn printHelp(writer: *Io.Writer, exe_name: []const u8) !void {
@@ -737,96 +749,74 @@ fn printCfg(writer: *Io.Writer, tree: ast_mod.Ast, cfgs: []const cfg.FunctionCfg
     }
 }
 
-fn printModules(writer: *Io.Writer, graph: modules.ModuleGraph) !void {
+fn printModules(writer: *Io.Writer, project: *const core.Project) !void {
     try writer.print("Modules\n", .{});
-    for (graph.modules) |module| {
+    for (project.modules.items) |module| {
+        const source = module.source orelse continue;
         try writer.print(
-            "  module {} path=\"{s}\"\n",
-            .{ module.id, module.display_path },
+            "  module {} path=\"{s}\" state={s}\n",
+            .{ module.id.value(), source.logical_name, @tagName(module.state) },
         );
     }
 
     try writer.print("\nImports\n", .{});
-    if (graph.imports.len == 0) {
+    if (project.edges().len == 0) {
         try writer.print("  none\n", .{});
     } else {
-        for (graph.imports) |edge| {
-            const from = graph.modules[@intCast(edge.from)];
-            try writer.print("  module {} -> ", .{from.id});
-            if (edge.to) |to| {
-                const target = graph.modules[@intCast(to)];
-                try writer.print("module {}", .{target.id});
-            } else switch (edge.status) {
-                .external => try writer.print("external", .{}),
-                .missing => try writer.print("missing", .{}),
-                .local => unreachable,
-            }
+        for (project.edges()) |edge| {
+            try writer.print("  module {} -> ", .{edge.importer.value()});
+            if (edge.target) |target| try writer.print("module {}", .{target.value()}) else if (edge.external_target) |target|
+                try writer.print("external {}", .{target.value()})
+            else
+                try writer.print("{s}", .{@tagName(edge.state)});
             try writer.print(
-                " specifier=\"{s}\" kind={s} type_only={} status={s}\n",
-                .{ edge.specifier, @tagName(edge.kind), edge.type_only, @tagName(edge.status) },
+                " specifier=\"{s}\" kind={s} import_kind={s} status={s} span={}..{}\n",
+                .{ edge.raw_specifier, @tagName(edge.kind), @tagName(edge.import_kind), @tagName(edge.state), edge.span.start, edge.span.end },
             );
         }
     }
 
-    if (graph.linked_imports.len > 0) {
+    if (project.semanticResult()) |result| {
         try writer.print("\nLinks\n", .{});
-        for (graph.linked_imports) |link| {
-            // Find the matching import edge so we can display specifier and status.
-            var edge_for_link: ?modules.ImportEdge = null;
-            for (graph.imports) |e| {
-                if (@as(u32, e.id) == link.import_edge) {
-                    edge_for_link = e;
-                    break;
-                }
-            }
-
-            // Resolve the target symbol name from the target module when available.
-            var target_name: ?[]const u8 = null;
-            if (link.target_module) |tm_id| {
-                const tm = graph.modules[@intCast(tm_id)];
-                if (link.target_symbol) |ts_id| {
-                    for (tm.result.bind.symbols) |sym| {
-                        if (sym.id == ts_id) {
-                            target_name = sym.name;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (edge_for_link) |edge| {
-                const status_tag = @tagName(edge.status);
-                if (target_name) |tname| {
-                    const target_id: u32 = blk: {
-                        if (link.target_module) |id| break :blk id;
-                        @panic("target_module must be set when we reach target_name");
-                    };
-                    try writer.print(
-                        "  link {} local=\"{s}\" imported=\"{s}\" from=\"{s}\" status={s} -> module {} name=\"{s}\"\n",
-                        .{ link.id, link.local_name, link.imported_name, edge.specifier, @tagName(edge.status), target_id, tname },
-                    );
-                } else {
-                    try writer.print(
-                        "  link {} local=\"{s}\" imported=\"{s}\" from=\"{s}\" status={s} -> unresolved\n",
-                        .{ link.id, link.local_name, link.imported_name, edge.specifier, status_tag },
-                    );
-                }
-            } else {
-                try writer.print(
-                    "  link {} local=\"{s}\" imported=\"{s}\" kind={s}\n",
-                    .{ link.id, link.local_name, link.imported_name, @tagName(link.kind) },
-                );
-            }
+        if (result.imports.len == 0) try writer.print("  none\n", .{});
+        for (result.imports, 0..) |link, index| {
+            try writer.print(
+                "  link {} module={} local=\"{s}\" imported=\"{s}\" state={s} span={}..{}\n",
+                .{ index, link.module_id, link.local_name, link.imported_name, @tagName(link.state), link.span.start, link.span.end },
+            );
         }
     }
 
     try writer.print("\nDiagnostics\n", .{});
-    if (graph.diagnostics.len == 0) {
-        try writer.print("  none\n", .{});
-    } else {
-        const entry_path = graph.modules[graph.entry].display_path;
-        try printDiagnostics(writer, entry_path, graph.diagnostics);
+    var wrote_diagnostic = false;
+    for (project.graphDiagnostics()) |diag| {
+        wrote_diagnostic = true;
+        const path = projectLogicalName(project, diag.importer);
+        try writer.print(
+            "{s}:{}:{} error {s}: module '{s}' status={s}\n",
+            .{ path, diag.span.line, diag.span.column, @tagName(diag.code), diag.raw_specifier, @tagName(diag.code) },
+        );
     }
+    for (project.modules.items) |module| {
+        for (module.diagnostics()) |diag| {
+            wrote_diagnostic = true;
+            try printDiagnostics(writer, projectLogicalName(project, module.id), &.{diag});
+        }
+    }
+    if (!wrote_diagnostic) {
+        try writer.print("  none\n", .{});
+    }
+}
+
+fn projectLogicalName(project: *const core.Project, id: core.ModuleId) []const u8 {
+    const module = project.lookup(id) orelse return "<unknown>";
+    return if (module.source) |source| source.logical_name else "<unknown>";
+}
+
+fn projectHasErrors(project: *const core.Project) bool {
+    if (project.graphDiagnostics().len != 0) return true;
+    for (project.modules.items) |module| if (hasErrors(module.diagnostics())) return true;
+    return false;
 }
 
 fn printDiagnostics(writer: *Io.Writer, path: []const u8, diags: []const diagnostics.Diagnostic) !void {
@@ -931,76 +921,54 @@ fn printImportSpecifiers(writer: *Io.Writer, values: []const ast_mod.ImportSpeci
     }
 }
 
-/// Parse extra CLI flags for externals registry. Returns an owned Registry when
-/// any --add-external or --externals-dir flag is present; otherwise returns null.
-fn parseExternalsArgs(args: []const []const u8, allocator: std.mem.Allocator, io: Io) !?*Registry {
-    var seen = false;
-    for (args[2..]) |arg| {
-        if (arg.len < 2 or arg[0] != '-') continue;
-        const rest = arg[2..];
-        if (std.mem.startsWith(u8, rest, "add-external") or std.mem.startsWith(u8, rest, "externals-dir")) {
-            seen = true;
-            break;
-        }
-    }
-    if (!seen) return null;
-
-    const reg = try allocator.create(Registry);
-    reg.* = Registry.init();
-
+/// Convert CLI external flags to borrowed portable host descriptors.
+fn parseExternalBindings(args: []const []const u8, allocator: std.mem.Allocator, io: Io) ![]const ExternalBinding {
+    var bindings: std.ArrayList(ExternalBinding) = .empty;
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (!std.mem.startsWith(u8, arg, "--")) continue;
         if (std.mem.eql(u8, arg, "--add-external")) {
-            if (i + 1 >= args.len) {
-                reg.deinit(allocator);
-                return null;
-            }
+            if (i + 1 >= args.len) return error.MissingExternalValue;
             i += 1;
-            try parseExternalEntry(args[i], allocator, reg);
+            try appendExternalBinding(allocator, &bindings, args[i]);
         } else if (std.mem.eql(u8, arg, "--externals-dir")) {
-            if (i + 1 >= args.len) {
-                reg.deinit(allocator);
-                return null;
-            }
+            if (i + 1 >= args.len) return error.MissingExternalsDirectory;
             i += 1;
-            try loadExternalsDir(io, args[i], allocator, reg);
+            try loadExternalBindingsDir(io, args[i], allocator, &bindings);
         }
     }
-
-    // Return non-owning pointer. The caller keeps `reg` alive via the deferred deinit below.
-    return @ptrCast(reg);
+    return bindings.items;
 }
 
-/// Parse "name=path"; bare name also accepted (decl_path becomes null).
-fn parseExternalEntry(entry: []const u8, allocator: std.mem.Allocator, reg: *Registry) !void {
-    const eq = std.mem.indexOfScalar(u8, entry, '=');
-    if (eq != null) {
-        const name = entry[0..eq.?];
-        const decl_path = entry[(eq.? + 1)..];
-        try reg.add(allocator, name, decl_path);
-        return;
+fn appendExternalBinding(allocator: std.mem.Allocator, bindings: *std.ArrayList(ExternalBinding), entry: []const u8) !void {
+    const end = std.mem.indexOfScalar(u8, entry, '=') orelse entry.len;
+    const name = entry[0..end];
+    if (name.len == 0) return error.InvalidExternalName;
+    for (bindings.items) |binding| {
+        if (std.mem.eql(u8, binding.specifier, name)) return;
     }
-    // bare name — register without declaration file
-    try reg.add(allocator, entry, null);
+    const owned_name = try allocator.dupe(u8, name);
+    try bindings.append(allocator, .{
+        .specifier = owned_name,
+        .descriptor = .{
+            .id = .init(@intCast(bindings.items.len + 1)),
+            .logical_name = owned_name,
+        },
+    });
 }
 
-fn loadExternalsDir(io: Io, dir_path: []const u8, allocator: std.mem.Allocator, reg: *Registry) !void {
-    var dir = Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+fn loadExternalBindingsDir(io: Io, dir_path: []const u8, allocator: std.mem.Allocator, bindings: *std.ArrayList(ExternalBinding)) !void {
+    var dir = try Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
     defer dir.close(io);
 
     var iter = Io.Dir.iterate(dir);
     while (true) {
-        const maybe_entry = iter.next(io) catch break;
-        if (maybe_entry == null) continue;
-        const entry = maybe_entry.?;
-        // C2 fix: accept any file with an extension — no longer hardcoded to .ts only. Using
-        // std.fs.path.extension() keeps separator handling correct on Windows too.
+        const entry = (try iter.next(io)) orelse break;
         const ext = std.fs.path.extension(entry.name);
         if (ext.len == 0) continue;
         const name = entry.name[0..(entry.name.len - ext.len)];
-        try reg.add(allocator, name, null);
+        try appendExternalBinding(allocator, bindings, name);
     }
 }
 
@@ -1134,95 +1102,76 @@ test "diagnostic error count controls check status" {
     try std.testing.expectEqual(@as(usize, 1), counts.warnings);
 }
 
-test "printModules emits deterministic shape with module ids and status labels" {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    // arena kept alive; no direct allocations needed in this test path
+test "CLI single-file path analyzes supplied bytes" {
+    var result = try analyzeSourceBytes(std.testing.allocator, "memory.ts", "export const value: number = 1;");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("memory.ts", result.frontend.source.path);
+    try std.testing.expect(!hasErrors(result.diagnostics));
+}
 
-    // Construct minimal modules using zeroes on the complex FrontendResult sub-struct;
-    // printModules only reads id and display_path, so any valid value works here.
-    var mods = [_]modules.Module{
-        .{
-            .id = 0,
-            .path = "/abs/main.ts",
-            .display_path = "main.ts",
-            .source_path = "./main.ts",
-            .text = "",
-            .result = std.mem.zeroes(frontend.FrontendResult),
-        },
-        .{
-            .id = 1,
-            .path = "/abs/a.ts",
-            .display_path = "a.ts",
-            .source_path = "./a.ts",
-            .text = "",
-            .result = std.mem.zeroes(frontend.FrontendResult),
-        },
-    };
+test "CLI project path loads multiple modules and prints portable graph" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data = "import { value } from './dep'; export { value };" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.ts", .data = "export const value = 1;" });
+    const root = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var host = try buildProjectHost(std.testing.allocator, io, root, &.{});
+    defer host.deinit();
+    try std.testing.expectEqual(@as(usize, 2), host.project.moduleCount());
+    try std.testing.expect(!projectHasErrors(&host.project));
+    var buffer: [4096]u8 = undefined;
+    var writer = Io.Writer.fixed(&buffer);
+    try printModules(&writer, &host.project);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "specifier=\"./dep\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "status=resolved") != null);
+}
 
-    var edges = [_]modules.ImportEdge{
-        .{
-            .id = @as(u32, 0),
-            .from = 0,
-            .to = 1,
-            .specifier = "./a",
-            .kind = .named,
-            .type_only = false,
-            .status = .local,
-            .span = tokens.Span{ .start = 0, .end = 3, .line = 1, .column = 1 },
-        },
-        .{
-            .id = @as(u32, 1),
-            .from = 0,
-            .to = null,
-            .specifier = "console",
-            .kind = .side_effect,
-            .type_only = false,
-            .status = .external,
-            .span = tokens.Span{ .start = 0, .end = 8, .line = 2, .column = 1 },
-        },
-        .{
-            .id = @as(u32, 2),
-            .from = 0,
-            .to = null,
-            .specifier = "./nonexistent",
-            .kind = .named,
-            .type_only = true,
-            .status = .missing,
-            .span = tokens.Span{ .start = 0, .end = 13, .line = 3, .column = 1 },
-        },
-    };
+test "CLI project path reports missing modules with original span" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data = "import './missing';" });
+    const root = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var host = try buildProjectHost(std.testing.allocator, io, root, &.{});
+    defer host.deinit();
+    try std.testing.expect(projectHasErrors(&host.project));
+    const diag = host.project.graphDiagnostics()[0];
+    try std.testing.expectEqualStrings("./missing", diag.raw_specifier);
+    try std.testing.expect(diag.span.end > diag.span.start);
+}
 
-    const diags: []const diagnostics.Diagnostic = &.{};
-    const empty_linked_imports: []const modules.linker.LinkedImport = &.{};
+test "CLI project path terminates cyclic module graphs" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data = "import './dep'; export const root = 1;" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.ts", .data = "import './main'; export const dep = 1;" });
+    const root = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var host = try buildProjectHost(std.testing.allocator, io, root, &.{});
+    defer host.deinit();
+    try std.testing.expectEqual(@as(usize, 2), host.project.moduleCount());
+    try std.testing.expectEqual(@as(usize, 2), host.project.edges().len);
+}
 
-    const graph = modules.ModuleGraph{
-        .arena = arena,
-        .entry = 0,
-        .modules = mods[0..],
-        .imports = edges[0..],
-        .linked_imports = empty_linked_imports,
-        .diagnostics = diags,
-    };
-
-    var buf: [4096]u8 = undefined;
-    var writer = Io.Writer.fixed(&buf);
-
-    try printModules(&writer, graph);
-
-    const out = std.mem.sliceTo(writer.buffered(), 0);
-
-    // Module lines use "module <id> path=" form (not display_path=).
-    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 path=\"main.ts\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "module 1 path=\"a.ts\"") != null);
-
-    // Import edges show target, declaration metadata, and resolution status.
-    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> module 1 specifier=\"./a\" kind=named type_only=false status=local") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> external specifier=\"console\" kind=side_effect type_only=false status=external") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "module 0 -> missing specifier=\"./nonexistent\" kind=named type_only=true status=missing") != null);
-
-    // Diagnostics section still present.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\nDiagnostics\n") != null);
+test "CLI project path resolves configured external modules" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data = "import 'runtime';" });
+    const root = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const bindings = [_]ExternalBinding{.{
+        .specifier = "runtime",
+        .descriptor = .{ .id = .init(1), .logical_name = "runtime" },
+    }};
+    var host = try buildProjectHost(std.testing.allocator, io, root, &bindings);
+    defer host.deinit();
+    try std.testing.expect(!projectHasErrors(&host.project));
+    try std.testing.expectEqual(.external, host.project.edges()[0].state);
 }
 
 fn printTypes(

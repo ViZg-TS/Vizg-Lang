@@ -1,325 +1,201 @@
 #ifndef VIZG_H
 #define VIZG_H
 
-/* vizg — C ABI for the static library.  Include this from any C/C++ consumer
- * and link against libvizg.a (or platform equivalent). */
+/* ViZG official C ABI v1. Link against libvizg.a. */
 
 #include <stddef.h>
 #include <stdint.h>
 
 #define VIZG_ABI_VERSION 1u
 
-typedef struct Vizg_Result {
-    uint32_t        token_count;
-    uint32_t        diagnostic_count;
-    const void     *tokens_ptr;
-    const void     *diagnostics_ptr;
-} Vizg_Result;
+#define VIZG_PROJECT_DEFAULT_WORKSPACE_BYTES (8u * 1024u * 1024u)
+#define VIZG_PROJECT_DEFAULT_MAX_SOURCE_BYTES (1u * 1024u * 1024u)
+#define VIZG_PROJECT_DEFAULT_MAX_MODULES 256u
+#define VIZG_PROJECT_DEFAULT_MAX_DIAGNOSTICS 4096u
+#define VIZG_PROJECT_DEFAULT_MAX_GRAPH_DEPTH 128u
+#define VIZG_PROJECT_DEFAULT_MAX_SEMANTIC_TYPES 65536u
 
-typedef struct Vizg_Span {
-    uint32_t start_offset;
-    uint32_t end_offset;
-    uint32_t line_start;
-    uint32_t col_start;
-} Vizg_Span;
+typedef struct Vizg_Project Vizg_Project;
+typedef struct Vizg_ProjectResult Vizg_ProjectResult;
 
-typedef enum {
-    VIZG_SEVERITY_ERROR   = 0,
-    VIZG_SEVERITY_WARNING = 1,
-    VIZG_SEVERITY_INFO    = 2,
-    VIZG_SEVERITY_HINT    = 3,
-} Vizg_Severity;
+typedef uint32_t Vizg_ProjectStatus;
+enum {
+    VIZG_PROJECT_STATUS_OK = 0,
+    VIZG_PROJECT_STATUS_INVALID_ARGUMENT = 1,
+    VIZG_PROJECT_STATUS_OUT_OF_MEMORY = 2,
+    VIZG_PROJECT_STATUS_INVALID_STATE = 3,
+    VIZG_PROJECT_STATUS_LIMIT_EXCEEDED = 4,
+    VIZG_PROJECT_STATUS_INTERNAL_ERROR = 5,
+};
 
-typedef enum {
-    VIZG_DIAG_INVALID_CHAR             = 0,
-    VIZG_DIAG_UNTERMINATED_STRING      = 1,
-    VIZG_DIAG_UNTERMINATED_BLOCK_COMMENT = 2,
-    VIZG_DIAG_INVALID_NUMBER           = 3,
-    VIZG_DIAG_UNEXPECTED_TOKEN         = 4,
-    VIZG_DIAG_EXPECTED_TOKEN           = 5,
-    VIZG_DIAG_DUPLICATE_DECLARATION    = 6,
-    VIZG_DIAG_DUPLICATE_EXPORT         = 7,
-    VIZG_DIAG_CANNOT_FIND_NAME         = 8,
-    VIZG_DIAG_MODULE_NOT_FOUND         = 9,
-    VIZG_DIAG_MISSING_EXPORT           = 10,
-    VIZG_DIAG_CIRCULAR_IMPORT          = 11,
-    VIZG_DIAG_UNKNOWN_TYPE_NAME        = 12,
-    VIZG_DIAG_TYPE_MISMATCH            = 13,
-    VIZG_DIAG_PARSE_RECURSION_LIMIT    = 14,
-    VIZG_DIAG_INVALID_ESCAPE_SEQUENCE  = 15,
-    VIZG_DIAG_UNTERMINATED_REGEXP      = 16,
-    VIZG_DIAG_INVALID_REGEXP           = 17,
-    VIZG_DIAG_INVALID_UTF8             = 18,
-    VIZG_DIAG_UNSUPPORTED_SYNTAX       = 19,
-    VIZG_DIAG_UNSUPPORTED_TS_SYNTAX    = 20,
-    VIZG_DIAG_UNSUPPORTED_JSX          = 21,
-    VIZG_DIAG_UNKNOWN_PROPERTY         = 22,
-    VIZG_DIAG_INVALID_INDEX            = 23,
-    VIZG_DIAG_INVALID_ARGUMENT_COUNT   = 24,
-    VIZG_DIAG_INVALID_ARGUMENT_TYPE    = 25,
-} Vizg_DiagnosticCode;
+typedef struct Vizg_ProjectConfig {
+    void *workspace_ptr;
+    size_t workspace_len;
+    size_t max_source_bytes;
+    size_t max_modules;
+    size_t max_diagnostics;
+    size_t max_graph_depth;
+    size_t max_semantic_types;
+} Vizg_ProjectConfig;
 
-typedef enum {
-    VIZG_PHASE_SCANNER      = 0,
-    VIZG_PHASE_PARSER       = 1,
-    VIZG_PHASE_BINDER       = 2,
-    VIZG_PHASE_RESOLVER     = 3,
-    VIZG_PHASE_CFG          = 4,
-    VIZG_PHASE_MODULE_GRAPH = 5,
-    VIZG_PHASE_TYPE_CHECKER = 6,
-    VIZG_PHASE_LOWERING     = 7,
-    VIZG_PHASE_RUNTIME      = 8,
-    VIZG_PHASE_INTERNAL     = 9,
-} Vizg_DiagnosticPhase;
+typedef uint32_t Vizg_ProjectSourceKind;
+enum {
+    VIZG_PROJECT_SOURCE_SCRIPT = 0,
+    VIZG_PROJECT_SOURCE_MODULE = 1,
+};
 
-typedef struct Vizg_Diagnostic {
-    Vizg_Severity        severity;
-    Vizg_DiagnosticCode  code;
-    Vizg_DiagnosticPhase phase;
-    const char          *message_ptr;
-    size_t               message_len;
-    Vizg_Span            span;
-    const char          *path_ptr;
-    size_t               path_len;
-} Vizg_Diagnostic;
+typedef uint32_t Vizg_ProjectStepKind;
+enum {
+    VIZG_PROJECT_STEP_COMPLETE = 0,
+    VIZG_PROJECT_STEP_REQUEST = 1,
+};
 
-typedef enum {
-    VIZG_TOKEN_INVALID = 0,
-    VIZG_TOKEN_IDENTIFIER,
-    VIZG_TOKEN_PRIVATE_IDENTIFIER,
-    VIZG_TOKEN_NUMBER_LITERAL,
-    VIZG_TOKEN_BIGINT_LITERAL,
-    VIZG_TOKEN_STRING_LITERAL,
-    VIZG_TOKEN_REGEXP_LITERAL,
-    VIZG_TOKEN_TRUE_LITERAL,
-    VIZG_TOKEN_FALSE_LITERAL,
-    VIZG_TOKEN_NULL_LITERAL,
-    VIZG_TOKEN_NO_SUBSTITUTION_TEMPLATE,
-    VIZG_TOKEN_TEMPLATE_HEAD,
-    VIZG_TOKEN_TEMPLATE_MIDDLE,
-    VIZG_TOKEN_TEMPLATE_TAIL,
-    VIZG_TOKEN_SHEBANG,
-    VIZG_TOKEN_LINE_COMMENT,
-    VIZG_TOKEN_BLOCK_COMMENT,
-    VIZG_TOKEN_KEYWORD_AWAIT,
-    VIZG_TOKEN_KEYWORD_BREAK,
-    VIZG_TOKEN_KEYWORD_CASE,
-    VIZG_TOKEN_KEYWORD_CATCH,
-    VIZG_TOKEN_KEYWORD_CLASS,
-    VIZG_TOKEN_KEYWORD_CONST,
-    VIZG_TOKEN_KEYWORD_CONTINUE,
-    VIZG_TOKEN_KEYWORD_DEBUGGER,
-    VIZG_TOKEN_KEYWORD_DEFAULT,
-    VIZG_TOKEN_KEYWORD_DELETE,
-    VIZG_TOKEN_KEYWORD_DO,
-    VIZG_TOKEN_KEYWORD_ELSE,
-    VIZG_TOKEN_KEYWORD_ENUM,
-    VIZG_TOKEN_KEYWORD_EXPORT,
-    VIZG_TOKEN_KEYWORD_EXTENDS,
-    VIZG_TOKEN_KEYWORD_FINALLY,
-    VIZG_TOKEN_KEYWORD_FOR,
-    VIZG_TOKEN_KEYWORD_FUNCTION,
-    VIZG_TOKEN_KEYWORD_IF,
-    VIZG_TOKEN_KEYWORD_IMPORT,
-    VIZG_TOKEN_KEYWORD_IN,
-    VIZG_TOKEN_KEYWORD_INSTANCEOF,
-    VIZG_TOKEN_KEYWORD_LET,
-    VIZG_TOKEN_KEYWORD_NEW,
-    VIZG_TOKEN_KEYWORD_RETURN,
-    VIZG_TOKEN_KEYWORD_SUPER,
-    VIZG_TOKEN_KEYWORD_SWITCH,
-    VIZG_TOKEN_KEYWORD_THIS,
-    VIZG_TOKEN_KEYWORD_THROW,
-    VIZG_TOKEN_KEYWORD_TRY,
-    VIZG_TOKEN_KEYWORD_TYPEOF,
-    VIZG_TOKEN_KEYWORD_VAR,
-    VIZG_TOKEN_KEYWORD_VOID,
-    VIZG_TOKEN_KEYWORD_WHILE,
-    VIZG_TOKEN_KEYWORD_WITH,
-    VIZG_TOKEN_KEYWORD_YIELD,
-    VIZG_TOKEN_AMPERSAND,
-    VIZG_TOKEN_AMPERSAND_AMPERSAND,
-    VIZG_TOKEN_AMPERSAND_AMPERSAND_EQUAL,
-    VIZG_TOKEN_AMPERSAND_EQUAL,
-    VIZG_TOKEN_STAR,
-    VIZG_TOKEN_STAR_STAR,
-    VIZG_TOKEN_STAR_STAR_EQUAL,
-    VIZG_TOKEN_STAR_EQUAL,
-    VIZG_TOKEN_AT,
-    VIZG_TOKEN_BACKTICK,
-    VIZG_TOKEN_BAR,
-    VIZG_TOKEN_BAR_BAR,
-    VIZG_TOKEN_BAR_BAR_EQUAL,
-    VIZG_TOKEN_BAR_EQUAL,
-    VIZG_TOKEN_BAR_GREATER_THAN,
-    VIZG_TOKEN_CARET,
-    VIZG_TOKEN_CARET_EQUAL,
-    VIZG_TOKEN_COLON,
-    VIZG_TOKEN_COMMA,
-    VIZG_TOKEN_DOT,
-    VIZG_TOKEN_ELLIPSIS,
-    VIZG_TOKEN_SEMICOLON,
-    VIZG_TOKEN_EQUALS,
-    VIZG_TOKEN_EQUALS_EQUALS,
-    VIZG_TOKEN_EQUALS_EQUALS_EQUALS,
-    VIZG_TOKEN_EQUALS_GREATER_THAN,
-    VIZG_TOKEN_BANG,
-    VIZG_TOKEN_BANG_EQUAL,
-    VIZG_TOKEN_BANG_EQUAL_EQUAL,
-    VIZG_TOKEN_GREATER_THAN,
-    VIZG_TOKEN_GREATER_THAN_EQUALS,
-    VIZG_TOKEN_GREATER_THAN_GREATER_THAN,
-    VIZG_TOKEN_GREATER_THAN_GREATER_THAN_EQUAL,
-    VIZG_TOKEN_GREATER_THAN_GREATER_THAN_GREATER_THAN,
-    VIZG_TOKEN_GREATER_THAN_GREATER_THAN_GREATER_THAN_EQUAL,
-    VIZG_TOKEN_HASH,
-    VIZG_TOKEN_LESS_THAN,
-    VIZG_TOKEN_LESS_THAN_EQUALS,
-    VIZG_TOKEN_LESS_THAN_LESS_THAN,
-    VIZG_TOKEN_LESS_THAN_LESS_THAN_EQUAL,
-    VIZG_TOKEN_LESS_THAN_SLASH,
-    VIZG_TOKEN_OPEN_BRACE,
-    VIZG_TOKEN_OPEN_BRACKET,
-    VIZG_TOKEN_OPEN_PARENTHESIS,
-    VIZG_TOKEN_MINUS,
-    VIZG_TOKEN_MINUS_EQUAL,
-    VIZG_TOKEN_MINUS_MINUS,
-    VIZG_TOKEN_PERCENT,
-    VIZG_TOKEN_PERCENT_EQUAL,
-    VIZG_TOKEN_PLUS,
-    VIZG_TOKEN_PLUS_EQUAL,
-    VIZG_TOKEN_PLUS_PLUS,
-    VIZG_TOKEN_QUESTION_MARK,
-    VIZG_TOKEN_QUESTION_DOT,
-    VIZG_TOKEN_NULLISH_COALESCING,
-    VIZG_TOKEN_NULLISH_COALESCING_EQUAL,
-    VIZG_TOKEN_CLOSE_BRACE,
-    VIZG_TOKEN_CLOSE_BRACKET,
-    VIZG_TOKEN_CLOSE_PARENTHESIS,
-    VIZG_TOKEN_SLASH,
-    VIZG_TOKEN_SLASH_EQUAL,
-    VIZG_TOKEN_TILDE,
-    VIZG_TOKEN_END_OF_LINE,
-    VIZG_TOKEN_END_OF_FILE
-} Vizg_TokenType;
+typedef uint32_t Vizg_ProjectRequestKind;
+enum {
+    VIZG_PROJECT_REQUEST_STATIC = 0,
+    VIZG_PROJECT_REQUEST_TYPE_ONLY = 1,
+    VIZG_PROJECT_REQUEST_DYNAMIC = 2,
+    VIZG_PROJECT_REQUEST_RE_EXPORT = 3,
+};
 
-/* Contextual keyword classification companion to Vizg_TokenType.Identifier. */
-typedef enum Vizg_ContextualKeyword {
-    VIZG_CONTEXTUAL_KEYWORD_NONE           = 0,
-    VIZG_CONTEXTUAL_KEYWORD_AS             = 1,
-    VIZG_CONTEXTUAL_KEYWORD_FROM           = 2,
-    VIZG_CONTEXTUAL_KEYWORD_OF             = 3,
-    VIZG_CONTEXTUAL_KEYWORD_READONLY       = 4,
-    VIZG_CONTEXTUAL_KEYWORD_ABSTRACT       = 5,
-    VIZG_CONTEXTUAL_KEYWORD_DECLARE        = 6,
-    VIZG_CONTEXTUAL_KEYWORD_SATISFIES      = 7,
-    VIZG_CONTEXTUAL_KEYWORD_INFER          = 8,
-    VIZG_CONTEXTUAL_KEYWORD_KEYOF          = 9,
+typedef uint32_t Vizg_ProjectFailureKind;
+enum {
+    VIZG_PROJECT_FAILURE_NOT_FOUND = 0,
+    VIZG_PROJECT_FAILURE_DENIED = 1,
+    VIZG_PROJECT_FAILURE_FAILED = 2,
+};
 
-    /* Extended contextual keywords (all supported by the scanner). */
-    VIZG_CONTEXTUAL_KEYWORD_ACCESSOR       = 10,
-    VIZG_CONTEXTUAL_KEYWORD_ANY            = 11,
-    VIZG_CONTEXTUAL_KEYWORD_ASSERT         = 12,
-    VIZG_CONTEXTUAL_KEYWORD_ASSERTS        = 13,
-    VIZG_CONTEXTUAL_KEYWORD_ASYNC          = 14,
-    VIZG_CONTEXTUAL_KEYWORD_BIGINT         = 15,
-    VIZG_CONTEXTUAL_KEYWORD_BOOLEAN        = 16,
-    VIZG_CONTEXTUAL_KEYWORD_CONSTRUCTOR    = 17,
-    VIZG_CONTEXTUAL_KEYWORD_GLOBAL         = 18,
-    VIZG_CONTEXTUAL_KEYWORD_IMPLEMENTS     = 19,
-    VIZG_CONTEXTUAL_KEYWORD_INTERFACE      = 20,
-    VIZG_CONTEXTUAL_KEYWORD_INTRINSIC      = 21,
-    VIZG_CONTEXTUAL_KEYWORD_IS             = 22,
-    VIZG_CONTEXTUAL_KEYWORD_MODULE         = 23,
-    VIZG_CONTEXTUAL_KEYWORD_NAMESPACE      = 24,
-    VIZG_CONTEXTUAL_KEYWORD_NEVER          = 25,
-    VIZG_CONTEXTUAL_KEYWORD_NUMBER         = 26,
-    VIZG_CONTEXTUAL_KEYWORD_OBJECT         = 27,
-    VIZG_CONTEXTUAL_KEYWORD_OUT            = 28,
-    VIZG_CONTEXTUAL_KEYWORD_OVERRIDE       = 29,
-    VIZG_CONTEXTUAL_KEYWORD_PACKAGE        = 30,
-    VIZG_CONTEXTUAL_KEYWORD_PRIVATE        = 31,
-    VIZG_CONTEXTUAL_KEYWORD_PROTECTED      = 32,
-    VIZG_CONTEXTUAL_KEYWORD_PUBLIC         = 33,
-    VIZG_CONTEXTUAL_KEYWORD_SET            = 34,
-    VIZG_CONTEXTUAL_KEYWORD_STATIC         = 35,
-    VIZG_CONTEXTUAL_KEYWORD_STRING         = 36,
-    VIZG_CONTEXTUAL_KEYWORD_SYMBOL         = 37,
-    VIZG_CONTEXTUAL_KEYWORD_TYPE           = 38,
-    VIZG_CONTEXTUAL_KEYWORD_UNDEFINED      = 39,
-    VIZG_CONTEXTUAL_KEYWORD_UNIQUE         = 40,
-    VIZG_CONTEXTUAL_KEYWORD_UNKNOWN        = 41,
-    VIZG_CONTEXTUAL_KEYWORD_USING          = 42,
-    VIZG_CONTEXTUAL_KEYWORD_GET            = 43,
-} Vizg_ContextualKeyword;
+typedef uint32_t Vizg_ExternalExportKind;
+enum {
+    VIZG_EXTERNAL_EXPORT_NAMED = 0,
+    VIZG_EXTERNAL_EXPORT_DEFAULT = 1,
+    VIZG_EXTERNAL_EXPORT_NAMESPACE = 2,
+};
 
+typedef uint32_t Vizg_ExternalType;
+enum {
+    VIZG_EXTERNAL_TYPE_UNKNOWN = 0,
+    VIZG_EXTERNAL_TYPE_ANY = 1,
+    VIZG_EXTERNAL_TYPE_NEVER = 2,
+    VIZG_EXTERNAL_TYPE_VOID = 3,
+    VIZG_EXTERNAL_TYPE_UNDEFINED = 4,
+    VIZG_EXTERNAL_TYPE_NULL = 5,
+    VIZG_EXTERNAL_TYPE_BOOLEAN = 6,
+    VIZG_EXTERNAL_TYPE_NUMBER = 7,
+    VIZG_EXTERNAL_TYPE_BIGINT = 8,
+    VIZG_EXTERNAL_TYPE_STRING = 9,
+    VIZG_EXTERNAL_TYPE_SYMBOL = 10,
+    VIZG_EXTERNAL_TYPE_OBJECT = 11,
+};
 
+typedef struct Vizg_ProjectSource {
+    uint64_t module_id;
+    const char *logical_name_ptr;
+    size_t logical_name_len;
+    const char *source_ptr;
+    size_t source_len;
+    Vizg_ProjectSourceKind kind;
+    uint8_t is_root;
+    uint8_t reserved[3];
+    uint64_t revision;
+} Vizg_ProjectSource;
 
+typedef struct Vizg_ProjectSpan {
+    uint32_t start;
+    uint32_t end;
+    uint32_t line;
+    uint32_t column;
+} Vizg_ProjectSpan;
 
-typedef struct Vizg_Token {
-    Vizg_TokenType  kind;
-    Vizg_Span       span;
-    const char     *lexeme_ptr;
-    size_t          lexeme_len;
-    int32_t         contextual_kind; /* VIZG_CONTEXTUAL_KEYWORD_*. */
-} Vizg_Token;
+typedef struct Vizg_ProjectRequestAttribute {
+    const char *key_ptr;
+    size_t key_len;
+    const char *value_ptr;
+    size_t value_len;
+    Vizg_ProjectSpan span;
+} Vizg_ProjectRequestAttribute;
 
-typedef enum {
-    VIZG_STATUS_OK                    = 0,
-    VIZG_STATUS_INVALID_ARGUMENT      = 1,
-    VIZG_STATUS_IO_ERROR              = 2,
-    VIZG_STATUS_OUT_OF_MEMORY         = 3,
-    VIZG_STATUS_INTERNAL_ERROR        = 4,
-    VIZG_STATUS_FILE_TOO_LARGE        = 5,
-} Vizg_Status;
+typedef struct Vizg_ProjectStep {
+    Vizg_ProjectStepKind kind;
+    uint64_t request_id;
+    uint64_t importer_module_id;
+    const char *specifier_ptr;
+    size_t specifier_len;
+    Vizg_ProjectRequestKind request_kind;
+    const Vizg_ProjectRequestAttribute *attributes_ptr;
+    size_t attribute_count;
+    Vizg_ProjectSpan span;
+} Vizg_ProjectStep;
 
-typedef struct Vizg_SourceInput {
-    const char     *text_ptr;
-    size_t          text_len;
-    const char     *path_ptr;
-    size_t          path_len;
-} Vizg_SourceInput;
+typedef struct Vizg_ExternalExport {
+    const char *name_ptr;
+    size_t name_len;
+    Vizg_ExternalExportKind kind;
+    uint8_t type_only;
+    uint8_t has_type_metadata;
+    uint8_t reserved[2];
+    Vizg_ExternalType type_metadata;
+} Vizg_ExternalExport;
 
-/*
- * C ABI v1 contract:
- * - Pointer/length pairs are exact byte spans, not NUL-terminated strings.
- *   Zero length permits NULL; non-zero length requires non-NULL. Inputs are
- *   borrowed only for the duration of the call.
- * - A successful result owns all nested spans until vizg_free_result() is
- *   called exactly once. Callers must not modify or separately free them.
- * - Separate calls and results may be used concurrently. Do not read a result
- *   while or after another thread frees that same result.
- * - VIZG_STATUS_OK may include syntax diagnostics. Other statuses return no
- *   result. In-memory source has no fixed cap beyond address space and memory;
- *   file input may return VIZG_STATUS_FILE_TOO_LARGE.
- * See docs/architecture.md for platform validation scope and the full contract.
- */
+typedef struct Vizg_ExternalModule {
+    uint64_t external_module_id;
+    const char *logical_name_ptr;
+    size_t logical_name_len;
+    const Vizg_ExternalExport *exports_ptr;
+    size_t export_count;
+} Vizg_ExternalModule;
+
+typedef struct Vizg_ProjectResultSummary {
+    size_t module_count;
+    uint8_t has_failures;
+    uint8_t reserved[7];
+} Vizg_ProjectResultSummary;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Returns the runtime library's C ABI version. */
-uint32_t vizg_abi_version(void);
-
-Vizg_Status vizg_analyze_source_ex(
-    const Vizg_SourceInput *input,
-    Vizg_Result **out_result);
-
-/* Deprecated: use vizg_analyze_source_ex(). Kept for back-compat. */
-
-Vizg_Result *vizg_analyze_file(
-    const char     *path_ptr, size_t path_len,
-    const char     *text_ptr, size_t text_len);
-
-void vizg_free_result(Vizg_Result *result);
-Vizg_Result *vizg_analyze_source(
-    const char     *source_ptr, size_t source_len,
-    const char     *path_ptr,   size_t path_len);
-
+/* Inputs are borrowed for one call and copied when retained. Step output is
+ * borrowed until the next call on that project. The caller owns one aligned,
+ * exclusive workspace. The implementation performs no filesystem access,
+ * callbacks, libc allocation, or hidden heap allocation. Project handles are
+ * single-threaded; independent handles and immutable results may be used in
+ * parallel. Destroy each non-null handle exactly once. INVALID_ARGUMENT and
+ * INVALID_STATE reject input/ordering; LIMIT_EXCEEDED and OUT_OF_MEMORY are
+ * not transactional retry guarantees. On exhaustion or INTERNAL_ERROR,
+ * destroy and restart. A successful finish can report an inspectable partial
+ * result through has_failures. */
+size_t vizg_project_workspace_alignment(void);
+size_t vizg_project_workspace_overhead(void);
+Vizg_ProjectStatus vizg_project_create(
+    const Vizg_ProjectConfig *config, Vizg_Project **out_project);
+void vizg_project_destroy(Vizg_Project *project);
+Vizg_ProjectStatus vizg_project_add_source(
+    Vizg_Project *project, const Vizg_ProjectSource *source);
+Vizg_ProjectStatus vizg_project_step(
+    Vizg_Project *project, Vizg_ProjectStep *out_step);
+Vizg_ProjectStatus vizg_project_respond_source(
+    Vizg_Project *project, uint64_t request_id,
+    const Vizg_ProjectSource *source);
+Vizg_ProjectStatus vizg_project_respond_external(
+    Vizg_Project *project, uint64_t request_id,
+    const Vizg_ExternalModule *external_module);
+Vizg_ProjectStatus vizg_project_respond_failure(
+    Vizg_Project *project, uint64_t request_id,
+    Vizg_ProjectFailureKind failure_kind);
+Vizg_ProjectStatus vizg_project_finish(
+    Vizg_Project *project, Vizg_ProjectResult **out_result);
+Vizg_ProjectStatus vizg_project_result_summary(
+    const Vizg_ProjectResult *result,
+    Vizg_ProjectResultSummary *out_summary);
+void vizg_project_result_destroy(Vizg_ProjectResult *result);
+Vizg_ProjectStatus vizg_project_analyze_source(
+    const Vizg_ProjectConfig *config,
+    const Vizg_ProjectSource *source,
+    Vizg_ProjectResult **out_result);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif  /* VIZG_H */
+#endif

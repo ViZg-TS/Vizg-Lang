@@ -1,4 +1,4 @@
-// Contract tests for the module graph — one test per contract listed in Goal 08.
+// Native adapter contract tests for the module graph.
 // Each test asserts the intended behavior, not a temporary bug; fixtures live
 // under test/modules/linking/. Tests use structured assertions on ModuleGraph
 // fields (modules.len, imports[].status, linked_imports[].kind, diagnostics[])
@@ -112,7 +112,7 @@ test "Contract B: aliased import binds to the original export" {
 
         // Target symbol must be the exported `source`, not an alias — i.e. it
         // resolves to a binder symbol whose verbatim name is "source".
-        const _tm_id: u32 = link.target_module orelse unreachable;
+        const _tm_id: modules_mod.ModuleId = link.target_module orelse unreachable;
         const target = graph.modules[_tm_id];
         var found_source_sym: ?bool = null;
         for (target.result.bind.symbols) |sym| {
@@ -177,7 +177,7 @@ test "Contract C: aliased export resolves to the underlying local symbol" {
         try std.testing.expect(link.target_module != null);
         try std.testing.expect(link.target_symbol != null);
 
-        const _tm_id: u32 = link.target_module orelse unreachable;
+        const _tm_id: modules_mod.ModuleId = link.target_module orelse unreachable;
         const target = graph.modules[_tm_id];
         var found: ?bool = null;
         for (target.result.bind.symbols) |sym| {

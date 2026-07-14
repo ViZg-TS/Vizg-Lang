@@ -1,148 +1,83 @@
 const std = @import("std");
 const abi = @import("vizg-abi");
 
-extern fn vizg_c_sizeof_Vizg_Result() usize;
-extern fn vizg_c_alignof_Vizg_Result() usize;
-extern fn vizg_c_offsetof_Vizg_Result_token_count() usize;
-extern fn vizg_c_offsetof_Vizg_Result_diagnostic_count() usize;
-extern fn vizg_c_offsetof_Vizg_Result_tokens_ptr() usize;
-extern fn vizg_c_offsetof_Vizg_Result_diagnostics_ptr() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectStatus() usize;
+extern fn vizg_c_alignof_Vizg_ProjectStatus() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectSourceKind() usize;
+extern fn vizg_c_alignof_Vizg_ProjectSourceKind() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectStepKind() usize;
+extern fn vizg_c_alignof_Vizg_ProjectStepKind() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectRequestKind() usize;
+extern fn vizg_c_alignof_Vizg_ProjectRequestKind() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectFailureKind() usize;
+extern fn vizg_c_alignof_Vizg_ProjectFailureKind() usize;
+extern fn vizg_c_sizeof_Vizg_ExternalExportKind() usize;
+extern fn vizg_c_alignof_Vizg_ExternalExportKind() usize;
+extern fn vizg_c_sizeof_Vizg_ExternalType() usize;
+extern fn vizg_c_alignof_Vizg_ExternalType() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectConfig() usize;
+extern fn vizg_c_alignof_Vizg_ProjectConfig() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectSource() usize;
+extern fn vizg_c_alignof_Vizg_ProjectSource() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectSpan() usize;
+extern fn vizg_c_alignof_Vizg_ProjectSpan() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectRequestAttribute() usize;
+extern fn vizg_c_alignof_Vizg_ProjectRequestAttribute() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectStep() usize;
+extern fn vizg_c_alignof_Vizg_ProjectStep() usize;
+extern fn vizg_c_sizeof_Vizg_ExternalExport() usize;
+extern fn vizg_c_alignof_Vizg_ExternalExport() usize;
+extern fn vizg_c_sizeof_Vizg_ExternalModule() usize;
+extern fn vizg_c_alignof_Vizg_ExternalModule() usize;
+extern fn vizg_c_sizeof_Vizg_ProjectResultSummary() usize;
+extern fn vizg_c_alignof_Vizg_ProjectResultSummary() usize;
+extern fn vizg_c_fields_Vizg_ProjectConfig() usize;
+extern fn vizg_c_fields_Vizg_ProjectSource() usize;
+extern fn vizg_c_fields_Vizg_ProjectSpan() usize;
+extern fn vizg_c_fields_Vizg_ProjectRequestAttribute() usize;
+extern fn vizg_c_fields_Vizg_ProjectStep() usize;
+extern fn vizg_c_fields_Vizg_ExternalExport() usize;
+extern fn vizg_c_fields_Vizg_ExternalModule() usize;
+extern fn vizg_c_fields_Vizg_ProjectResultSummary() usize;
+extern fn vizg_c_value_project_status_internal_error() u32;
+extern fn vizg_c_value_project_request_re_export() u32;
+extern fn vizg_c_value_external_type_object() u32;
 
-extern fn vizg_c_sizeof_Vizg_Span() usize;
-extern fn vizg_c_alignof_Vizg_Span() usize;
-extern fn vizg_c_offsetof_Vizg_Span_start_offset() usize;
-extern fn vizg_c_offsetof_Vizg_Span_end_offset() usize;
-extern fn vizg_c_offsetof_Vizg_Span_line_start() usize;
-extern fn vizg_c_offsetof_Vizg_Span_col_start() usize;
-
-extern fn vizg_c_sizeof_Vizg_Diagnostic() usize;
-extern fn vizg_c_alignof_Vizg_Diagnostic() usize;
-extern fn vizg_c_offsetof_Vizg_Diagnostic_severity() usize;
-extern fn vizg_c_offsetof_Vizg_Diagnostic_code() usize;
-extern fn vizg_c_offsetof_Vizg_Diagnostic_phase() usize;
-extern fn vizg_c_offsetof_Vizg_Diagnostic_message_ptr() usize;
-extern fn vizg_c_offsetof_Vizg_Diagnostic_message_len() usize;
-extern fn vizg_c_offsetof_Vizg_Diagnostic_span() usize;
-extern fn vizg_c_offsetof_Vizg_Diagnostic_path_ptr() usize;
-extern fn vizg_c_offsetof_Vizg_Diagnostic_path_len() usize;
-
-extern fn vizg_c_sizeof_Vizg_Token() usize;
-extern fn vizg_c_alignof_Vizg_Token() usize;
-extern fn vizg_c_offsetof_Vizg_Token_kind() usize;
-extern fn vizg_c_offsetof_Vizg_Token_span() usize;
-extern fn vizg_c_offsetof_Vizg_Token_lexeme_ptr() usize;
-extern fn vizg_c_offsetof_Vizg_Token_lexeme_len() usize;
-extern fn vizg_c_offsetof_Vizg_Token_contextual_kind() usize;
-
-extern fn vizg_c_sizeof_Vizg_SourceInput() usize;
-extern fn vizg_c_alignof_Vizg_SourceInput() usize;
-extern fn vizg_c_offsetof_Vizg_SourceInput_text_ptr() usize;
-extern fn vizg_c_offsetof_Vizg_SourceInput_text_len() usize;
-extern fn vizg_c_offsetof_Vizg_SourceInput_path_ptr() usize;
-extern fn vizg_c_offsetof_Vizg_SourceInput_path_len() usize;
-
-extern fn vizg_c_sizeof_Vizg_Severity() usize;
-extern fn vizg_c_alignof_Vizg_Severity() usize;
-extern fn vizg_c_sizeof_Vizg_DiagnosticCode() usize;
-extern fn vizg_c_alignof_Vizg_DiagnosticCode() usize;
-extern fn vizg_c_sizeof_Vizg_DiagnosticPhase() usize;
-extern fn vizg_c_alignof_Vizg_DiagnosticPhase() usize;
-extern fn vizg_c_sizeof_Vizg_TokenType() usize;
-extern fn vizg_c_alignof_Vizg_TokenType() usize;
-extern fn vizg_c_sizeof_Vizg_ContextualKeyword() usize;
-extern fn vizg_c_alignof_Vizg_ContextualKeyword() usize;
-extern fn vizg_c_sizeof_Vizg_Status() usize;
-extern fn vizg_c_alignof_Vizg_Status() usize;
-
-extern fn vizg_c_value_severity_hint() c_int;
-extern fn vizg_c_value_diag_invalid_escape() c_int;
-extern fn vizg_c_value_diag_invalid_utf8() c_int;
-extern fn vizg_c_value_diag_unsupported_syntax() c_int;
-extern fn vizg_c_value_diag_unsupported_ts_syntax() c_int;
-extern fn vizg_c_value_diag_unsupported_jsx() c_int;
-extern fn vizg_c_value_diag_unknown_property() c_int;
-extern fn vizg_c_value_diag_invalid_index() c_int;
-extern fn vizg_c_value_diag_invalid_argument_count() c_int;
-extern fn vizg_c_value_diag_invalid_argument_type() c_int;
-extern fn vizg_c_value_phase_internal() c_int;
-extern fn vizg_c_value_token_invalid() c_int;
-extern fn vizg_c_value_token_identifier() c_int;
-extern fn vizg_c_value_token_finally() c_int;
-extern fn vizg_c_value_token_eof() c_int;
-extern fn vizg_c_value_contextual_none() c_int;
-extern fn vizg_c_value_contextual_as() c_int;
-extern fn vizg_c_value_contextual_get() c_int;
-extern fn vizg_c_value_status_ok() c_int;
-extern fn vizg_c_value_status_file_too_large() c_int;
-
-fn expectLayout(comptime T: type, c_size: usize, c_align: usize) !void {
-    try std.testing.expectEqual(@sizeOf(T), c_size);
-    try std.testing.expectEqual(@alignOf(T), c_align);
+fn expectLayout(comptime T: type, size: usize, alignment: usize) !void {
+    try std.testing.expectEqual(@sizeOf(T), size);
+    try std.testing.expectEqual(@alignOf(T), alignment);
+}
+fn f(comptime T: type, comptime field: []const u8, weight: usize) usize {
+    return @offsetOf(T, field) * weight;
 }
 
-test "C and Zig public struct layouts match" {
-    try expectLayout(abi.Vizg_Result, vizg_c_sizeof_Vizg_Result(), vizg_c_alignof_Vizg_Result());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Result, "token_count"), vizg_c_offsetof_Vizg_Result_token_count());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Result, "diagnostic_count"), vizg_c_offsetof_Vizg_Result_diagnostic_count());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Result, "tokens_ptr"), vizg_c_offsetof_Vizg_Result_tokens_ptr());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Result, "diagnostics_ptr"), vizg_c_offsetof_Vizg_Result_diagnostics_ptr());
+test "official ABI v1 C and Zig layouts match" {
+    try expectLayout(abi.Vizg_ProjectStatus, vizg_c_sizeof_Vizg_ProjectStatus(), vizg_c_alignof_Vizg_ProjectStatus());
+    try expectLayout(u32, vizg_c_sizeof_Vizg_ProjectSourceKind(), vizg_c_alignof_Vizg_ProjectSourceKind());
+    try expectLayout(u32, vizg_c_sizeof_Vizg_ProjectStepKind(), vizg_c_alignof_Vizg_ProjectStepKind());
+    try expectLayout(u32, vizg_c_sizeof_Vizg_ProjectRequestKind(), vizg_c_alignof_Vizg_ProjectRequestKind());
+    try expectLayout(u32, vizg_c_sizeof_Vizg_ProjectFailureKind(), vizg_c_alignof_Vizg_ProjectFailureKind());
+    try expectLayout(u32, vizg_c_sizeof_Vizg_ExternalExportKind(), vizg_c_alignof_Vizg_ExternalExportKind());
+    try expectLayout(u32, vizg_c_sizeof_Vizg_ExternalType(), vizg_c_alignof_Vizg_ExternalType());
+    try expectLayout(abi.Vizg_ProjectConfig, vizg_c_sizeof_Vizg_ProjectConfig(), vizg_c_alignof_Vizg_ProjectConfig());
+    try expectLayout(abi.Vizg_ProjectSource, vizg_c_sizeof_Vizg_ProjectSource(), vizg_c_alignof_Vizg_ProjectSource());
+    try expectLayout(abi.Vizg_ProjectSpan, vizg_c_sizeof_Vizg_ProjectSpan(), vizg_c_alignof_Vizg_ProjectSpan());
+    try expectLayout(abi.Vizg_ProjectRequestAttribute, vizg_c_sizeof_Vizg_ProjectRequestAttribute(), vizg_c_alignof_Vizg_ProjectRequestAttribute());
+    try expectLayout(abi.Vizg_ProjectStep, vizg_c_sizeof_Vizg_ProjectStep(), vizg_c_alignof_Vizg_ProjectStep());
+    try expectLayout(abi.Vizg_ExternalExport, vizg_c_sizeof_Vizg_ExternalExport(), vizg_c_alignof_Vizg_ExternalExport());
+    try expectLayout(abi.Vizg_ExternalModule, vizg_c_sizeof_Vizg_ExternalModule(), vizg_c_alignof_Vizg_ExternalModule());
+    try expectLayout(abi.Vizg_ProjectResultSummary, vizg_c_sizeof_Vizg_ProjectResultSummary(), vizg_c_alignof_Vizg_ProjectResultSummary());
 
-    try expectLayout(abi.Vizg_Span, vizg_c_sizeof_Vizg_Span(), vizg_c_alignof_Vizg_Span());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Span, "start_offset"), vizg_c_offsetof_Vizg_Span_start_offset());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Span, "end_offset"), vizg_c_offsetof_Vizg_Span_end_offset());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Span, "line_start"), vizg_c_offsetof_Vizg_Span_line_start());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Span, "col_start"), vizg_c_offsetof_Vizg_Span_col_start());
+    try std.testing.expectEqual(f(abi.Vizg_ProjectConfig, "workspace_ptr", 1) + f(abi.Vizg_ProjectConfig, "workspace_len", 2) + f(abi.Vizg_ProjectConfig, "max_source_bytes", 3) + f(abi.Vizg_ProjectConfig, "max_modules", 4) + f(abi.Vizg_ProjectConfig, "max_diagnostics", 5) + f(abi.Vizg_ProjectConfig, "max_graph_depth", 6) + f(abi.Vizg_ProjectConfig, "max_semantic_types", 7), vizg_c_fields_Vizg_ProjectConfig());
+    try std.testing.expectEqual(f(abi.Vizg_ProjectSource, "module_id", 1) + f(abi.Vizg_ProjectSource, "logical_name_ptr", 2) + f(abi.Vizg_ProjectSource, "logical_name_len", 3) + f(abi.Vizg_ProjectSource, "source_ptr", 4) + f(abi.Vizg_ProjectSource, "source_len", 5) + f(abi.Vizg_ProjectSource, "kind", 6) + f(abi.Vizg_ProjectSource, "is_root", 7) + f(abi.Vizg_ProjectSource, "reserved", 8) + f(abi.Vizg_ProjectSource, "revision", 9), vizg_c_fields_Vizg_ProjectSource());
+    try std.testing.expectEqual(f(abi.Vizg_ProjectSpan, "start", 1) + f(abi.Vizg_ProjectSpan, "end", 2) + f(abi.Vizg_ProjectSpan, "line", 3) + f(abi.Vizg_ProjectSpan, "column", 4), vizg_c_fields_Vizg_ProjectSpan());
+    try std.testing.expectEqual(f(abi.Vizg_ProjectRequestAttribute, "key_ptr", 1) + f(abi.Vizg_ProjectRequestAttribute, "key_len", 2) + f(abi.Vizg_ProjectRequestAttribute, "value_ptr", 3) + f(abi.Vizg_ProjectRequestAttribute, "value_len", 4) + f(abi.Vizg_ProjectRequestAttribute, "span", 5), vizg_c_fields_Vizg_ProjectRequestAttribute());
+    try std.testing.expectEqual(f(abi.Vizg_ProjectStep, "kind", 1) + f(abi.Vizg_ProjectStep, "request_id", 2) + f(abi.Vizg_ProjectStep, "importer_module_id", 3) + f(abi.Vizg_ProjectStep, "specifier_ptr", 4) + f(abi.Vizg_ProjectStep, "specifier_len", 5) + f(abi.Vizg_ProjectStep, "request_kind", 6) + f(abi.Vizg_ProjectStep, "attributes_ptr", 7) + f(abi.Vizg_ProjectStep, "attribute_count", 8) + f(abi.Vizg_ProjectStep, "span", 9), vizg_c_fields_Vizg_ProjectStep());
+    try std.testing.expectEqual(f(abi.Vizg_ExternalExport, "name_ptr", 1) + f(abi.Vizg_ExternalExport, "name_len", 2) + f(abi.Vizg_ExternalExport, "kind", 3) + f(abi.Vizg_ExternalExport, "type_only", 4) + f(abi.Vizg_ExternalExport, "has_type_metadata", 5) + f(abi.Vizg_ExternalExport, "reserved", 6) + f(abi.Vizg_ExternalExport, "type_metadata", 7), vizg_c_fields_Vizg_ExternalExport());
+    try std.testing.expectEqual(f(abi.Vizg_ExternalModule, "external_module_id", 1) + f(abi.Vizg_ExternalModule, "logical_name_ptr", 2) + f(abi.Vizg_ExternalModule, "logical_name_len", 3) + f(abi.Vizg_ExternalModule, "exports_ptr", 4) + f(abi.Vizg_ExternalModule, "export_count", 5), vizg_c_fields_Vizg_ExternalModule());
+    try std.testing.expectEqual(f(abi.Vizg_ProjectResultSummary, "module_count", 1) + f(abi.Vizg_ProjectResultSummary, "has_failures", 2) + f(abi.Vizg_ProjectResultSummary, "reserved", 3), vizg_c_fields_Vizg_ProjectResultSummary());
 
-    try expectLayout(abi.Vizg_Diagnostic, vizg_c_sizeof_Vizg_Diagnostic(), vizg_c_alignof_Vizg_Diagnostic());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Diagnostic, "severity"), vizg_c_offsetof_Vizg_Diagnostic_severity());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Diagnostic, "code"), vizg_c_offsetof_Vizg_Diagnostic_code());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Diagnostic, "phase"), vizg_c_offsetof_Vizg_Diagnostic_phase());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Diagnostic, "message_ptr"), vizg_c_offsetof_Vizg_Diagnostic_message_ptr());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Diagnostic, "message_len"), vizg_c_offsetof_Vizg_Diagnostic_message_len());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Diagnostic, "span"), vizg_c_offsetof_Vizg_Diagnostic_span());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Diagnostic, "path_ptr"), vizg_c_offsetof_Vizg_Diagnostic_path_ptr());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Diagnostic, "path_len"), vizg_c_offsetof_Vizg_Diagnostic_path_len());
-
-    try expectLayout(abi.Vizg_Token, vizg_c_sizeof_Vizg_Token(), vizg_c_alignof_Vizg_Token());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Token, "kind"), vizg_c_offsetof_Vizg_Token_kind());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Token, "span"), vizg_c_offsetof_Vizg_Token_span());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Token, "lexeme_ptr"), vizg_c_offsetof_Vizg_Token_lexeme_ptr());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Token, "lexeme_len"), vizg_c_offsetof_Vizg_Token_lexeme_len());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_Token, "contextual_kind"), vizg_c_offsetof_Vizg_Token_contextual_kind());
-
-    try expectLayout(abi.Vizg_SourceInput, vizg_c_sizeof_Vizg_SourceInput(), vizg_c_alignof_Vizg_SourceInput());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_SourceInput, "text_ptr"), vizg_c_offsetof_Vizg_SourceInput_text_ptr());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_SourceInput, "text_len"), vizg_c_offsetof_Vizg_SourceInput_text_len());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_SourceInput, "path_ptr"), vizg_c_offsetof_Vizg_SourceInput_path_ptr());
-    try std.testing.expectEqual(@offsetOf(abi.Vizg_SourceInput, "path_len"), vizg_c_offsetof_Vizg_SourceInput_path_len());
-}
-
-test "C and Zig public enum representations and values match" {
-    try expectLayout(abi.Vizg_Severity, vizg_c_sizeof_Vizg_Severity(), vizg_c_alignof_Vizg_Severity());
-    try expectLayout(abi.Vizg_DiagnosticCode, vizg_c_sizeof_Vizg_DiagnosticCode(), vizg_c_alignof_Vizg_DiagnosticCode());
-    try expectLayout(abi.Vizg_DiagnosticPhase, vizg_c_sizeof_Vizg_DiagnosticPhase(), vizg_c_alignof_Vizg_DiagnosticPhase());
-    try expectLayout(abi.Vizg_TokenType, vizg_c_sizeof_Vizg_TokenType(), vizg_c_alignof_Vizg_TokenType());
-    try expectLayout(c_int, vizg_c_sizeof_Vizg_ContextualKeyword(), vizg_c_alignof_Vizg_ContextualKeyword());
-    try expectLayout(abi.Vizg_Status, vizg_c_sizeof_Vizg_Status(), vizg_c_alignof_Vizg_Status());
-
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_Severity.Hint), vizg_c_value_severity_hint());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.InvalidEscapeSequence), vizg_c_value_diag_invalid_escape());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.InvalidUtf8), vizg_c_value_diag_invalid_utf8());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.UnsupportedSyntax), vizg_c_value_diag_unsupported_syntax());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.UnsupportedTsSyntax), vizg_c_value_diag_unsupported_ts_syntax());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.UnsupportedJsx), vizg_c_value_diag_unsupported_jsx());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.UnknownProperty), vizg_c_value_diag_unknown_property());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.InvalidIndex), vizg_c_value_diag_invalid_index());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.InvalidArgumentCount), vizg_c_value_diag_invalid_argument_count());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticCode.InvalidArgumentType), vizg_c_value_diag_invalid_argument_type());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_DiagnosticPhase.Internal), vizg_c_value_phase_internal());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_TokenType.Invalid), vizg_c_value_token_invalid());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_TokenType.Identifier), vizg_c_value_token_identifier());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_TokenType.Keyword_finally), vizg_c_value_token_finally());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_TokenType.EndOfFile), vizg_c_value_token_eof());
-    try std.testing.expectEqual(@as(c_int, 0), vizg_c_value_contextual_none());
-    try std.testing.expectEqual(@as(c_int, 1), vizg_c_value_contextual_as());
-    try std.testing.expectEqual(@as(c_int, 43), vizg_c_value_contextual_get());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_Status.OK), vizg_c_value_status_ok());
-    try std.testing.expectEqual(@intFromEnum(abi.Vizg_Status.FILE_TOO_LARGE), vizg_c_value_status_file_too_large());
+    try std.testing.expectEqual(@as(u32, @intFromEnum(abi.Vizg_ProjectStatus.INTERNAL_ERROR)), vizg_c_value_project_status_internal_error());
+    try std.testing.expectEqual(@as(u32, 3), vizg_c_value_project_request_re_export());
+    try std.testing.expectEqual(@as(u32, 11), vizg_c_value_external_type_object());
 }

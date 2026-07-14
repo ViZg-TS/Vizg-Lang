@@ -13,19 +13,29 @@ pub const scanner = @import("frontend/scanner.zig");
 pub const tokens = @import("frontend/tokens.zig");
 
 pub const semantics = @import("semantics/root.zig");
+pub const project = @import("project/root.zig");
+
+// Official portable project contracts. These identities are distinct from the
+// semantic analysis graph records exported through `modules`.
+pub const ModuleId = project.ModuleId;
+pub const RequestId = project.RequestId;
+pub const ExternalModuleId = project.ExternalModuleId;
+pub const ModuleSource = project.ModuleSource;
+pub const ModuleRequest = project.ModuleRequest;
+pub const ModuleRequestInput = project.ModuleRequestInput;
+pub const ExternalExportKind = project.ExternalExportKind;
+pub const ExternalType = project.ExternalType;
+pub const ExternalExportDescriptor = project.ExternalExportDescriptor;
+pub const ExternalModuleDescriptor = project.ExternalModuleDescriptor;
+pub const ModuleState = project.ModuleState;
+pub const Project = project.Project;
+pub const ProjectStep = project.ProjectStep;
+pub const ProjectFinishResult = project.ProjectFinishResult;
 
 // Moved: type model now lives under `types/` so the frontend stays focused on
 // syntax and single-file structural analysis. Callers can reach the same
 // types via vizg.types.TypeId, vizg.types.Type, vizg.types.Builtins, etc.
 pub const types = @import("types/root.zig");
-
-/// C-compatible surface linked into libvizg.a. Lib/vizg.zig is the single ABI
-/// authority shared with Lib/vizg.h.
-pub const abi = @import("vizg-abi");
-
-comptime {
-    _ = abi;
-}
 
 test {
     _ = diagnostics;
@@ -36,14 +46,9 @@ test {
     _ = scanner;
     _ = frontend;
     _ = tokens;
-    _ = abi;
-    // Keep existing modules graph test registration.
+    _ = project;
     _ = @import("modules/graph.zig");
-    _ = @import("modules/loader.zig");
-    _ = @import("modules/resolver.zig");
     _ = @import("modules/root.zig");
-    _ = @import("modules/tests.zig");
-    _ = @import("modules/contracts_test.zig");
     // Keep semantics layer wired in so its tests register alongside the rest.
     _ = @import("semantics/root.zig");
     _ = @import("semantics/type_info.zig");

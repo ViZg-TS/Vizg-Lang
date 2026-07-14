@@ -7,9 +7,10 @@ const std = @import("std");
 const Io = std.Io;
 
 const modules_mod = @import("root.zig");
-const frontend = @import("../frontend/frontend.zig");
-const tokens = @import("../frontend/tokens.zig");
-const diagnostics = @import("../diagnostics/root.zig");
+const core = @import("vizg-core");
+const frontend = core.frontend;
+const tokens = core.tokens;
+const diagnostics = core.diagnostics;
 
 // Keep the constant here so this file is self-contained — `max_source_bytes` in
 // src/main.zig keeps its original declaration for readers of that code path.
@@ -482,9 +483,9 @@ test "module graph records re-export sources" {
 
 test {
     _ = @import("graph.zig");
-    _ = @import("linker.zig");
+    _ = core.modules.linker;
     _ = @import("loader.zig");
     _ = @import("resolver.zig");
-    _ = @import("../frontend/ast.zig");
-    _ = @import("../frontend/tokens.zig");
+    _ = core.ast;
+    _ = core.tokens;
 }
