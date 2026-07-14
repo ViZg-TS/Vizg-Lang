@@ -129,6 +129,12 @@ pub const TypeIssue = enum {
     satisfies,
 };
 
+/// Canonical type resolved once for one syntax type node.
+pub const ResolvedTypeNode = struct {
+    node_id: ast_mod.TypeNodeId,
+    type_id: types.TypeId,
+};
+
 /// Flow-sensitive type of one resolved reference in one CFG block.
 pub const FlowTypeInfo = struct {
     function_node: ast_mod.NodeId,
@@ -149,14 +155,13 @@ pub const TypeResolutionState = enum {
 
 // ---------------------------------------------------------------------------
 // TypeInfo — per-file snapshot of declared/inferred types plus any captured
-// diagnostics. Allocated as a heap object via the `Builder`; callers that need
-// to keep the table around for the lifetime of an analysis pass can hand out
-// slices, or use `TypeInfoArena` when they prefer arena-backed storage.
+// diagnostics. SemanticResult owns these slices for one analysis context.
 // ---------------------------------------------------------------------------
 
 pub const TypeInfo = struct {
     symbols: []const SymbolTypeInfo,
     nodes: []const NodeTypeInfo,
+    resolved_type_nodes: []const ResolvedTypeNode = &.{},
     flow_types: []const FlowTypeInfo = &.{},
     diagnostics: []const diagnostics_mod.Diagnostic,
 
@@ -180,6 +185,13 @@ pub const TypeInfo = struct {
     pub fn lookupNodeInfo(self: @This(), node_id: ast_mod.NodeId) ?NodeTypeInfo {
         for (self.nodes) |entry| {
             if (entry.node_id == node_id) return entry;
+        }
+        return null;
+    }
+
+    pub fn lookupResolvedTypeNode(self: @This(), node_id: ast_mod.TypeNodeId) ?types.TypeId {
+        for (self.resolved_type_nodes) |entry| {
+            if (entry.node_id == node_id) return entry.type_id;
         }
         return null;
     }
@@ -299,86 +311,6 @@ pub const TypeInfo = struct {
 
         const found = info.lookupSymbol(1) orelse unreachable;
         try std.testing.expectEqual(@as(types.TypeId, 10), @as(types.TypeId, std.math.cast(types.TypeId, found.declared_type.?) orelse unreachable));
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Builder — append-only builder for TypeInfo that uses the supplied allocator.
-// Keeps the API friendly while respecting arena-compatible usage: pass an Arena
-// to keep allocations short-lived or a persistent allocator otherwise.
-// ---------------------------------------------------------------------------
-
-pub const Builder = struct {
-    allocator: std.mem.Allocator,
-    symbols: std.ArrayList(SymbolTypeInfo) = .empty,
-    nodes: std.ArrayList(NodeTypeInfo) = .empty,
-    diagnostics: std.ArrayList(diagnostics_mod.Diagnostic) = .empty,
-
-    pub fn init(allocator: std.mem.Allocator) Builder {
-        return .{ .allocator = allocator };
-    }
-
-    pub fn addSymbol(self: *Builder, entry: SymbolTypeInfo) !void {
-        try self.symbols.append(self.allocator, entry);
-    }
-
-    pub fn addNode(self: *Builder, node: NodeTypeInfo) void {
-        _ = self.nodes.append(self.allocator, node); // size_t fits in NodeId by construction; error ignored intentionally for ergonomics.
-    }
-
-    pub fn addDiagnostic(self: *Builder, d: diagnostics_mod.Diagnostic) void {
-        _ = self.diagnostics.append(self.allocator, d);
-    }
-
-    /// Consumes the builder and returns a TypeInfo whose slices point into the
-    /// ArrayLists kept alive by `self`. Callers who need to free or detach
-    /// storage should drain it first or use their own allocator pattern. The
-    /// lifetime of the returned slices matches the Builder's lifetime; this is
-    /// the convention used throughout the frontend.
-    pub fn build(self: *Builder) TypeInfo {
-        return TypeInfo{
-            .symbols = self.symbols.items,
-            .nodes = self.nodes.items,
-            .diagnostics = self.diagnostics.items,
-        };
-    }
-
-    test "build returns populated table" {
-        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-
-        var builder = (Builder{ .allocator = allocator }).init(allocator);
-        errdefer _ = builder.destroy();
-
-        try builder.addSymbol(SymbolTypeInfo{ .symbol_id = 1, .declared_type = 5 });
-        builder.addNode(NodeTypeInfo{ .node_id = 3, .type_id = 7 });
-
-        const info = builder.build();
-
-        const sym = info.lookupSymbol(1) orelse unreachable;
-        try std.testing.expectEqual(@as(types.TypeId, 5), @as(types.TypeId, sym.declared_type.?));
-
-        _ = info.lookupNode(3); // non-null — just verifying no panic.
-    }
-
-    test "build returns empty table when nothing added" {
-        const allocator = std.testing.allocator;
-        var builder = (Builder{ .allocator = allocator }).init(allocator);
-
-        const info = builder.build();
-
-        try std.testing.expect(info.lookupSymbol(1) == null);
-        try std.testing.expect(info.lookupNode(1) == null);
-    }
-
-    fn destroy(self: *Builder) void {
-        // Deinitializes the ArrayLists owned by the caller's allocator. For
-        // tests that pass an Arena this clears all allocations at once, which
-        // is what callers using `build()` expect.
-        self.symbols.deinit();
-        self.nodes.deinit();
-        self.diagnostics.deinit();
     }
 };
 

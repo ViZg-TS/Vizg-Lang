@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("../frontend/ast.zig");
 const binder = @import("../frontend/binder.zig");
 const frontend = @import("../frontend/frontend.zig");
+const function_like = @import("../frontend/function_like.zig");
 const resolver = @import("../frontend/resolver.zig");
 const diagnostics = @import("../diagnostics/root.zig");
 const types = @import("../types/root.zig");
@@ -18,6 +19,7 @@ pub const narrowing = @import("narrowing.zig");
 
 pub const SymbolTypeInfo = type_info.SymbolTypeInfo;
 pub const NodeTypeInfo = type_info.NodeTypeInfo;
+pub const ResolvedTypeNode = type_info.ResolvedTypeNode;
 pub const FlowTypeInfo = type_info.FlowTypeInfo;
 pub const TypeInfo = type_info.TypeInfo;
 pub const TypeResolutionState = type_info.TypeResolutionState;
@@ -150,6 +152,10 @@ pub const SemanticResult = struct {
         return self.type_info.lookupNodeInfo(id);
     }
 
+    pub fn lookupResolvedTypeNode(self: *const SemanticResult, id: ast.TypeNodeId) ?types.TypeId {
+        return self.type_info.lookupResolvedTypeNode(id);
+    }
+
     pub fn lookupType(self: *const SemanticResult, id: types.TypeId) ?types.Type {
         return self.type_store.lookup(id);
     }
@@ -212,7 +218,7 @@ pub fn analyzeSource(
     };
     const fe = try frontend.analyze(allocator, owned_source, options);
     var type_store = types.TypeStore.init(allocator);
-    const info = try buildTypeInfo(allocator, @as(modules_mod.ModuleId, 0), fe, &type_store, true, &.{});
+    const info = try buildTypeInfo(allocator, @as(modules_mod.ModuleId, 0), fe, &type_store, true, &.{}, true);
 
     const syntax_diags = try selectDiagnostics(allocator, fe.diagnostics, true, owned_source.path);
     const frontend_semantic_diags = try selectDiagnostics(allocator, fe.diagnostics, false, owned_source.path);
@@ -277,7 +283,7 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
         try project_modules.append(allocator, .{
             .id = module.id,
             .path = module.display_path,
-            .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false, &.{}),
+            .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false, &.{}, false),
         });
     }
 
@@ -288,10 +294,31 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
     var import_list: std.ArrayList(SemanticImport) = .empty;
     try collectSemanticImports(allocator, &graph, &type_store, export_list.items, &import_list);
 
-    // The first pass establishes exported identities. Recollect declarations
-    // once imports are linked so annotations observe exact cross-module TypeIds.
-    // Missing/cyclic targets remain stable `unknown` placeholders.
+    // The first pass establishes exported identities. Once imports are linked,
+    // complete nominal tables exactly once in dependency-first graph order so
+    // inherited/imported shapes exist before any consumer lowers aliases.
     _ = refreshImportTargets(&graph, export_list.items, import_list.items);
+    _ = try refreshNamespaceImportTargets(allocator, &graph, &type_store, export_list.items, import_list.items);
+    var completion_index = project_modules.items.len;
+    while (completion_index > 0) {
+        completion_index -= 1;
+        const module = &project_modules.items[completion_index];
+        const graph_module = graphModule(&graph, module.id) orelse continue;
+        const imported_types = try importedTypeBindings(allocator, module.id, import_list.items, &type_store);
+        _ = try type_collector.collectDeclaredTypesInModuleWithImports(
+            allocator,
+            graph_module.result.source,
+            graph_module.result.ast,
+            graph_module.result.bind,
+            module.id,
+            &type_store,
+            imported_types,
+            true,
+        );
+    }
+
+    // Rebuild effective module types against the now-immutable nominal tables.
+    // Missing/cyclic targets remain stable `unknown` placeholders.
     for (project_modules.items) |*module| {
         const graph_module = graphModule(&graph, module.id) orelse continue;
         const imported_types = try importedTypeBindings(allocator, module.id, import_list.items, &type_store);
@@ -302,6 +329,7 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
             &type_store,
             false,
             imported_types,
+            false,
         );
     }
 
@@ -313,10 +341,14 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
         for (project_modules.items) |*module| {
             const graph_module = graphModule(&graph, module.id) orelse continue;
             changed = (try applyImportedTypes(module, import_list.items, &type_store)) or changed;
-            changed = (try refreshProjectTypes(allocator, graph_module.result, &module.type_info, &type_store)) or changed;
+            changed = (try refreshProjectTypes(allocator, module.id, graph_module.result, &module.type_info, &type_store)) or changed;
         }
         changed = refreshDirectExportTypes(project_modules.items, export_list.items) or changed;
         try resolveReExports(allocator, &graph, project_modules.items, &type_store, &export_list);
+        // Namespace objects cache export TypeIds. Rebuild them after direct and
+        // re-export propagation so the next round refreshes imported symbols,
+        // references, expressions, and dependent exports from the final shape.
+        changed = (try refreshNamespaceImportTargets(allocator, &graph, &type_store, export_list.items, import_list.items)) or changed;
         if (!changed) break;
     }
 
@@ -552,6 +584,41 @@ fn refreshImportTargets(graph: *const modules_mod.ModuleGraph, exports: []const 
     return changed;
 }
 
+fn refreshNamespaceImportTargets(
+    allocator: std.mem.Allocator,
+    graph: *const modules_mod.ModuleGraph,
+    type_store: *types.TypeStore,
+    exports: []const SemanticExport,
+    imports: []SemanticImport,
+) !bool {
+    var changed = false;
+    for (imports) |*item| {
+        if (item.state != .namespace) continue;
+        const link = blk: for (graph.linked_imports) |candidate| {
+            if (candidate.from_module == item.module_id and candidate.import_symbol == item.import_symbol) break :blk candidate;
+        } else continue;
+        const target_module = link.target_module orelse continue;
+        var properties: std.ArrayList(types.ObjectProperty) = .empty;
+        for (exports) |exported| {
+            if (exported.module_id != target_module or exported.type_only) continue;
+            try properties.append(allocator, .{ .name = exported.name, .type_id = exported.identity.type_id });
+        }
+        const type_id = if (properties.items.len == 0)
+            type_store.builtins.unknown
+        else
+            try type_store.intern(.{ .object = properties.items });
+        if (item.target == null or item.target.?.type_id != type_id) changed = true;
+        item.target = .{
+            .symbol_id = null,
+            .declaration = types.SemanticDeclId.init(target_module, ast.invalid_node),
+            .type_id = type_id,
+            .namespace = if (item.type_only) .type else .value,
+        };
+        item.runtime_binding = !item.type_only;
+    }
+    return changed;
+}
+
 fn applyImportedTypes(module: *ProjectSemanticModule, imports: []const SemanticImport, type_store: *types.TypeStore) !bool {
     _ = type_store;
     var changed = false;
@@ -571,13 +638,13 @@ fn applyImportedTypes(module: *ProjectSemanticModule, imports: []const SemanticI
     return changed;
 }
 
-fn refreshProjectTypes(allocator: std.mem.Allocator, result: frontend.FrontendResult, info: *TypeInfo, type_store: *types.TypeStore) !bool {
+fn refreshProjectTypes(allocator: std.mem.Allocator, module_id: ModuleId, result: frontend.FrontendResult, info: *TypeInfo, type_store: *types.TypeStore) !bool {
     var nodes: std.ArrayList(NodeTypeInfo) = .{ .items = @constCast(info.nodes), .capacity = info.nodes.len };
     const symbols = @constCast(info.symbols);
     try refreshReferenceTypes(allocator, result, symbols, &nodes, &type_store.builtins);
-    _ = try type_inference.inferPrimitiveExpressionsWithCfgs(allocator, result.ast, &nodes, type_store, result.cfgs);
+    _ = try type_inference.inferPrimitiveExpressionsWithCfgs(allocator, result.ast, &nodes, type_store, info.resolved_type_nodes, result.cfgs);
     var changed = refreshVariableTypes(result, symbols, nodes.items, &type_store.builtins);
-    changed = (try refreshFunctionReturns(allocator, result, symbols, nodes.items, type_store)) or changed;
+    changed = (try refreshFunctionReturns(allocator, module_id, result, symbols, nodes.items, info.resolved_type_nodes, type_store)) or changed;
     info.nodes = try nodes.toOwnedSlice(allocator);
     return changed;
 }
@@ -637,11 +704,12 @@ fn buildTypeInfo(
     type_store: *types.TypeStore,
     run_checker: bool,
     imported_types: []const type_collector.ImportedTypeBinding,
+    complete_nominals: bool,
 ) !TypeInfo {
     const builtins = &type_store.builtins;
     var symbol_types: std.ArrayList(SymbolTypeInfo) = .empty;
     var node_types: std.ArrayList(NodeTypeInfo) = .empty;
-    const collected = try type_collector.collectDeclaredTypesInModuleWithImports(
+    var collected = try type_collector.collectDeclaredTypesInModuleWithImports(
         allocator,
         result.source,
         result.ast,
@@ -649,10 +717,12 @@ fn buildTypeInfo(
         module_id,
         type_store,
         imported_types,
+        complete_nominals,
     );
 
     const inferred_nodes = try type_inference.inferLiteralNodeTypes(allocator, result.ast, builtins);
     try node_types.appendSlice(allocator, inferred_nodes);
+    try seedClassContextExpressionTypes(allocator, module_id, result, type_store, &node_types);
 
     // Build declarations before references. Forward references therefore observe
     // the same stable SymbolId and TypeId as references after a declaration.
@@ -693,11 +763,17 @@ fn buildTypeInfo(
                     symbol.declaration,
                 ) orelse builtins.unknown;
             },
-            .type_alias => if (entry.declared_type == null) {
+            .type_alias, .type_parameter => if (entry.declared_type == null) {
                 entry.inferred_type = builtins.unknown;
             },
             .import => entry.inferred_type = builtins.unknown,
-            else => continue,
+            .enum_member => entry.inferred_type = owningEnumType(
+                result,
+                symbol_types.items,
+                symbol.declaration,
+            ) orelse builtins.unknown,
+            .field => entry.inferred_type = entry.declared_type orelse builtins.unknown,
+            .method => entry.inferred_type = functionType(collected.function_signatures, symbol.id) orelse builtins.unknown,
         }
         if (symbol.kind == .variable) {
             if (entry.declared_type) |declared| switch (result.ast.node(symbol.declaration).data) {
@@ -721,23 +797,79 @@ fn buildTypeInfo(
             result.ast,
             &node_types,
             type_store,
+            collected.resolved_type_nodes,
             result.cfgs,
         );
         const variables_changed = refreshVariableTypes(result, symbol_types.items, node_types.items, builtins);
         const functions_changed = try refreshFunctionReturns(
             allocator,
+            module_id,
             result,
             symbol_types.items,
             node_types.items,
+            collected.resolved_type_nodes,
             type_store,
         );
         if (!variables_changed and !functions_changed) break;
     }
 
+    // Type queries consume the resolved value table, which intentionally does
+    // not exist during declaration collection. Re-collect once with effective
+    // SymbolTypeInfo, then let dependent aliases/contexts flow to a fixed point.
+    collected = try type_collector.collectDeclaredTypesInModuleWithImportsAndValues(
+        allocator,
+        result.source,
+        result.ast,
+        result.bind,
+        module_id,
+        type_store,
+        imported_types,
+        symbol_types.items,
+        false,
+    );
+    for (symbol_types.items) |*entry| {
+        if (declaredType(collected.symbol_declared_types, entry.symbol_id)) |declared| entry.declared_type = declared;
+    }
+    for (result.bind.symbols) |symbol| {
+        if (symbol.kind != .variable) continue;
+        const declared = declaredType(collected.symbol_declared_types, symbol.id) orelse continue;
+        switch (result.ast.node(symbol.declaration).data) {
+            .VariableDeclarator => |declarator| if (declarator.init) |initializer|
+                try putNodeContextualType(allocator, &node_types, initializer, declared, builtins.unknown),
+            else => {},
+        }
+    }
+    round = 0;
+    while (round < symbol_types.items.len + 2) : (round += 1) {
+        try refreshReferenceTypes(allocator, result, symbol_types.items, &node_types, builtins);
+        _ = try type_inference.inferPrimitiveExpressionsWithCfgs(
+            allocator,
+            result.ast,
+            &node_types,
+            type_store,
+            collected.resolved_type_nodes,
+            result.cfgs,
+        );
+        const variables_changed = refreshVariableTypes(result, symbol_types.items, node_types.items, builtins);
+        const functions_changed = try refreshFunctionReturns(
+            allocator,
+            module_id,
+            result,
+            symbol_types.items,
+            node_types.items,
+            collected.resolved_type_nodes,
+            type_store,
+        );
+        if (!variables_changed and !functions_changed) break;
+    }
+
+    const coverage_diags = try completeExpressionCoverage(allocator, result.ast, &node_types, builtins);
+
     const narrowed = try narrowing.analyze(allocator, result, type_store, symbol_types.items, &node_types);
     const checker_info: TypeInfo = .{
         .symbols = symbol_types.items,
         .nodes = node_types.items,
+        .resolved_type_nodes = collected.resolved_type_nodes,
         .flow_types = narrowed.flow_types,
         .diagnostics = &.{},
     };
@@ -747,13 +879,14 @@ fn buildTypeInfo(
         &.{};
     const semantic_diags = try combineDiagnostics(
         allocator,
-        &.{ collected.diagnostics, checker_diags },
+        &.{ collected.diagnostics, coverage_diags, checker_diags },
         result.source.path,
     );
 
     return .{
         .symbols = try symbol_types.toOwnedSlice(allocator),
         .nodes = try node_types.toOwnedSlice(allocator),
+        .resolved_type_nodes = collected.resolved_type_nodes,
         .flow_types = narrowed.flow_types,
         .diagnostics = semantic_diags,
     };
@@ -771,6 +904,175 @@ fn functionType(entries: []const type_collector.FunctionSignatureEntry, symbol_i
 
 fn symbolType(entries: []const SymbolTypeInfo, symbol_id: binder.SymbolId) ?SymbolTypeInfo {
     for (entries) |entry| if (entry.symbol_id == symbol_id) return entry;
+    return null;
+}
+
+fn seedClassContextExpressionTypes(
+    allocator: std.mem.Allocator,
+    module_id: ModuleId,
+    result: frontend.FrontendResult,
+    type_store: *types.TypeStore,
+    entries: *std.ArrayList(NodeTypeInfo),
+) !void {
+    for (result.ast.nodes, 0..) |node, raw_id| {
+        const node_id: ast.NodeId = @intCast(raw_id);
+        const type_id: ?types.TypeId = switch (node.data) {
+            .ClassExpression => if (type_store.lookupClassSemanticType(.init(module_id, node_id))) |class|
+                class.constructor_type
+            else
+                null,
+            .ThisExpression => if (enclosingClassNode(result, node_id)) |class_node|
+                if (type_store.lookupClassSemanticType(.init(module_id, class_node))) |class| class.instance_type else null
+            else
+                null,
+            .SuperExpression => if (enclosingClassNode(result, node_id)) |class_node|
+                if (type_store.lookupClassSemanticType(.init(module_id, class_node))) |class| class.inheritance.extends else null
+            else
+                null,
+            .MetaProperty => |meta| if (meta.kind == .new_target)
+                if (enclosingClassNode(result, node_id)) |class_node|
+                    if (type_store.lookupClassSemanticType(.init(module_id, class_node))) |class| class.constructor_type else null
+                else
+                    null
+            else
+                null,
+            else => null,
+        };
+        if (type_id) |value| try putNodeType(allocator, entries, .{ .node_id = node_id, .type_id = value });
+    }
+}
+
+fn enclosingClassNode(result: frontend.FrontendResult, node_id: ast.NodeId) ?ast.NodeId {
+    var scope_id = scopeForBoundNode(result.bind, node_id);
+    while (true) {
+        const scope = boundScope(result.bind, scope_id) orelse return null;
+        if (scope.kind == .class) {
+            for (result.ast.nodes, 0..) |node, raw_id| switch (node.data) {
+                .ClassDeclaration => |class| if (class.members.len != 0 and scopeForBoundNode(result.bind, class.members[0]) == scope_id)
+                    return @intCast(raw_id),
+                .ClassExpression => |class| if (class.members.len != 0 and scopeForBoundNode(result.bind, class.members[0]) == scope_id)
+                    return @intCast(raw_id),
+                else => {},
+            };
+            return null;
+        }
+        scope_id = scope.parent orelse return null;
+    }
+}
+
+fn scopeForBoundNode(bind: binder.BindResult, node_id: ast.NodeId) binder.ScopeId {
+    for (bind.node_scopes) |entry| if (entry.node == node_id) return entry.scope;
+    for (bind.symbols) |symbol| if (symbol.declaration == node_id) return symbol.scope;
+    return 0;
+}
+
+fn boundScope(bind: binder.BindResult, scope_id: binder.ScopeId) ?binder.Scope {
+    for (bind.scopes) |scope| if (scope.id == scope_id) return scope;
+    return null;
+}
+
+fn completeExpressionCoverage(
+    allocator: std.mem.Allocator,
+    tree: ast.Ast,
+    entries: *std.ArrayList(NodeTypeInfo),
+    builtins: *const types.Builtins,
+) ![]const diagnostics.Diagnostic {
+    var recovery: std.ArrayList(diagnostics.Diagnostic) = .empty;
+    for (tree.nodes, 0..) |node, raw_id| {
+        if (!isExecutableExpression(node.data)) continue;
+        const node_id: ast.NodeId = @intCast(raw_id);
+        if (nodeType(entries.items, node_id) != null) continue;
+        try putNodeType(allocator, entries, .{ .node_id = node_id, .type_id = builtins.unknown, .state = .resolved });
+        try recovery.append(allocator, .{
+            .severity = .warning,
+            .code = .unsupported_syntax,
+            .phase = .type_checker,
+            .message = "expression semantic typing deferred; recovered as unknown",
+            .span = node.span,
+            .label = "explicit semantic recovery",
+        });
+    }
+    return recovery.toOwnedSlice(allocator);
+}
+
+fn isExecutableExpression(data: ast.NodeData) bool {
+    return switch (data) {
+        .Identifier,
+        .Literal,
+        .RegExpLiteral,
+        .TemplateExpression,
+        .TaggedTemplateExpression,
+        .ImportExpression,
+        .MetaProperty,
+        .FunctionExpression,
+        .YieldExpression,
+        .ArrowFunctionExpression,
+        .ClassExpression,
+        .SpreadElement,
+        .ThisExpression,
+        .SuperExpression,
+        .NewExpression,
+        .CallExpression,
+        .MemberExpression,
+        .ElementAccessExpression,
+        .AsExpression,
+        .SatisfiesExpression,
+        .NonNullExpression,
+        .UnaryExpression,
+        .BinaryExpression,
+        .SequenceExpression,
+        .ConditionalExpression,
+        .UpdateExpression,
+        .AssignmentExpression,
+        .ObjectExpression,
+        .ArrayExpression,
+        => true,
+        .Program,
+        .BlockStatement,
+        .ExpressionStatement,
+        .TypeAliasDeclaration,
+        .InterfaceDeclaration,
+        .EnumDeclaration,
+        .EnumMember,
+        .VariableDeclaration,
+        .VariableDeclarator,
+        .FunctionDeclaration,
+        .ClassDeclaration,
+        .ClassField,
+        .ClassMethod,
+        .Parameter,
+        .ReturnStatement,
+        .ThrowStatement,
+        .DebuggerStatement,
+        .TryStatement,
+        .CatchClause,
+        .FinallyClause,
+        .BreakStatement,
+        .ContinueStatement,
+        .LabeledStatement,
+        .IfStatement,
+        .WhileStatement,
+        .DoWhileStatement,
+        .ForStatement,
+        .SwitchStatement,
+        .SwitchCase,
+        .ImportDeclaration,
+        .ExportDeclaration,
+        => false,
+    };
+}
+
+fn owningEnumType(
+    result: frontend.FrontendResult,
+    entries: []const SymbolTypeInfo,
+    member_id: ast.NodeId,
+) ?types.TypeId {
+    for (result.ast.nodes, 0..) |node, raw_id| switch (node.data) {
+        .EnumDeclaration => |declaration| for (declaration.members) |candidate| {
+            if (candidate == member_id) return priorDeclarationType(result.bind.symbols, entries, @intCast(raw_id));
+        },
+        else => {},
+    };
     return null;
 }
 
@@ -852,94 +1154,79 @@ fn refreshVariableTypes(
 
 fn refreshFunctionReturns(
     allocator: std.mem.Allocator,
+    module_id: ModuleId,
     result: frontend.FrontendResult,
     symbol_types: []SymbolTypeInfo,
     node_types: []const NodeTypeInfo,
+    resolved_type_nodes: []const ResolvedTypeNode,
     type_store: *types.TypeStore,
 ) !bool {
     var changed = false;
     for (result.bind.symbols) |symbol| {
-        if (symbol.kind != .function) continue;
-        const declaration = switch (result.ast.node(symbol.declaration).data) {
-            .FunctionDeclaration => |function| function,
-            else => continue,
-        };
-        const return_type = try type_inference.inferFunctionReturnWithCfgs(
+        if (symbol.kind != .function and symbol.kind != .method) continue;
+        const function = function_like.describe(result.ast, symbol.declaration) orelse continue;
+        const return_type = try type_inference.inferFunctionLikeReturnWithCfgs(
             allocator,
-            symbol.declaration,
-            declaration.body,
-            false,
-            declaration.flags,
+            function,
             result.ast,
             node_types,
             type_store,
             result.cfgs,
         );
 
-        // Build parameters with resolved types.
-        const new_sig_params = try collectFunctionParameters(
+        const new_sig_params = try type_inference.collectFunctionLikeParameters(
             allocator,
+            function,
             result.ast,
-            declaration,
             type_store,
+            resolved_type_nodes,
         );
         const new_signature_id = try type_store.addFunctionDetailed(
             new_sig_params,
             return_type,
-            @intCast(declaration.type_parameters.len),
+            @intCast(function.type_parameters.len),
             @import("../types/model.zig").FunctionFlags{
-                .is_async = declaration.flags.is_async,
-                .is_generator = declaration.flags.is_generator,
+                .is_async = function.flags.is_async,
+                .is_generator = function.flags.is_generator,
             },
         );
-
-        // addFunctionDetailed clones parameters via cloneParameters; free our copy.
         allocator.free(new_sig_params);
 
         // Body inference is always separate from declaration evidence. For an
         // annotated function effective() continues to prefer declared_type.
         const sym_info_ptr = symbolTypePtr(symbol_types, symbol.id) orelse continue;
-        if (sym_info_ptr.inferred_type != null and
-            sym_info_ptr.inferred_type.? == new_signature_id)
-        {
-            continue;
+        if (symbol.kind == .method) {
+            const owner = enclosingClassNode(result, symbol.declaration) orelse continue;
+            const effective_signature = sym_info_ptr.declared_type orelse new_signature_id;
+            const member_type = switch (function.kind) {
+                .getter => if (type_store.lookupFunction(effective_signature)) |signature|
+                    signature.return_type
+                else
+                    type_store.builtins.unknown,
+                .setter => if (type_store.lookupFunction(effective_signature)) |signature|
+                    if (signature.parameters.len != 0) signature.parameters[0].type_id else type_store.builtins.unknown
+                else
+                    type_store.builtins.unknown,
+                else => effective_signature,
+            };
+            try type_store.updateClassCallableType(
+                .init(module_id, owner),
+                function.name orelse "",
+                function.receiver == .class_static,
+                function.kind == .constructor,
+                member_type,
+            );
         }
+        if (sym_info_ptr.inferred_type != null and sym_info_ptr.inferred_type.? == new_signature_id) continue;
         sym_info_ptr.inferred_type = new_signature_id;
         changed = true;
     }
     return changed;
 }
 
-fn collectFunctionParameters(
-    allocator_: std.mem.Allocator,
-    tree: ast.Ast,
-    declaration: ast.FunctionDeclaration,
-    type_store: *types.TypeStore,
-) ![]const types.ParameterType {
-    var params = try allocator_.alloc(types.ParameterType, declaration.params.len);
-    for (declaration.params, 0..) |param_id, index| {
-        const node = tree.node(param_id);
-        switch (node.data) {
-            .Parameter => |param| {
-                const type_id: types.TypeId = if (param.type_annotation) |ann|
-                    try type_inference.resolveTypeAnnotation(tree, ann, type_store)
-                else
-                    type_store.builtins.unknown;
-                params[index] = .{
-                    .name = param.name,
-                    .type_id = type_id,
-                    .optional = param.optional,
-                    .has_default = param.initializer != null,
-                    .rest = param.rest,
-                };
-            },
-            else => {
-                // Unknown parameter form; pad with unknown so signature length matches.
-                params[index] = .{ .name = "", .type_id = type_store.builtins.unknown };
-            },
-        }
-    }
-    return params;
+fn lookupResolvedTypeNode(entries: []const ResolvedTypeNode, node_id: ast.TypeNodeId) ?types.TypeId {
+    for (entries) |entry| if (entry.node_id == node_id) return entry.type_id;
+    return null;
 }
 
 fn symbolTypePtr(entries: []SymbolTypeInfo, symbol_id: binder.SymbolId) ?*SymbolTypeInfo {
@@ -1375,6 +1662,91 @@ test "Goal 117 satisfies preserves source type and as uses asserted type" {
     try std.testing.expectEqual(result.type_store.builtins.string, result.lookupNodeType(testVariableInitializer(&result, "asserted").?).?);
 }
 
+test "Goal 149 canonical annotation table preserves local user types everywhere" {
+    var result = try analyze(std.testing.allocator,
+        \\class User {
+        \\  constructor(value: User) {}
+        \\  clone(value: User): User { return value; }
+        \\}
+        \\let input: User;
+        \\const asserted = input as User;
+        \\const checked = input satisfies User;
+        \\const arrow = (value: User): User => value;
+        \\const expression = function(value: User): User { return value; };
+    );
+    defer result.deinit();
+
+    var user_type: ?types.TypeId = null;
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind == .class and symbol.namespace == .type and std.mem.eql(u8, symbol.name, "User"))
+            user_type = result.lookupSymbolType(symbol.id).?.effective().?;
+    }
+    const expected = user_type orelse return error.TestExpectedEqual;
+    const input = goal137ValueSymbol(&result, "input") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(expected, result.lookupSymbolType(input).?.declared_type.?);
+    try std.testing.expectEqual(
+        expected,
+        result.lookupNodeType(testVariableInitializer(&result, "asserted").?).?,
+    );
+
+    const checked = testVariableInitializer(&result, "checked").?;
+    const satisfies = switch (result.lookupNode(checked).?.data) {
+        .SatisfiesExpression => |value| value,
+        else => return error.TestExpectedEqual,
+    };
+    try std.testing.expectEqual(expected, result.lookupResolvedTypeNode(satisfies.type_annotation.root).?);
+
+    try std.testing.expect(result.type_info.resolved_type_nodes.len >= 10);
+    for (result.type_info.resolved_type_nodes) |entry|
+        try std.testing.expectEqual(expected, entry.type_id);
+
+    for ([_][]const u8{ "arrow", "expression" }) |name| {
+        const symbol_id = goal137ValueSymbol(&result, name) orelse return error.TestExpectedEqual;
+        const signature_id = result.lookupSymbolType(symbol_id).?.effective().?;
+        const signature = result.lookupFunctionType(signature_id) orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(@as(usize, 1), signature.parameters.len);
+        try std.testing.expectEqual(expected, signature.parameters[0].type_id);
+        try std.testing.expectEqual(expected, signature.return_type);
+    }
+}
+
+test "Goal 149 canonical resolver preserves generic scope identity" {
+    var result = try analyze(
+        std.testing.allocator,
+        "function identity<T>(value: T): T { return value; }",
+    );
+    defer result.deinit();
+
+    var parameter_type: ?types.TypeId = null;
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind == .type_parameter and std.mem.eql(u8, symbol.name, "T"))
+            parameter_type = result.lookupSymbolType(symbol.id).?.effective().?;
+    }
+    const expected = parameter_type orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), result.type_info.resolved_type_nodes.len);
+    for (result.type_info.resolved_type_nodes) |entry|
+        try std.testing.expectEqual(expected, entry.type_id);
+}
+
+test "Goal 149 unresolved annotations diagnose once and recover explicitly" {
+    var result = try analyze(std.testing.allocator,
+        \\let first: Missing;
+        \\let second: Missing;
+        \\const asserted = 1 as Missing;
+    );
+    defer result.deinit();
+
+    var diagnostic_count: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic|
+        if (diagnostic.code == .unknown_type_name) {
+            diagnostic_count += 1;
+        };
+    try std.testing.expectEqual(@as(usize, 3), diagnostic_count);
+    try std.testing.expectEqual(@as(usize, 3), result.type_info.resolved_type_nodes.len);
+    for (result.type_info.resolved_type_nodes) |entry|
+        try std.testing.expectEqual(result.type_store.builtins.unknown, entry.type_id);
+}
+
 test "Goal 117 invalid operands recover with one targeted diagnostic" {
     var result = try analyze(std.testing.allocator, "const bad = \"x\" - 1;");
     defer result.deinit();
@@ -1703,6 +2075,59 @@ test "Goal 143 class and interface members participate in access and calls" {
     try std.testing.expectEqual(user_type, result.lookupNodeTypeInfo(greeting.callee).?.receiver_type.?);
 }
 
+test "Goal 152 applied interfaces and classes substitute member and method types" {
+    var result = try analyze(std.testing.allocator,
+        \\interface Box<T> { value: T; map(input: T): T; }
+        \\class Cell<T> { value: T; read(): T { return this.value; } }
+        \\let box: Box<number>;
+        \\let cell: Cell<string>;
+        \\const boxed = box.value;
+        \\const mapped = box.map(1);
+        \\const stored = cell.value;
+        \\const read = cell.read();
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(testVariableInitializer(&result, "boxed").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(testVariableInitializer(&result, "mapped").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.string, result.lookupNodeType(testVariableInitializer(&result, "stored").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.string, result.lookupNodeType(testVariableInitializer(&result, "read").?).?);
+}
+
+test "Goal 152 applied interface compatibility uses substituted member types" {
+    var result = try analyze(std.testing.allocator,
+        \\interface Box<T> { value: T; }
+        \\let valid: Box<number> = { value: 1 };
+        \\let invalid: Box<number> = { value: "wrong" };
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.semantic_diagnostics.len);
+    try std.testing.expectEqual(.type_mismatch, result.semantic_diagnostics[0].code);
+}
+
+test "Goal 153 typeof uses resolved declared and inferred value symbol types" {
+    var result = try analyze(std.testing.allocator,
+        \\const declared: string = "value";
+        \\const inferred = 1;
+        \\type DeclaredQuery = typeof declared;
+        \\type InferredQuery = typeof inferred;
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+    var declared_query: ?binder.SymbolId = null;
+    var inferred_query: ?binder.SymbolId = null;
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind != .type_alias) continue;
+        if (std.mem.eql(u8, symbol.name, "DeclaredQuery")) declared_query = symbol.id;
+        if (std.mem.eql(u8, symbol.name, "InferredQuery")) inferred_query = symbol.id;
+    }
+    try std.testing.expectEqual(result.type_store.builtins.string, result.lookupSymbolType(declared_query.?).?.declared_type.?);
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupSymbolType(inferred_query.?).?.declared_type.?);
+}
+
 test "Goal 143 rejects unknown members and invalid constructors through Checker v2" {
     var result = try analyze(std.testing.allocator,
         \\class User {
@@ -1759,6 +2184,35 @@ test "Goal 144 return inference includes reachable CFG fallthrough" {
         if (diagnostic.label != null and std.mem.eql(u8, diagnostic.label.?, "incompatible fallthrough")) fallthrough_errors += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), fallthrough_errors);
+}
+
+test "Goal 156 return inference excludes unreachable and overridden returns" {
+    var result = try analyze(std.testing.allocator,
+        \\function unreachable() { return 1; return "dead"; }
+        \\function overridden() { try { return 1; } finally { return "final"; } }
+        \\function thrown() { try { return 1; } finally { throw "stop"; } }
+        \\const first = unreachable();
+        \\const second = overridden();
+        \\const third = thrown();
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(testVariableInitializer(&result, "first").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.string, result.lookupNodeType(testVariableInitializer(&result, "second").?).?);
+    try std.testing.expectEqual(result.type_store.builtins.void, result.lookupNodeType(testVariableInitializer(&result, "third").?).?);
+}
+
+test "Goal 156 detailed aggregate diagnostics use compatibility" {
+    var result = try analyze(std.testing.allocator,
+        \\const value: { good: number; bad: number } = { good: 1, bad: "wrong" };
+    );
+    defer result.deinit();
+
+    var property_mismatches: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.label != null and std.mem.eql(u8, diagnostic.label.?, "property type mismatch")) property_mismatches += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), property_mismatches);
 }
 
 test "Goal 144 optional method and callable union calls retain validation" {
@@ -2024,6 +2478,82 @@ test "Goal 147 checker accepts structural interfaces and reports inherited prope
     try std.testing.expect(result.lookupType(result.lookupNodeType(testVariableInitializer(&result, "projected").?).?).?.kind == .interface);
 }
 
+test "Goal 154 expression branches join assignment effects at following references" {
+    const source =
+        \\function same(value: string | number, flag: boolean) {
+        \\  if (typeof value === "string") {
+        \\    flag ? (value = 1) : (value = 2);
+        \\    const afterSame = value;
+        \\  }
+        \\}
+        \\function different(value: string | number, flag: boolean) {
+        \\  if (typeof value === "string") {
+        \\    flag ? (value = 1) : (value = "next");
+        \\    const afterDifferent = value;
+        \\  }
+        \\}
+        \\function partial(value: string | number, flag: boolean) {
+        \\  if (typeof value === "string") {
+        \\    flag && (value = 1);
+        \\    const afterPartial = value;
+        \\  }
+        \\}
+        \\function alternative(value: string | number, flag: boolean) {
+        \\  if (typeof value === "string") {
+        \\    flag || (value = 1);
+        \\    const afterAlternative = value;
+        \\  }
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+
+    const after_same = (std.mem.indexOf(u8, source, "afterSame = value") orelse unreachable) + "afterSame = ".len;
+    const after_different = (std.mem.indexOf(u8, source, "afterDifferent = value") orelse unreachable) + "afterDifferent = ".len;
+    const after_partial = (std.mem.indexOf(u8, source, "afterPartial = value") orelse unreachable) + "afterPartial = ".len;
+    const after_alternative = (std.mem.indexOf(u8, source, "afterAlternative = value") orelse unreachable) + "afterAlternative = ".len;
+    const string_or_number = try result.type_store.unionOf(&.{ result.type_store.builtins.string, result.type_store.builtins.number });
+
+    try std.testing.expectEqual(result.type_store.builtins.number, testReferenceTypeAt(&result, after_same).?);
+    try std.testing.expectEqual(string_or_number, testReferenceTypeAt(&result, after_different).?);
+    try std.testing.expectEqual(string_or_number, testReferenceTypeAt(&result, after_partial).?);
+    try std.testing.expectEqual(string_or_number, testReferenceTypeAt(&result, after_alternative).?);
+}
+
+test "Goal 154 coalescing logical assignment and optional chains preserve only common facts" {
+    const source =
+        \\function coalesce(value: string | number, maybe: string | null) {
+        \\  if (typeof value === "string") {
+        \\    maybe ?? (value = 1);
+        \\    const afterCoalesce = value;
+        \\  }
+        \\}
+        \\function logicalAssign(value: string | number, flag: boolean) {
+        \\  if (typeof value === "string") {
+        \\    flag &&= (value = 1);
+        \\    const afterLogicalAssign = value;
+        \\  }
+        \\}
+        \\function optionalIndex(value: string | number, box: { item: number } | null) {
+        \\  if (typeof value === "string") {
+        \\    box?.[(value = 1)];
+        \\    const afterOptional = value;
+        \\  }
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+
+    const string_or_number = try result.type_store.unionOf(&.{ result.type_store.builtins.string, result.type_store.builtins.number });
+    const after_coalesce = (std.mem.indexOf(u8, source, "afterCoalesce = value") orelse unreachable) + "afterCoalesce = ".len;
+    const after_logical = (std.mem.indexOf(u8, source, "afterLogicalAssign = value") orelse unreachable) + "afterLogicalAssign = ".len;
+    const after_optional = (std.mem.indexOf(u8, source, "afterOptional = value") orelse unreachable) + "afterOptional = ".len;
+
+    try std.testing.expectEqual(string_or_number, testReferenceTypeAt(&result, after_coalesce).?);
+    try std.testing.expectEqual(string_or_number, testReferenceTypeAt(&result, after_logical).?);
+    try std.testing.expectEqual(string_or_number, testReferenceTypeAt(&result, after_optional).?);
+}
+
 test "Goal 121 typeof narrowing follows early exits" {
     const source =
         \\function f(value: string | number) {
@@ -2247,6 +2777,38 @@ test "Goal 124 project semantics propagate aliases namespaces defaults reexports
     try std.testing.expect(project.lookupExport(relay_id, "make") != null);
 }
 
+test "Goal 156 namespace imports refresh propagated export types" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "base.ts", .data = "export const value = 1;" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.ts", .data =
+        \\import { value } from "./base";
+        \\export const forwarded = value;
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\import * as ns from "./dep";
+        \\export const result = ns.forwarded;
+    });
+
+    var project = try analyzeTemporaryProject(&tmp, "main.ts");
+    defer project.deinit();
+    const main_id = projectModuleIdByBasename(&project, "main.ts") orelse return error.TestExpectedEqual;
+    const result_symbol = projectSymbolByName(&project, main_id, "result", .variable) orelse return error.TestExpectedEqual;
+    const main_module = project.lookupModule(main_id) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(project.type_store.builtins.number, main_module.type_info.lookupSymbol(result_symbol).?.effective().?);
+
+    const namespace = projectImportByLocal(&project, main_id, "ns") orelse return error.TestExpectedEqual;
+    const shape = project.type_store.lookup(namespace.target.?.type_id) orelse return error.TestExpectedEqual;
+    try std.testing.expect(shape.kind == .object);
+    var found = false;
+    for (shape.kind.object) |property| if (std.mem.eql(u8, property.name, "forwarded")) {
+        try std.testing.expectEqual(project.type_store.builtins.number, property.type_id);
+        found = true;
+    };
+    try std.testing.expect(found);
+}
+
 test "Goal 124 missing exports remain inspectable partial links" {
     const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
     var tmp = std.testing.tmpDir(.{});
@@ -2304,7 +2866,114 @@ test "Goal 124 repeated project rebuilds do not retain stale semantic storage" {
     try std.testing.expectEqual(second_export.identity, second_import.target.?);
 }
 
-test "Goal 139 imported type aliases and reexports preserve declaration identity" {
+test "Goal 149 imported aliases preserve arrow and function-expression annotations" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.ts", .data =
+        \\export interface User { name: string; }
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\import type { User as LocalUser } from "./dep";
+        \\const arrow = (value: LocalUser): LocalUser => value;
+        \\const expression = function(value: LocalUser): LocalUser { return value; };
+    });
+
+    var project = try analyzeTemporaryProject(&tmp, "main.ts");
+    defer project.deinit();
+    const dep_id = projectModuleIdByBasename(&project, "dep.ts") orelse return error.TestExpectedEqual;
+    const main_id = projectModuleIdByBasename(&project, "main.ts") orelse return error.TestExpectedEqual;
+    const user = project.lookupExport(dep_id, "User") orelse return error.TestExpectedEqual;
+    const main_module = project.lookupModule(main_id) orelse return error.TestExpectedEqual;
+
+    try std.testing.expect(main_module.type_info.resolved_type_nodes.len >= 4);
+    for (main_module.type_info.resolved_type_nodes) |entry|
+        try std.testing.expectEqual(user.identity.type_id, entry.type_id);
+
+    for ([_][]const u8{ "arrow", "expression" }) |name| {
+        const symbol_id = projectSymbolByName(&project, main_id, name, .variable) orelse return error.TestExpectedEqual;
+        const signature_id = main_module.type_info.lookupSymbol(symbol_id).?.effective().?;
+        const signature = project.type_store.lookupFunction(signature_id) orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(user.identity.type_id, signature.parameters[0].type_id);
+        try std.testing.expectEqual(user.identity.type_id, signature.return_type);
+    }
+}
+
+test "Goal 152 imported generic declarations preserve arity and substitution" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.ts", .data =
+        \\export interface Box<T> { value: T; }
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\import type { Box } from "./dep";
+        \\type Good = Box<number>;
+        \\type Value = Good["value"];
+        \\type Bad = Box<number, string>;
+    });
+
+    var project = try analyzeTemporaryProject(&tmp, "main.ts");
+    defer project.deinit();
+    const main_id = projectModuleIdByBasename(&project, "main.ts") orelse return error.TestExpectedEqual;
+    const main_module = project.lookupModule(main_id) orelse return error.TestExpectedEqual;
+    const good_symbol = projectSymbolByName(&project, main_id, "Good", .type_alias) orelse return error.TestExpectedEqual;
+    const value_symbol = projectSymbolByName(&project, main_id, "Value", .type_alias) orelse return error.TestExpectedEqual;
+    const bad_symbol = projectSymbolByName(&project, main_id, "Bad", .type_alias) orelse return error.TestExpectedEqual;
+    const good = main_module.type_info.lookupSymbol(good_symbol).?.declared_type.?;
+    try std.testing.expect(project.type_store.lookup(good).?.kind == .applied_generic);
+    try std.testing.expectEqual(project.type_store.builtins.number, main_module.type_info.lookupSymbol(value_symbol).?.declared_type.?);
+    try std.testing.expectEqual(project.type_store.builtins.unknown, main_module.type_info.lookupSymbol(bad_symbol).?.declared_type.?);
+    var arity_diagnostics: usize = 0;
+    for (project.diagnostics) |diagnostic| {
+        if (std.mem.indexOf(u8, diagnostic.message, "type arguments") != null) arity_diagnostics += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), arity_diagnostics);
+}
+
+test "Goal 153 imported and inherited shapes support indexed access keyof and typeof" {
+    const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "dep.ts", .data =
+        \\export interface Entity { readonly id: number; }
+        \\export interface User extends Entity { name?: string; }
+        \\export const current: User = { id: 1, name: "A" };
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.ts", .data =
+        \\import { current } from "./dep";
+        \\import type { User } from "./dep";
+        \\type ImportedName = User["name"];
+        \\type ImportedKeys = keyof User;
+        \\type ImportedQuery = typeof current;
+    });
+
+    var project = try analyzeTemporaryProject(&tmp, "main.ts");
+    defer project.deinit();
+    const main_id = projectModuleIdByBasename(&project, "main.ts") orelse return error.TestExpectedEqual;
+    const main_module = project.lookupModule(main_id) orelse return error.TestExpectedEqual;
+    const name_symbol = projectSymbolByName(&project, main_id, "ImportedName", .type_alias) orelse return error.TestExpectedEqual;
+    const keys_symbol = projectSymbolByName(&project, main_id, "ImportedKeys", .type_alias) orelse return error.TestExpectedEqual;
+    const query_symbol = projectSymbolByName(&project, main_id, "ImportedQuery", .type_alias) orelse return error.TestExpectedEqual;
+    const user_import = projectImportByLocal(&project, main_id, "User") orelse return error.TestExpectedEqual;
+    const expected_name = try project.type_store.unionOf(&.{ project.type_store.builtins.string, project.type_store.builtins.undefined });
+    try std.testing.expectEqual(expected_name, main_module.type_info.lookupSymbol(name_symbol).?.declared_type.?);
+    try std.testing.expectEqual(user_import.target.?.type_id, main_module.type_info.lookupSymbol(query_symbol).?.declared_type.?);
+    const keys_type = main_module.type_info.lookupSymbol(keys_symbol).?.declared_type.?;
+    const keys = project.type_store.lookup(keys_type).?.kind.union_type;
+    const id_key = try project.type_store.intern(.{ .literal = .{ .string = "id" } });
+    const name_key = try project.type_store.intern(.{ .literal = .{ .string = "name" } });
+    var saw_id = false;
+    var saw_name = false;
+    for (keys) |key| {
+        saw_id = saw_id or key == id_key;
+        saw_name = saw_name or key == name_key;
+    }
+    try std.testing.expect(saw_id and saw_name);
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics.len);
+}
+
+test "Goal 139 and Goal 149 imported type aliases and reexports preserve declaration identity" {
     const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2355,7 +3024,7 @@ test "Goal 139 imported type aliases and reexports preserve declaration identity
     try std.testing.expectEqual(box_import.target.?.type_id, main_module.type_info.lookupSymbol(box_symbol).?.declared_type.?);
 }
 
-test "Goal 139 cyclic imported annotations terminate with stable placeholders" {
+test "Goal 139 and Goal 149 cyclic imported annotations terminate with stable placeholders" {
     const io = Io.Threaded.io(Io.Threaded.global_single_threaded);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2525,8 +3194,10 @@ test "Goal 134 inference loop converges across repeated analysis rounds" {
 
     const fa = goal134FunctionSymbol(&first, "a").?;
     const fb = goal134FunctionSymbol(&first, "b").?;
-    const idA_a = first.lookupSymbolType(fa).?.inferred_type.?;
-    const idA_b = first.lookupSymbolType(fb).?.inferred_type.?;
+    const first_a = first.lookupFunctionType(first.lookupSymbolType(fa).?.inferred_type.?).?;
+    const first_b = first.lookupFunctionType(first.lookupSymbolType(fb).?.inferred_type.?).?;
+    try std.testing.expectEqual(first.type_store.builtins.number, first_a.return_type);
+    try std.testing.expectEqual(first.type_store.builtins.string, first_b.return_type);
 
     // Run a second and third round — convergence must be stable across three.
     var k: usize = 0;
@@ -2535,8 +3206,10 @@ test "Goal 134 inference loop converges across repeated analysis rounds" {
         defer r2.deinit();
         const fa2 = goal134FunctionSymbol(&r2, "a").?;
         const fb2 = goal134FunctionSymbol(&r2, "b").?;
-        try std.testing.expectEqual(idA_a, r2.lookupSymbolType(fa2).?.inferred_type.?);
-        try std.testing.expectEqual(idA_b, r2.lookupSymbolType(fb2).?.inferred_type.?);
+        const a_signature = r2.lookupFunctionType(r2.lookupSymbolType(fa2).?.inferred_type.?).?;
+        const b_signature = r2.lookupFunctionType(r2.lookupSymbolType(fb2).?.inferred_type.?).?;
+        try std.testing.expectEqual(r2.type_store.builtins.number, a_signature.return_type);
+        try std.testing.expectEqual(r2.type_store.builtins.string, b_signature.return_type);
     }
 }
 
@@ -2604,4 +3277,358 @@ test "Goal 135 primitives, objects and functions share one TypeId space" {
     }
 
     // Future independent allocators would violate these ownership assertions.
+}
+
+test "Goal 150 every binder symbol has explicit semantic type information" {
+    var result = try analyze(std.testing.allocator,
+        \\import { imported } from "dep";
+        \\type Alias = number;
+        \\interface Shape { value: number; }
+        \\enum Choice { first }
+        \\class Box<T> {
+        \\  value: T;
+        \\  method(input: T): T { return input; }
+        \\}
+        \\function identity<U>(input: U): U { return input; }
+        \\const local = imported;
+    );
+    defer result.deinit();
+
+    var seen: [@typeInfo(binder.SymbolKind).@"enum".fields.len]bool = @splat(false);
+    for (result.frontend.bind.symbols) |symbol| {
+        try std.testing.expect(result.lookupSymbolType(symbol.id) != null);
+        seen[@intFromEnum(symbol.kind)] = true;
+    }
+    for (seen) |present| try std.testing.expect(present);
+}
+
+test "Goal 150 every accepted executable expression has semantic type information" {
+    var result = try analyze(std.testing.allocator,
+        \\const regex = /x/g;
+        \\function tag(parts: unknown): string { return "tagged"; }
+        \\const tagged = tag`x${1}`;
+        \\const dynamic = import("dep");
+        \\const meta = import.meta;
+        \\function* values() { yield 1; }
+        \\class Base {}
+        \\class Derived extends Base { parent() { return super; } }
+        \\const ClassValue = class Named extends Base { self() { return this; } };
+    );
+    defer result.deinit();
+
+    var special = [_]bool{false} ** 8;
+    for (result.frontend.ast.nodes, 0..) |node, raw_id| {
+        if (isExecutableExpression(node.data))
+            try std.testing.expect(result.lookupNodeTypeInfo(@intCast(raw_id)) != null);
+        switch (node.data) {
+            .RegExpLiteral => special[0] = true,
+            .TaggedTemplateExpression => special[1] = true,
+            .ImportExpression => special[2] = true,
+            .MetaProperty => special[3] = true,
+            .YieldExpression => special[4] = true,
+            .ClassExpression => special[5] = true,
+            .ThisExpression => special[6] = true,
+            .SuperExpression => special[7] = true,
+            else => {},
+        }
+    }
+    for (special) |present| try std.testing.expect(present);
+}
+
+test "Goal 150 this super and class expressions use canonical class identities" {
+    var result = try analyze(std.testing.allocator,
+        \\class Base {}
+        \\class Derived extends Base { self() { return this; } parent() { return super; } }
+        \\const ClassValue = class Named extends Base { self() { return this; } };
+    );
+    defer result.deinit();
+
+    var base_id: ?ast.NodeId = null;
+    var derived_id: ?ast.NodeId = null;
+    var expression_id: ?ast.NodeId = null;
+    var this_nodes: [2]ast.NodeId = undefined;
+    var this_count: usize = 0;
+    var super_id: ?ast.NodeId = null;
+    for (result.frontend.ast.nodes, 0..) |node, raw_id| switch (node.data) {
+        .ClassDeclaration => |class| {
+            if (std.mem.eql(u8, class.name, "Base")) base_id = @intCast(raw_id);
+            if (std.mem.eql(u8, class.name, "Derived")) derived_id = @intCast(raw_id);
+        },
+        .ClassExpression => expression_id = @intCast(raw_id),
+        .ThisExpression => {
+            this_nodes[this_count] = @intCast(raw_id);
+            this_count += 1;
+        },
+        .SuperExpression => super_id = @intCast(raw_id),
+        else => {},
+    };
+
+    const base = result.type_store.lookupClassSemanticType(.init(result.module.id, base_id.?)).?;
+    const derived = result.type_store.lookupClassSemanticType(.init(result.module.id, derived_id.?)).?;
+    const expression = result.type_store.lookupClassSemanticType(.init(result.module.id, expression_id.?)).?;
+    try std.testing.expectEqual(base.instance_type, derived.inheritance.extends.?);
+    try std.testing.expectEqual(base.instance_type, result.lookupNodeType(super_id.?).?);
+    try std.testing.expectEqual(derived.instance_type, result.lookupNodeType(this_nodes[0]).?);
+    try std.testing.expectEqual(expression.instance_type, result.lookupNodeType(this_nodes[1]).?);
+    try std.testing.expectEqual(expression.constructor_type, result.lookupNodeType(expression_id.?).?);
+    try std.testing.expect(expression.constructor_type != expression.instance_type);
+
+    var named_symbol_found = false;
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.declaration == expression_id.? and std.mem.eql(u8, symbol.name, "Named")) {
+            try std.testing.expectEqual(expression.constructor_type, result.lookupSymbolType(symbol.id).?.effective().?);
+            named_symbol_found = true;
+        }
+    }
+    try std.testing.expect(named_symbol_found);
+}
+
+fn goal151ClassType(result: *const SemanticResult, name: []const u8) ?types.ClassSemanticType {
+    for (result.frontend.ast.nodes, 0..) |node, raw_id| switch (node.data) {
+        .ClassDeclaration => |class| if (std.mem.eql(u8, class.name, name))
+            return result.type_store.lookupClassSemanticType(.init(result.module.id, @intCast(raw_id))),
+        else => {},
+    };
+    return null;
+}
+
+fn goal151MemberType(table: types.MemberTable, name: []const u8) ?types.TypeId {
+    for (table.members) |member| if (std.mem.eql(u8, member.name, name)) return member.type_id;
+    return null;
+}
+
+test "Goal 151 declarations object methods and class methods share return inference" {
+    var result = try analyze(std.testing.allocator,
+        \\function regular() { return 1; }
+        \\const object = { method() { return 2; } };
+        \\class Example {
+        \\  value: number;
+        \\  method() { return 3; }
+        \\  read() { return this.value; }
+        \\}
+    );
+    defer result.deinit();
+
+    const regular = goal134FunctionSymbol(&result, "regular").?;
+    const regular_signature = result.lookupFunctionType(result.lookupSymbolType(regular).?.effective().?).?;
+    try std.testing.expectEqual(result.type_store.builtins.number, regular_signature.return_type);
+
+    var object_method: ?ast.NodeId = null;
+    var receiver_member: ?ast.NodeId = null;
+    for (result.frontend.ast.nodes, 0..) |node, raw_id| switch (node.data) {
+        .FunctionExpression => {
+            if (function_like.describe(result.frontend.ast, @intCast(raw_id)).?.receiver == .object)
+                object_method = @intCast(raw_id);
+        },
+        .MemberExpression => |member| {
+            if (switch (result.frontend.ast.node(member.object).data) {
+                .ThisExpression => true,
+                else => false,
+            }) receiver_member = @intCast(raw_id);
+        },
+        else => {},
+    };
+    const object_signature = result.lookupFunctionType(result.lookupNodeType(object_method.?).?).?;
+    try std.testing.expectEqual(result.type_store.builtins.number, object_signature.return_type);
+
+    const class = goal151ClassType(&result, "Example").?;
+    const method_signature = result.lookupFunctionType(goal151MemberType(class.instance_members, "method").?).?;
+    const read_signature = result.lookupFunctionType(goal151MemberType(class.instance_members, "read").?).?;
+    try std.testing.expectEqual(result.type_store.builtins.number, method_signature.return_type);
+    try std.testing.expectEqual(result.type_store.builtins.number, read_signature.return_type);
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(receiver_member.?).?);
+}
+
+test "Goal 151 annotated class methods validate inferred body returns" {
+    var result = try analyze(std.testing.allocator,
+        \\class Example { invalid(): number { return "wrong"; } }
+    );
+    defer result.deinit();
+
+    var incompatible_returns: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.label != null and std.mem.eql(u8, diagnostic.label.?, "incompatible return"))
+            incompatible_returns += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), incompatible_returns);
+}
+
+test "Goal 151 constructors accessors async and generators use one callable contract" {
+    var result = try analyze(std.testing.allocator,
+        \\class Invalid {
+        \\  constructor(): number { return 1; }
+        \\  get value(input: number) { return 1; }
+        \\  set item(): number { return 1; }
+        \\}
+        \\class Worker {
+        \\  async load() { return 1; }
+        \\  *values() { return 2; }
+        \\}
+        \\const object = {
+        \\  get bad(input: number) { return 1; },
+        \\  set badSet(value: number) { return 1; }
+        \\};
+    );
+    defer result.deinit();
+
+    var invalid_setter_descriptors: usize = 0;
+    for (result.frontend.ast.nodes, 0..) |_, raw_id| {
+        const callable = function_like.describe(result.frontend.ast, @intCast(raw_id)) orelse continue;
+        if (callable.kind == .setter and callable.params.len != 1) invalid_setter_descriptors += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), invalid_setter_descriptors);
+
+    var invalid_constructor_return_type: usize = 0;
+    var invalid_getter_parameters: usize = 0;
+    var invalid_setter_return_type: usize = 0;
+    var invalid_setter_parameter: usize = 0;
+    var invalid_return_value: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| if (diagnostic.label) |label| {
+        if (std.mem.eql(u8, label, "invalid constructor return type")) invalid_constructor_return_type += 1;
+        if (std.mem.eql(u8, label, "invalid getter parameters")) invalid_getter_parameters += 1;
+        if (std.mem.eql(u8, label, "invalid setter return type")) invalid_setter_return_type += 1;
+        if (std.mem.eql(u8, label, "invalid setter parameter")) invalid_setter_parameter += 1;
+        if (std.mem.eql(u8, label, "invalid return value")) invalid_return_value += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), invalid_constructor_return_type);
+    try std.testing.expectEqual(@as(usize, 2), invalid_getter_parameters);
+    try std.testing.expectEqual(@as(usize, 1), invalid_setter_return_type);
+    try std.testing.expectEqual(@as(usize, 1), invalid_setter_parameter);
+    try std.testing.expectEqual(@as(usize, 3), invalid_return_value);
+
+    const worker = goal151ClassType(&result, "Worker").?;
+    const load = result.lookupFunctionType(goal151MemberType(worker.instance_members, "load").?).?;
+    const values = result.lookupFunctionType(goal151MemberType(worker.instance_members, "values").?).?;
+    try std.testing.expect(load.flags.is_async);
+    try std.testing.expect(values.flags.is_generator);
+    const promised = result.lookupType(load.return_type).?;
+    const generated = result.lookupType(values.return_type).?;
+    try std.testing.expect(promised.kind == .promise);
+    try std.testing.expect(generated.kind == .generator);
+    try std.testing.expectEqual(result.type_store.builtins.number, promised.kind.promise.value_type);
+    try std.testing.expectEqual(result.type_store.builtins.number, generated.kind.generator.return_type);
+}
+
+fn goal158ValidateAnalysis(allocator: std.mem.Allocator, source: []const u8) !void {
+    var result = try analyze(allocator, source);
+    defer result.deinit();
+    for (result.diagnostics) |diagnostic| {
+        if (diagnostic.span.start > diagnostic.span.end) return error.InvalidDiagnosticSpan;
+        if (diagnostic.span.end > source.len) return error.InvalidDiagnosticSpan;
+    }
+}
+
+fn goal158ThreadWorker() !void {
+    const inputs = [_][]const u8{
+        "const threaded: number = 9;",
+        "function f<T>(x: T): T { return x; } f(1);",
+        "const broken = `unterminated ${1 +`;",
+        "class C { value: number = 1; } new C().value;",
+    };
+    for (0..25) |iteration| try goal158ValidateAnalysis(std.heap.page_allocator, inputs[iteration % inputs.len]);
+}
+
+test "Goal 158 deterministic malformed corpus and diagnostic stability" {
+    const corpus = [_][]const u8{
+        "",
+        "\xff\xfeconst x = 1;",
+        "const n = 1e+; const later: number = 'wrong';",
+        "const s = 'unterminated",
+        "/* unterminated",
+        "const r = /unterminated;",
+        "const t = `head ${ { broken: } tail`;",
+        "import { missing as } from './nope'; export {;",
+        "function broken(): number \xff return 1; }",
+        "((((((((((((((((((((((((1))))))))))))))))))))))))",
+        "function f<T extends {x: number}>(v: T): number { return v.x; }",
+    };
+    for (corpus) |source| try goal158ValidateAnalysis(std.testing.allocator, source);
+
+    const source = "const first = 1e+; const second: number = 'wrong';";
+    var first = try analyze(std.testing.allocator, source);
+    defer first.deinit();
+    var second = try analyze(std.testing.allocator, source);
+    defer second.deinit();
+    try std.testing.expectEqual(first.diagnostics.len, second.diagnostics.len);
+    for (first.diagnostics, second.diagnostics) |left, right| {
+        try std.testing.expectEqual(left.code, right.code);
+        try std.testing.expectEqual(left.phase, right.phase);
+        try std.testing.expectEqual(left.span, right.span);
+    }
+}
+
+test "Goal 158 deterministic byte-mutation corpus remains memory safe" {
+    const seeds = [_][]const u8{
+        "const value = { nested: [1, 2, 3] };",
+        "function map<T>(value: T): T { return value; }",
+        "const template = `head ${value} tail`;",
+        "import { value as renamed } from './dependency';",
+    };
+    const replacements = [_]u8{ 0x00, 0x22, 0x27, 0x60, 0x7f, 0xff };
+    for (seeds) |seed| {
+        for (0..@min(seed.len, 48)) |offset| {
+            const mutated = try std.testing.allocator.dupe(u8, seed);
+            defer std.testing.allocator.free(mutated);
+            mutated[offset] = replacements[offset % replacements.len];
+            try goal158ValidateAnalysis(std.testing.allocator, mutated);
+        }
+    }
+}
+
+test "Goal 158 semantic oracle preserves representative checker outcomes" {
+    const Oracle = struct {
+        source: []const u8,
+        expected: diagnostics.DiagnosticCode,
+    };
+    const cases = [_]Oracle{
+        .{ .source = "const value: number = 'wrong';", .expected = .type_mismatch },
+        .{ .source = "const object = { known: 1 }; object.missing;", .expected = .unknown_property },
+        .{ .source = "function takes(value: number): void {} takes();", .expected = .invalid_argument_count },
+        .{ .source = "function takes(value: number): void {} takes('wrong');", .expected = .invalid_argument_type },
+    };
+    for (cases) |case| {
+        var result = try analyze(std.testing.allocator, case.source);
+        defer result.deinit();
+        var found = false;
+        for (result.semantic_diagnostics) |diagnostic| {
+            if (diagnostic.code == case.expected) found = true;
+        }
+        try std.testing.expect(found);
+    }
+
+    var valid = try analyze(std.testing.allocator,
+        \\interface Box<T> { value: T; map(input: T): T; }
+        \\let box: Box<number>;
+        \\const boxed = box.value;
+        \\const mapped = box.map(1);
+    );
+    defer valid.deinit();
+    try std.testing.expectEqual(@as(usize, 0), valid.semantic_diagnostics.len);
+}
+
+test "Goal 158 repeated lifecycle huge literal and explicit parse limit" {
+    for (0..50) |_| {
+        var result = try analyze(std.testing.allocator, "const x: number = 1; function f() { return x; }");
+        result.deinit();
+    }
+
+    const payload = try std.testing.allocator.alloc(u8, 64 * 1024);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 'a');
+    const source = try std.fmt.allocPrint(std.testing.allocator, "const huge = '{s}';", .{payload});
+    defer std.testing.allocator.free(source);
+    try goal158ValidateAnalysis(std.testing.allocator, source);
+
+    try std.testing.expectError(error.ParseRecursionLimitReached, analyzeSource(
+        std.testing.allocator,
+        .{ .path = "depth.ts", .text = "const x = (((((((1)))))));" },
+        .{ .max_parse_depth = 2 },
+    ));
+}
+
+test "Goal 158 independent analyses run in parallel" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, goal158ThreadWorker, .{});
+    for (threads) |thread| thread.join();
 }
