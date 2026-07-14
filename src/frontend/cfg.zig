@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast_mod = @import("ast.zig");
+const function_like = @import("function_like.zig");
 
 const NodeId = ast_mod.NodeId;
 
@@ -43,6 +44,15 @@ pub fn build(allocator: std.mem.Allocator, tree: ast_mod.Ast) ![]const FunctionC
 
 fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: NodeId, functions: *std.ArrayList(FunctionCfg)) anyerror!void {
     if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= tree.nodes.len) return;
+    if (function_like.describe(tree, node_id)) |function| {
+        try functions.append(allocator, .{
+            .function = node_id,
+            .name = function.name orelse if (function.kind == .arrow) "<arrow>" else "<anonymous>",
+            .graph = try buildFunctionGraph(allocator, tree, function.body, function.expression_body),
+        });
+        try collectFunctions(allocator, tree, function.body, functions);
+        return;
+    }
     const node = tree.node(node_id);
     switch (node.data) {
         .Program => |program| {
@@ -55,30 +65,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
             }
             if (export_decl.expression != ast_mod.invalid_node) try collectFunctions(allocator, tree, export_decl.expression, functions);
         },
-        .FunctionDeclaration => |function_decl| {
-            try functions.append(allocator, .{
-                .function = node_id,
-                .name = function_decl.name,
-                .graph = try buildFunctionGraph(allocator, tree, function_decl.body, false),
-            });
-            try collectFunctions(allocator, tree, function_decl.body, functions);
-        },
-        .FunctionExpression => |function_expr| {
-            try functions.append(allocator, .{
-                .function = node_id,
-                .name = function_expr.name orelse "<anonymous>",
-                .graph = try buildFunctionGraph(allocator, tree, function_expr.body, false),
-            });
-            try collectFunctions(allocator, tree, function_expr.body, functions);
-        },
-        .ArrowFunctionExpression => |arrow| {
-            try functions.append(allocator, .{
-                .function = node_id,
-                .name = "<arrow>",
-                .graph = try buildFunctionGraph(allocator, tree, arrow.body, arrow.expression_body),
-            });
-            try collectFunctions(allocator, tree, arrow.body, functions);
-        },
+        .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression => unreachable,
         .ClassDeclaration => |class_decl| for (class_decl.members) |member| try collectFunctions(allocator, tree, member, functions),
         .ClassExpression => |class_expr| for (class_expr.members) |member| try collectFunctions(allocator, tree, member, functions),
         .EnumDeclaration => |decl| for (decl.members) |member| try collectFunctions(allocator, tree, member, functions),
@@ -86,14 +73,7 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
             if (member.computed_name) |computed| try collectFunctions(allocator, tree, computed, functions);
             if (member.initializer) |initializer| try collectFunctions(allocator, tree, initializer, functions);
         },
-        .ClassMethod => |method| {
-            try functions.append(allocator, .{
-                .function = node_id,
-                .name = method.name,
-                .graph = try buildFunctionGraph(allocator, tree, method.body, false),
-            });
-            try collectFunctions(allocator, tree, method.body, functions);
-        },
+        .ClassMethod => unreachable,
         .ClassField => |field| if (field.initializer) |initializer| try collectFunctions(allocator, tree, initializer, functions),
         .Parameter => |parameter| if (parameter.initializer) |initializer| try collectFunctions(allocator, tree, initializer, functions),
         .VariableDeclaration => |declaration| for (declaration.declarations) |item| try collectFunctions(allocator, tree, item, functions),

@@ -852,6 +852,17 @@ const Parser = struct {
             if (self.atIdentifierText("static")) is_static = true else if (self.atIdentifierText("readonly")) readonly = true else if (self.atIdentifierText("public")) access = .public else if (self.atIdentifierText("private")) access = .private else if (self.atIdentifierText("protected")) access = .protected else break;
             _ = self.advance();
         }
+        const accessor_kind: ?ast_mod.ClassMethodKind = if (self.atIdentifierText("get") and
+            (self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and
+            self.peek(2).kind == .LParen) blk: {
+            _ = self.advance();
+            break :blk .getter;
+        } else if (self.atIdentifierText("set") and
+            (self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and
+            self.peek(2).kind == .LParen) blk: {
+            _ = self.advance();
+            break :blk .setter;
+        } else null;
         if (self.atIdentifierText("async") and
             (((self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and self.peek(2).kind == .LParen) or
                 (self.peek(1).kind == .Asterisk and (self.peek(2).kind == .Identifier or self.peek(2).kind == .PrivateIdentifier) and self.peek(3).kind == .LParen)))
@@ -864,7 +875,7 @@ const Parser = struct {
         if (self.eat(.LParen)) {
             var params: std.ArrayList(NodeId) = .empty;
             errdefer params.deinit(self.allocator);
-            const is_constructor = std.mem.eql(u8, name_token.lexeme, "constructor");
+            const is_constructor = accessor_kind == null and std.mem.eql(u8, name_token.lexeme, "constructor");
             try self.parseParameterList(&params, is_constructor);
             _ = self.expect(.RParen, "expected )");
             const return_type = try self.parseOptionalTypeAnnotation();
@@ -882,7 +893,7 @@ const Parser = struct {
                     .return_type = return_type,
                     .is_static = is_static,
                     .access = access,
-                    .kind = if (is_constructor) .constructor else .method,
+                    .kind = accessor_kind orelse if (is_constructor) .constructor else .method,
                     .flags = flags,
                 } },
             });

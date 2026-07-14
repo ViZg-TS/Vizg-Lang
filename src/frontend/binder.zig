@@ -80,10 +80,16 @@ pub const ModuleInfo = struct {
     exports: []const ExportRecord,
 };
 
+pub const NodeScope = struct {
+    node: NodeId,
+    scope: ScopeId,
+};
+
 pub const BindResult = struct {
     scopes: []const Scope,
     symbols: []const Symbol,
     node_symbols: []const NodeSymbol,
+    node_scopes: []const NodeScope = &.{},
     module: ModuleInfo,
     diagnostics: []const diagnostics.Diagnostic,
 };
@@ -101,6 +107,7 @@ const Binder = struct {
     scopes: std.ArrayList(ScopeBuilder) = .empty,
     symbols: std.ArrayList(Symbol) = .empty,
     node_symbols: std.ArrayList(NodeSymbol) = .empty,
+    node_scopes: std.ArrayList(NodeScope) = .empty,
     imports: std.ArrayList(ImportRecord) = .empty,
     exports: std.ArrayList(ExportRecord) = .empty,
     diagnostic_list: std.ArrayList(diagnostics.Diagnostic) = .empty,
@@ -124,6 +131,7 @@ const Binder = struct {
             .scopes = try final_scopes.toOwnedSlice(self.allocator),
             .symbols = try self.symbols.toOwnedSlice(self.allocator),
             .node_symbols = try self.node_symbols.toOwnedSlice(self.allocator),
+            .node_scopes = try self.node_scopes.toOwnedSlice(self.allocator),
             .module = .{
                 .imports = try self.imports.toOwnedSlice(self.allocator),
                 .exports = try self.exports.toOwnedSlice(self.allocator),
@@ -132,8 +140,16 @@ const Binder = struct {
         };
     }
 
+    fn recordNodeScope(self: *Binder, node_id: NodeId, scope: ScopeId) !void {
+        for (self.node_scopes.items) |entry| {
+            if (entry.node == node_id) return;
+        }
+        try self.node_scopes.append(self.allocator, .{ .node = node_id, .scope = scope });
+    }
+
     fn bindNode(self: *Binder, node_id: NodeId, scope: ScopeId) anyerror!void {
         if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= self.ast.nodes.len) return;
+        try self.recordNodeScope(node_id, scope);
         const node = self.ast.node(node_id);
         switch (node.data) {
             .Program => |program| {

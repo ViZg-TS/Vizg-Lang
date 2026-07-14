@@ -296,7 +296,7 @@ pub const ClassField = struct {
     definite: bool = false,
 };
 
-pub const ClassMethodKind = enum { method, constructor };
+pub const ClassMethodKind = enum { method, constructor, getter, setter };
 
 pub const ClassMethod = struct {
     name: []const u8,
