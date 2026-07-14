@@ -6,6 +6,8 @@ const builtin_kind = @import("../types/builtin.zig");
 const diagnostics_mod = @import("../diagnostics/root.zig");
 const types = @import("../types/root.zig");
 const type_inference = @import("type_inference.zig");
+const type_compat = @import("type_compat.zig");
+const type_info_mod = @import("type_info.zig");
 
 pub const DeclaredSymbolType = struct {
     symbol_id: binder.SymbolId,
@@ -32,6 +34,7 @@ pub const FunctionSignatureEntry = struct {
 pub const TypeInfoCollectResult = struct {
     symbol_declared_types: []const DeclaredSymbolType,
     function_signatures: []const FunctionSignatureEntry,
+    resolved_type_nodes: []const type_info_mod.ResolvedTypeNode,
     diagnostics: []const diagnostics_mod.Diagnostic,
 
     pub fn hasAny(self: TypeInfoCollectResult) bool {
@@ -67,12 +70,15 @@ pub const TypeResolutionContext = struct {
     symbols: []const binder.Symbol,
     scopes: []const binder.Scope,
     semantic_symbol_types: *std.ArrayList(DeclaredSymbolType),
+    value_symbol_types: []const type_info_mod.SymbolTypeInfo,
+    resolved_type_nodes: *std.ArrayList(type_info_mod.ResolvedTypeNode),
     diagnostics: *std.ArrayList(diagnostics_mod.Diagnostic),
     source_path: ?[]const u8,
     tree: ast_mod.Ast,
     type_store: *types.TypeStore,
     alias_states: []u8,
     imported_types: []const ImportedTypeBinding,
+    bind: binder.BindResult,
 };
 
 pub fn collectDeclaredTypes(
@@ -93,7 +99,7 @@ pub fn collectDeclaredTypesInModule(
     module_id: u32,
     type_store: *types.TypeStore,
 ) !TypeInfoCollectResult {
-    return collectDeclaredTypesInModuleWithImports(allocator, source, tree, bind, module_id, type_store, &.{});
+    return collectDeclaredTypesInModuleWithImports(allocator, source, tree, bind, module_id, type_store, &.{}, true);
 }
 
 pub fn collectDeclaredTypesInModuleWithImports(
@@ -104,6 +110,23 @@ pub fn collectDeclaredTypesInModuleWithImports(
     module_id: u32,
     type_store: *types.TypeStore,
     imported_types: []const ImportedTypeBinding,
+    complete_nominals: bool,
+) !TypeInfoCollectResult {
+    return collectDeclaredTypesInModuleWithImportsAndValues(
+        allocator, source, tree, bind, module_id, type_store, imported_types, &.{}, complete_nominals,
+    );
+}
+
+pub fn collectDeclaredTypesInModuleWithImportsAndValues(
+    allocator: std.mem.Allocator,
+    source: frontend.SourceFile,
+    tree: ast_mod.Ast,
+    bind: binder.BindResult,
+    module_id: u32,
+    type_store: *types.TypeStore,
+    imported_types: []const ImportedTypeBinding,
+    value_symbol_types: []const type_info_mod.SymbolTypeInfo,
+    complete_nominals: bool,
 ) !TypeInfoCollectResult {
     var diagnostics: std.ArrayList(diagnostics_mod.Diagnostic) = .empty;
     errdefer diagnostics.deinit(allocator);
@@ -111,6 +134,8 @@ pub fn collectDeclaredTypesInModuleWithImports(
     errdefer signatures.deinit(allocator);
     var declared: std.ArrayList(DeclaredSymbolType) = .empty;
     errdefer declared.deinit(allocator);
+    var resolved_type_nodes: std.ArrayList(type_info_mod.ResolvedTypeNode) = .empty;
+    errdefer resolved_type_nodes.deinit(allocator);
     const alias_states = try allocator.alloc(u8, bind.symbols.len);
     @memset(alias_states, 0);
 
@@ -121,12 +146,15 @@ pub fn collectDeclaredTypesInModuleWithImports(
         .symbols = bind.symbols,
         .scopes = bind.scopes,
         .semantic_symbol_types = &declared,
+        .value_symbol_types = value_symbol_types,
+        .resolved_type_nodes = &resolved_type_nodes,
         .diagnostics = &diagnostics,
         .source_path = source.path,
         .tree = tree,
         .type_store = type_store,
         .alias_states = alias_states,
         .imported_types = imported_types,
+        .bind = bind,
     };
 
     // Declaration identities exist before annotations are resolved. A class
@@ -148,7 +176,7 @@ pub fn collectDeclaredTypesInModuleWithImports(
                 }
             },
             .interface => {
-                const interface_type = try type_store.createInterfaceSemanticType(identity, symbol.name, .{});
+                const interface_type = try type_store.createInterfaceSemanticType(identity, symbol.name);
                 try putDeclared(&declared, allocator, symbol.id, interface_type.type_id);
             },
             .enum_ => {
@@ -163,6 +191,24 @@ pub fn collectDeclaredTypesInModuleWithImports(
         }
     }
 
+    // Class expressions have the same module-qualified nominal identity as
+    // declarations, even when anonymous. A named expression's private value
+    // symbol points at its constructor; the instance identity remains distinct.
+    for (tree.nodes, 0..) |node, raw_id| switch (node.data) {
+        .ClassExpression => |class_expression| {
+            const node_id: ast_mod.NodeId = @intCast(raw_id);
+            const class_type = try type_store.createClassSemanticType(
+                types.SemanticDeclId.init(module_id, node_id),
+                class_expression.name orelse "<anonymous class>",
+            );
+            for (bind.symbols) |symbol| {
+                if (symbol.declaration == node_id and symbol.kind == .class)
+                    try putDeclared(&declared, allocator, symbol.id, class_type.constructor_type);
+            }
+        },
+        else => {},
+    };
+
     // Generic names are declaration identities, not spelling-based aliases.
     // Predeclare the complete environment so references among parameters and
     // all parameter/return annotations share one stable TypeId.
@@ -176,23 +222,69 @@ pub fn collectDeclaredTypesInModuleWithImports(
         try putDeclared(&declared, allocator, symbol.id, type_id);
     }
 
-    // Resolve aliases after all nominal identities are available. Recursion in
-    // ensureSymbolType supports forward aliases and breaks cycles to unknown.
+    // Register every generic declaration before resolving any constraint,
+    // default, or alias body. Imported modules share this project TypeStore,
+    // so declaration identity is also the cross-module arity contract.
     for (bind.symbols) |symbol| {
-        if (symbol.kind == .type_alias and symbol.namespace == .type) {
-            context.scope = declarationTypeScope(&context, symbol.declaration, symbol.scope);
-            _ = try ensureSymbolType(&context, symbol.id);
+        if (symbol.namespace != .type or
+            (symbol.kind != .type_alias and symbol.kind != .interface and symbol.kind != .class)) continue;
+        const parameters = genericTypeParameters(tree, symbol.declaration) orelse continue;
+        if (parameters.len == 0) continue;
+        const generic_parameters = try collectGenericParameterShells(&context, symbol.declaration, parameters);
+        const template_type = declaredType(declared.items, symbol.id) orelse type_store.builtins.unknown;
+        try type_store.registerGenericDeclaration(
+            types.SemanticDeclId.init(module_id, symbol.declaration),
+            template_type,
+            generic_parameters,
+        );
+    }
+
+    // Resolve constraints and defaults in declaration order. Defaults may use
+    // earlier parameters; later instantiation substitutes those bindings.
+    for (bind.symbols) |symbol| {
+        if (symbol.namespace != .type or
+            (symbol.kind != .type_alias and symbol.kind != .interface and symbol.kind != .class)) continue;
+        const parameters = genericTypeParameters(tree, symbol.declaration) orelse continue;
+        if (parameters.len == 0) continue;
+        context.scope = declarationTypeScope(&context, symbol.declaration, symbol.scope);
+        const metadata = try resolveGenericParameterMetadata(&context, symbol.declaration, parameters);
+        const identity = types.SemanticDeclId.init(module_id, symbol.declaration);
+        const declaration = type_store.lookupGenericDeclaration(identity) orelse continue;
+        try type_store.updateGenericDeclaration(identity, declaration.template_type, metadata);
+    }
+    if (complete_nominals) {
+        // Only the designated final declaration pass completes nominal tables.
+        // Indexed access and keyof then consume the immutable canonical tables.
+        for (tree.nodes, 0..) |node, raw_id| switch (node.data) {
+            .ClassExpression => |class_expression| try collectClassBody(
+                &context,
+                @intCast(raw_id),
+                class_expression.members,
+                class_expression.super_class,
+                classBodyScope(bind, @intCast(raw_id), class_expression.members),
+                &signatures,
+            ),
+            else => {},
+        };
+
+        // No compatibility or override checks belong in this pass.
+        for (bind.symbols) |symbol| {
+            if (symbol.namespace != .type) continue;
+            switch (symbol.kind) {
+                .class => try collectClassMembers(&context, symbol, &signatures),
+                .interface => try collectInterfaceMembers(&context, symbol),
+                else => {},
+            }
         }
     }
 
-    // Populate the member tables only after every nominal identity and alias is
-    // available. No compatibility or override checks belong in this pass.
+    // Resolve aliases after all nominal identities and member tables are
+    // available. Recursion in ensureSymbolType supports forward aliases and
+    // breaks cycles to unknown.
     for (bind.symbols) |symbol| {
-        if (symbol.namespace != .type) continue;
-        switch (symbol.kind) {
-            .class => try collectClassMembers(&context, symbol, &signatures),
-            .interface => try collectInterfaceMembers(&context, symbol),
-            else => {},
+        if (symbol.kind == .type_alias and symbol.namespace == .type) {
+            context.scope = declarationTypeScope(&context, symbol.declaration, symbol.scope);
+            _ = try ensureSymbolType(&context, symbol.id) orelse continue;
         }
     }
 
@@ -204,7 +296,7 @@ pub fn collectDeclaredTypesInModuleWithImports(
         const node = tree.node(symbol.declaration);
         switch (node.data) {
             .VariableDeclarator => |declaration| if (declaration.type_annotation) |annotation| {
-                try putDeclared(&declared, allocator, symbol.id, try resolveAnnotation(&context, annotation));
+                try putDeclared(&declared, allocator, symbol.id, try resolveTypeAnnotation(&context, annotation));
             },
             .FunctionDeclaration => |declaration| {
                 var parameters: std.ArrayList(types.ParameterType) = .empty;
@@ -217,7 +309,7 @@ pub fn collectDeclaredTypesInModuleWithImports(
                     const parameter_symbol = findDeclarationSymbol(bind.symbols, parameter_id, .parameter);
                     context.scope = if (parameter_symbol) |value| value.scope else symbol.scope;
                     const type_id = if (parameter.type_annotation) |annotation|
-                        try resolveAnnotation(&context, annotation)
+                        try resolveTypeAnnotation(&context, annotation)
                     else
                         type_store.builtins.unknown;
                     try parameters.append(allocator, .{
@@ -232,7 +324,7 @@ pub fn collectDeclaredTypesInModuleWithImports(
                 }
                 context.scope = declarationTypeScope(&context, symbol.declaration, symbol.scope);
                 var return_type = if (declaration.return_type) |annotation|
-                    try resolveAnnotation(&context, annotation)
+                    try resolveTypeAnnotation(&context, annotation)
                 else
                     type_store.builtins.unknown;
                 return_type = try type_inference.wrapFunctionReturn(return_type, declaration.flags, type_store);
@@ -253,17 +345,150 @@ pub fn collectDeclaredTypesInModuleWithImports(
             // FunctionDeclaration. Reuse an entry already captured above.
             .Parameter => |parameter| if (parameter.type_annotation) |annotation| {
                 if (declaredType(declared.items, symbol.id) == null)
-                    try putDeclared(&declared, allocator, symbol.id, try resolveAnnotation(&context, annotation));
+                    try putDeclared(&declared, allocator, symbol.id, try resolveTypeAnnotation(&context, annotation));
             },
             else => {},
         }
     }
 
+    try resolveRemainingAnnotations(&context, bind);
+
     return .{
         .symbol_declared_types = try declared.toOwnedSlice(allocator),
         .function_signatures = try signatures.toOwnedSlice(allocator),
+        .resolved_type_nodes = try resolved_type_nodes.toOwnedSlice(allocator),
         .diagnostics = try diagnostics.toOwnedSlice(allocator),
     };
+}
+
+fn genericTypeParameters(tree: ast_mod.Ast, declaration: ast_mod.NodeId) ?[]const ast_mod.GenericTypeParameter {
+    return switch (tree.node(declaration).data) {
+        .TypeAliasDeclaration => |value| value.type_parameters,
+        .InterfaceDeclaration => |value| value.type_parameters,
+        .ClassDeclaration => |value| value.type_parameters,
+        else => null,
+    };
+}
+
+fn collectGenericParameterShells(
+    context: *TypeResolutionContext,
+    declaration: ast_mod.NodeId,
+    parameters: []const ast_mod.GenericTypeParameter,
+) ![]const types.GenericParameter {
+    const result = try context.allocator.alloc(types.GenericParameter, parameters.len);
+    for (parameters, 0..) |parameter, index| {
+        const symbol = findTypeParameterSymbol(context.symbols, declaration, parameter.name) orelse {
+            result[index] = .{ .type_id = context.type_store.builtins.unknown };
+            continue;
+        };
+        result[index] = .{
+            .type_id = declaredType(context.semantic_symbol_types.items, symbol.id) orelse context.type_store.builtins.unknown,
+        };
+    }
+    return result;
+}
+
+fn resolveGenericParameterMetadata(
+    context: *TypeResolutionContext,
+    declaration: ast_mod.NodeId,
+    parameters: []const ast_mod.GenericTypeParameter,
+) ![]const types.GenericParameter {
+    const result = try context.allocator.alloc(types.GenericParameter, parameters.len);
+    for (parameters, 0..) |parameter, index| {
+        const symbol = findTypeParameterSymbol(context.symbols, declaration, parameter.name) orelse {
+            result[index] = .{ .type_id = context.type_store.builtins.unknown };
+            continue;
+        };
+        const type_id = declaredType(context.semantic_symbol_types.items, symbol.id) orelse context.type_store.builtins.unknown;
+        const constraint = if (parameter.constraint) |annotation|
+            try resolveTypeAnnotation(context, annotation)
+        else
+            null;
+        const default = if (parameter.default_type) |annotation|
+            try resolveTypeAnnotation(context, annotation)
+        else
+            null;
+        try context.type_store.updateTypeParameter(type_id, constraint, default);
+        result[index] = .{ .type_id = type_id, .constraint = constraint, .default = default };
+    }
+    return result;
+}
+
+fn instantiateGeneric(
+    context: *TypeResolutionContext,
+    generic: types.GenericDeclaration,
+    explicit: []const types.TypeId,
+    name: []const u8,
+    span: ast_mod.tokens.Span,
+) !types.TypeId {
+    if (explicit.len > generic.parameters.len) {
+        try emitTypeOperationOnce(context, "generic type has too many type arguments", name, span);
+        return context.type_store.builtins.unknown;
+    }
+    const arguments = try context.allocator.alloc(types.TypeId, generic.parameters.len);
+    @memcpy(arguments[0..explicit.len], explicit);
+    var index = explicit.len;
+    while (index < generic.parameters.len) : (index += 1) {
+        const default = generic.parameters[index].default orelse {
+            try emitTypeOperationOnce(context, "generic type is missing required type arguments", name, span);
+            return context.type_store.builtins.unknown;
+        };
+        arguments[index] = try context.type_store.substitute(
+            default,
+            generic.parameters[0..index],
+            arguments[0..index],
+        );
+    }
+    for (generic.parameters, arguments, 0..) |parameter, argument, parameter_index| {
+        const raw_constraint = parameter.constraint orelse continue;
+        const constraint = try context.type_store.substitute(
+            raw_constraint,
+            generic.parameters[0..parameter_index],
+            arguments[0..parameter_index],
+        );
+        if (!type_compat.isAssignableInStore(argument, constraint, context.type_store)) {
+            try emitTypeOperationOnce(context, "type argument does not satisfy generic constraint", name, span);
+            return context.type_store.builtins.unknown;
+        }
+    }
+    return context.type_store.instantiateGeneric(generic.identity, arguments);
+}
+
+fn resolveRemainingAnnotations(context: *TypeResolutionContext, bind: binder.BindResult) !void {
+    for (context.tree.nodes, 0..) |node, raw_id| {
+        const node_id: ast_mod.NodeId = @intCast(raw_id);
+        context.scope = scopeForNode(bind, node_id);
+        switch (node.data) {
+            .AsExpression => |expression| _ = try resolveTypeAnnotation(context, expression.type_annotation),
+            .SatisfiesExpression => |expression| _ = try resolveTypeAnnotation(context, expression.type_annotation),
+            .FunctionExpression => |function| if (function.return_type) |annotation| {
+                _ = try resolveTypeAnnotation(context, annotation);
+            },
+            .ArrowFunctionExpression => |function| if (function.return_type) |annotation| {
+                _ = try resolveTypeAnnotation(context, annotation);
+            },
+            .ClassField => |field| if (field.type_annotation) |annotation| {
+                _ = try resolveTypeAnnotation(context, annotation);
+            },
+            .ClassMethod => |method| if (method.return_type) |annotation| {
+                _ = try resolveTypeAnnotation(context, annotation);
+            },
+            .Parameter => |parameter| if (parameter.type_annotation) |annotation| {
+                _ = try resolveTypeAnnotation(context, annotation);
+            },
+            else => {},
+        }
+    }
+}
+
+fn scopeForNode(bind: binder.BindResult, node_id: ast_mod.NodeId) binder.ScopeId {
+    for (bind.node_scopes) |entry| {
+        if (entry.node == node_id) return entry.scope;
+    }
+    for (bind.symbols) |symbol| {
+        if (symbol.declaration == node_id) return symbol.scope;
+    }
+    return 0;
 }
 
 fn collectClassMembers(
@@ -275,7 +500,25 @@ fn collectClassMembers(
         .ClassDeclaration => |value| value,
         else => return,
     };
-    const identity = types.SemanticDeclId.init(context.current_module, symbol.declaration);
+    try collectClassBody(
+        context,
+        symbol.declaration,
+        declaration.members,
+        declaration.super_class,
+        classBodyScope(context.bind, symbol.declaration, declaration.members),
+        signatures,
+    );
+}
+
+fn collectClassBody(
+    context: *TypeResolutionContext,
+    declaration_id: ast_mod.NodeId,
+    members: []const ast_mod.NodeId,
+    super_class: ?ast_mod.NodeId,
+    class_scope: binder.ScopeId,
+    signatures: *std.ArrayList(FunctionSignatureEntry),
+) !void {
+    const identity = types.SemanticDeclId.init(context.current_module, declaration_id);
     const class_type = context.type_store.lookupClassSemanticType(identity) orelse return;
     var static_members: std.ArrayList(types.SemanticMember) = .empty;
     defer static_members.deinit(context.allocator);
@@ -283,14 +526,14 @@ fn collectClassMembers(
     defer instance_members.deinit(context.allocator);
     var constructor_signature: ?types.TypeId = null;
 
-    for (declaration.members) |member_id| {
+    for (members) |member_id| {
         const node = context.tree.node(member_id);
         switch (node.data) {
             .ClassField => |field| {
                 const member_symbol = findDeclarationSymbol(context.symbols, member_id, .field);
-                context.scope = if (member_symbol) |value| value.scope else symbol.scope;
+                context.scope = if (member_symbol) |value| value.scope else class_scope;
                 const type_id = if (field.type_annotation) |annotation|
-                    try resolveAnnotation(context, annotation)
+                    try resolveTypeAnnotation(context, annotation)
                 else
                     context.type_store.builtins.unknown;
                 const member: types.SemanticMember = .{
@@ -310,7 +553,7 @@ fn collectClassMembers(
                 const method_symbol = findDeclarationSymbol(context.symbols, member_id, .method);
                 const signature_id = try collectMethodSignature(
                     context,
-                    symbol.scope,
+                    class_scope,
                     method,
                     method_symbol,
                     if (method.kind == .constructor) class_type.instance_type else null,
@@ -325,9 +568,9 @@ fn collectClassMembers(
                         };
                         if (parameter.access == .none and !parameter.readonly) continue;
                         const parameter_symbol = findDeclarationSymbol(context.symbols, parameter_id, .parameter);
-                        context.scope = if (parameter_symbol) |value| value.scope else symbol.scope;
+                        context.scope = if (parameter_symbol) |value| value.scope else class_scope;
                         const parameter_type = if (parameter.type_annotation) |annotation|
-                            try resolveAnnotation(context, annotation)
+                            try resolveTypeAnnotation(context, annotation)
                         else
                             context.type_store.builtins.unknown;
                         try instance_members.append(context.allocator, .{
@@ -357,9 +600,9 @@ fn collectClassMembers(
     }
 
     var extends: ?types.TypeId = null;
-    if (declaration.super_class) |super_id| switch (context.tree.node(super_id).data) {
+    if (super_class) |super_id| switch (context.tree.node(super_id).data) {
         .Identifier => |identifier| {
-            context.scope = declarationTypeScope(context, symbol.declaration, symbol.scope);
+            context.scope = declarationTypeScope(context, declaration_id, class_scope);
             const resolution = try resolveTypeName(context, identifier.name);
             if (resolution == .resolved) extends = resolution.resolved.type_id;
         },
@@ -372,6 +615,14 @@ fn collectClassMembers(
         constructor_signature,
         .{ .extends = extends },
     );
+}
+
+fn classBodyScope(bind: binder.BindResult, declaration_id: ast_mod.NodeId, members: []const ast_mod.NodeId) binder.ScopeId {
+    if (members.len != 0) return scopeForNode(bind, members[0]);
+    for (bind.symbols) |symbol| {
+        if (symbol.declaration == declaration_id and symbol.kind == .class) return symbol.scope;
+    }
+    return scopeForNode(bind, declaration_id);
 }
 
 fn collectInterfaceMembers(context: *TypeResolutionContext, symbol: binder.Symbol) !void {
@@ -423,7 +674,7 @@ fn collectMethodSignature(
         const parameter_symbol = findDeclarationSymbol(context.symbols, parameter_id, .parameter);
         context.scope = if (parameter_symbol) |value| value.scope else fallback_scope;
         const type_id = if (parameter.type_annotation) |annotation|
-            try resolveAnnotation(context, annotation)
+            try resolveTypeAnnotation(context, annotation)
         else
             context.type_store.builtins.unknown;
         try parameters.append(context.allocator, .{
@@ -440,7 +691,7 @@ fn collectMethodSignature(
     var return_type = if (forced_return_type) |type_id|
         type_id
     else if (method.return_type) |annotation|
-        try resolveAnnotation(context, annotation)
+        try resolveTypeAnnotation(context, annotation)
     else
         context.type_store.builtins.unknown;
     return_type = try type_inference.wrapFunctionReturn(return_type, method.flags, context.type_store);
@@ -454,7 +705,8 @@ fn collectMethodSignature(
             .signature_id = signature_id,
             .resolved_return_type = return_type,
         });
-        try putDeclared(context.semantic_symbol_types, context.allocator, value.id, signature_id);
+        if (forced_return_type != null or method.return_type != null)
+            try putDeclared(context.semantic_symbol_types, context.allocator, value.id, signature_id);
     }
     return signature_id;
 }
@@ -468,7 +720,7 @@ fn visibility(access: ast_mod.AccessModifier) types.Visibility {
     };
 }
 
-fn resolveAnnotation(context: *TypeResolutionContext, annotation: ast_mod.TypeAnnotation) anyerror!types.TypeId {
+pub fn resolveTypeAnnotation(context: *TypeResolutionContext, annotation: ast_mod.TypeAnnotation) anyerror!types.TypeId {
     return resolveTypeNode(context, annotation.root, annotation.span, false);
 }
 
@@ -478,13 +730,16 @@ fn resolveTypeNode(
     annotation_span: ast_mod.tokens.Span,
     readonly: bool,
 ) anyerror!types.TypeId {
+    for (context.resolved_type_nodes.items) |entry| {
+        if (entry.node_id == node_id) return entry.type_id;
+    }
+
     const node = context.tree.typeNode(node_id);
-    return switch (node.data) {
+    const resolved = switch (node.data) {
         .Named => |named| blk: {
             const resolution = try resolveTypeName(context, named.name);
             break :blk switch (resolution) {
                 .resolved => |value| resolved: {
-                    for (named.type_arguments) |argument| _ = try resolveTypeNode(context, argument, annotation_span, false);
                     if (context.type_store.lookup(value.type_id)) |resolved_type| {
                         if (resolved_type.kind == .type_parameter) {
                             if (named.type_arguments.len != 0) {
@@ -494,12 +749,13 @@ fn resolveTypeNode(
                             break :resolved value.type_id;
                         }
                     }
-                    if (expectedTypeArgumentCount(context, value.declaration)) |expected| {
-                        if (expected != named.type_arguments.len) {
-                            try emitTypeOperationOnce(context, "generic type argument count does not match declaration", named.name, annotation_span);
-                            break :resolved context.type_store.builtins.unknown;
-                        }
-                    } else if (named.type_arguments.len != 0) {
+                    if (value.declaration) |identity| if (context.type_store.lookupGenericDeclaration(identity)) |generic| {
+                        const explicit = try context.allocator.alloc(types.TypeId, named.type_arguments.len);
+                        for (named.type_arguments, 0..) |argument, index|
+                            explicit[index] = try resolveTypeNode(context, argument, annotation_span, false);
+                        break :resolved try instantiateGeneric(context, generic, explicit, named.name, annotation_span);
+                    };
+                    if (named.type_arguments.len != 0) {
                         try emitTypeOperationOnce(context, "this type does not accept type arguments", named.name, annotation_span);
                         break :resolved context.type_store.builtins.unknown;
                     }
@@ -564,6 +820,11 @@ fn resolveTypeNode(
             break :blk try context.type_store.intersectionOf(members);
         },
     };
+    try context.resolved_type_nodes.append(context.allocator, .{
+        .node_id = node_id,
+        .type_id = resolved,
+    });
+    return resolved;
 }
 
 fn resolveLiteralType(context: *TypeResolutionContext, literal: ast_mod.LiteralType, span: ast_mod.tokens.Span) !types.TypeId {
@@ -596,100 +857,271 @@ fn resolveLiteralType(context: *TypeResolutionContext, literal: ast_mod.LiteralT
 
 fn resolveIndexedAccess(context: *TypeResolutionContext, object_type: types.TypeId, index_type: types.TypeId, span: ast_mod.tokens.Span) !types.TypeId {
     const index = context.type_store.lookup(index_type) orelse {
-        try emitTypeOperationOnce(context, "indexed access requires a known literal key", "index", span);
+        try emitTypeOperationOnce(context, "indexed access requires a known key", "index", span);
         return context.type_store.builtins.unknown;
     };
-    const key = switch (index.kind) {
+    return switch (index.kind) {
         .literal => |literal| switch (literal) {
-            .string => |value| value,
-            else => {
-                try emitTypeOperationOnce(context, "indexed access currently requires a string literal key", "index", span);
-                return context.type_store.builtins.unknown;
+            .string => |key| if (try lookupStringProperty(context, object_type, key)) |property|
+                propertyValueType(context, property)
+            else blk: {
+                try emitTypeOperationOnce(context, "property does not exist on indexed type", key, span);
+                break :blk context.type_store.builtins.unknown;
             },
+            .number => |value| resolveNumericIndex(context, object_type, value, span),
+            else => unsupportedIndex(context, "indexed access requires a string or number key", span),
         },
-        else => {
-            try emitTypeOperationOnce(context, "indexed access currently requires a string literal key", "index", span);
-            return context.type_store.builtins.unknown;
-        },
+        .primitive => |primitive| if (primitive == .number)
+            resolveNumericIndex(context, object_type, null, span)
+        else
+            unsupportedIndex(context, "indexed access requires a literal property key or number", span),
+        else => unsupportedIndex(context, "indexed access requires a literal property key or number", span),
     };
-    const properties = try objectProperties(context, object_type, span) orelse {
-        try emitTypeOperationOnce(context, "indexed access requires an object-like type", key, span);
-        return context.type_store.builtins.unknown;
-    };
-    for (properties) |property| if (std.mem.eql(u8, property.name, key)) return property.type_id;
-    try emitTypeOperationOnce(context, "property does not exist on indexed object type", key, span);
-    return context.type_store.builtins.unknown;
 }
 
 fn resolveKeyOf(context: *TypeResolutionContext, object_type: types.TypeId, span: ast_mod.tokens.Span) !types.TypeId {
-    const properties = try objectProperties(context, object_type, span) orelse {
+    var keys: std.ArrayList(types.TypeId) = .empty;
+    if (!try collectKeyTypes(context, object_type, &keys)) {
         try emitTypeOperationOnce(context, "keyof requires an object-like type", "keyof", span);
         return context.type_store.builtins.unknown;
-    };
-    const keys = try context.allocator.alloc(types.TypeId, properties.len);
-    for (properties, 0..) |property, index| keys[index] = try context.type_store.intern(.{ .literal = .{ .string = property.name } });
-    return context.type_store.unionOf(keys);
+    }
+    return context.type_store.unionOf(keys.items);
 }
 
-fn objectProperties(context: *TypeResolutionContext, type_id: types.TypeId, span: ast_mod.tokens.Span) !?[]const types.ObjectProperty {
+/// v1 operator policy: `keyof (A | B)` is the intersection of keys safe on
+/// every branch; `keyof (A & B)` is the union of keys contributed by branches.
+fn collectKeyTypes(context: *TypeResolutionContext, type_id: types.TypeId, keys: *std.ArrayList(types.TypeId)) anyerror!bool {
+    const ty = context.type_store.lookup(type_id) orelse return false;
+    switch (ty.kind) {
+        .object => |properties| for (properties) |property| try appendUniqueType(
+            context,
+            keys,
+            try context.type_store.intern(.{ .literal = .{ .string = property.name } }),
+        ),
+        .interface => |nominal| {
+            const semantic = context.type_store.lookupInterfaceSemanticType(nominal.identity) orelse return false;
+            for (semantic.members.members) |member| try appendUniqueType(
+                context,
+                keys,
+                try context.type_store.intern(.{ .literal = .{ .string = member.name } }),
+            );
+            for (semantic.inheritance.extends) |base| _ = try collectKeyTypes(context, base, keys);
+        },
+        .class => |nominal| {
+            const semantic = context.type_store.lookupClassSemanticType(nominal.identity) orelse return false;
+            for (semantic.instance_members.members) |member| try appendUniqueType(
+                context,
+                keys,
+                try context.type_store.intern(.{ .literal = .{ .string = member.name } }),
+            );
+            if (semantic.inheritance.extends) |base| _ = try collectKeyTypes(context, base, keys);
+        },
+        .applied_generic => |applied| {
+            const generic = context.type_store.lookupGenericDeclaration(applied.declaration) orelse return false;
+            _ = try collectKeyTypes(context, generic.template_type, keys);
+        },
+        .tuple => |tuple| for (tuple.elements, 0..) |_, index| try appendUniqueType(
+            context,
+            keys,
+            try context.type_store.intern(.{ .literal = .{ .number = @floatFromInt(index) } }),
+        ),
+        .array => try appendUniqueType(context, keys, context.type_store.builtins.number),
+        .intersection => |members| {
+            for (members) |member| _ = try collectKeyTypes(context, member, keys);
+        },
+        .union_type => |members| {
+            if (members.len == 0) return false;
+            var common: std.ArrayList(types.TypeId) = .empty;
+            if (!try collectKeyTypes(context, members[0], &common)) return false;
+            for (members[1..]) |member| {
+                var branch: std.ArrayList(types.TypeId) = .empty;
+                if (!try collectKeyTypes(context, member, &branch)) return false;
+                var index: usize = 0;
+                while (index < common.items.len) {
+                    if (containsType(branch.items, common.items[index])) {
+                        index += 1;
+                    } else {
+                        _ = common.orderedRemove(index);
+                    }
+                }
+            }
+            for (common.items) |key| try appendUniqueType(context, keys, key);
+        },
+        else => return false,
+    }
+    return true;
+}
+
+fn appendUniqueType(context: *TypeResolutionContext, values: *std.ArrayList(types.TypeId), value: types.TypeId) !void {
+    if (!containsType(values.items, value)) try values.append(context.allocator, value);
+}
+
+fn containsType(values: []const types.TypeId, value: types.TypeId) bool {
+    for (values) |candidate| if (candidate == value) return true;
+    return false;
+}
+
+fn lookupStringProperty(context: *TypeResolutionContext, type_id: types.TypeId, key: []const u8) anyerror!?types.ObjectProperty {
     const ty = context.type_store.lookup(type_id) orelse return null;
     return switch (ty.kind) {
-        .object => |properties| properties,
-        .interface => |nominal| blk: {
-            if (nominal.identity.module_id != context.current_module) break :blk null;
-            const declaration = switch (context.tree.node(nominal.identity.declaration_id).data) {
-                .InterfaceDeclaration => |value| value,
-                else => break :blk null,
+        .object => |properties| findObjectProperty(properties, key),
+        .interface => |nominal| lookupInterfaceProperty(context, nominal.identity, key),
+        .class => |nominal| lookupClassProperty(context, nominal.identity, key),
+        .applied_generic => |applied| blk: {
+            const generic = context.type_store.lookupGenericDeclaration(applied.declaration) orelse break :blk null;
+            const property = try lookupStringProperty(context, generic.template_type, key) orelse break :blk null;
+            break :blk .{
+                .name = property.name,
+                .type_id = try context.type_store.substitute(property.type_id, generic.parameters, applied.arguments),
+                .optional = property.optional,
+                .readonly = property.readonly,
             };
-            const old_scope = context.scope;
-            defer context.scope = old_scope;
-            context.scope = declarationTypeScope(context, nominal.identity.declaration_id, 0);
-            const body_type = try resolveTypeNode(context, declaration.body, span, false);
-            const body = context.type_store.lookup(body_type) orelse break :blk null;
-            break :blk switch (body.kind) {
-                .object => |properties| properties,
-                else => null,
+        },
+        .intersection => |members| blk: {
+            var values: std.ArrayList(types.TypeId) = .empty;
+            var optional = false;
+            var readonly = true;
+            for (members) |member| if (try lookupStringProperty(context, member, key)) |property| {
+                try values.append(context.allocator, property.type_id);
+                optional = optional or property.optional;
+                readonly = readonly and property.readonly;
             };
+            if (values.items.len == 0) break :blk null;
+            break :blk .{ .name = key, .type_id = try context.type_store.unionOf(values.items), .optional = optional, .readonly = readonly };
+        },
+        .union_type => |members| blk: {
+            var values: std.ArrayList(types.TypeId) = .empty;
+            var optional = false;
+            var readonly = true;
+            for (members) |member| {
+                const property = try lookupStringProperty(context, member, key) orelse break :blk null;
+                try values.append(context.allocator, property.type_id);
+                optional = optional or property.optional;
+                readonly = readonly and property.readonly;
+            }
+            break :blk .{ .name = key, .type_id = try context.type_store.unionOf(values.items), .optional = optional, .readonly = readonly };
         },
         else => null,
     };
 }
 
+fn findObjectProperty(properties: []const types.ObjectProperty, key: []const u8) ?types.ObjectProperty {
+    for (properties) |property| if (std.mem.eql(u8, property.name, key)) return property;
+    return null;
+}
+
+fn semanticProperty(member: types.SemanticMember) types.ObjectProperty {
+    return .{ .name = member.name, .type_id = member.type_id, .optional = member.optional, .readonly = member.readonly };
+}
+
+fn lookupInterfaceProperty(context: *TypeResolutionContext, identity: types.SemanticDeclId, key: []const u8) anyerror!?types.ObjectProperty {
+    const semantic = context.type_store.lookupInterfaceSemanticType(identity) orelse return null;
+    for (semantic.members.members) |member| if (std.mem.eql(u8, member.name, key)) return semanticProperty(member);
+    for (semantic.inheritance.extends) |base| if (try lookupStringProperty(context, base, key)) |property| return property;
+    return null;
+}
+
+fn lookupClassProperty(context: *TypeResolutionContext, identity: types.SemanticDeclId, key: []const u8) anyerror!?types.ObjectProperty {
+    const semantic = context.type_store.lookupClassSemanticType(identity) orelse return null;
+    for (semantic.instance_members.members) |member| if (std.mem.eql(u8, member.name, key)) return semanticProperty(member);
+    if (semantic.inheritance.extends) |base| return lookupStringProperty(context, base, key);
+    return null;
+}
+
+fn propertyValueType(context: *TypeResolutionContext, property: types.ObjectProperty) !types.TypeId {
+    if (!property.optional) return property.type_id;
+    return context.type_store.unionOf(&.{ property.type_id, context.type_store.builtins.undefined });
+}
+
+fn unsupportedIndex(context: *TypeResolutionContext, message: []const u8, span: ast_mod.tokens.Span) !types.TypeId {
+    try emitTypeOperationOnce(context, message, "index", span);
+    return context.type_store.builtins.unknown;
+}
+
+fn resolveNumericIndex(context: *TypeResolutionContext, object_type: types.TypeId, value: ?f64, span: ast_mod.tokens.Span) anyerror!types.TypeId {
+    const ty = context.type_store.lookup(object_type) orelse return unsupportedIndex(context, "numeric index requires an array or tuple", span);
+    return switch (ty.kind) {
+        .array => |array| array.element_type,
+        .tuple => |tuple| blk: {
+            if (value == null) {
+                var members: std.ArrayList(types.TypeId) = .empty;
+                for (tuple.elements) |element| try members.append(context.allocator, element.type_id);
+                break :blk try context.type_store.unionOf(members.items);
+            }
+            if (!std.math.isFinite(value.?) or value.? < 0 or @floor(value.?) != value.? or
+                value.? > @as(f64, @floatFromInt(std.math.maxInt(usize))))
+            {
+                try emitTypeOperationOnce(context, "tuple index is outside its declared elements", "index", span);
+                break :blk context.type_store.builtins.unknown;
+            }
+            const index: usize = @intFromFloat(value.?);
+            if (index >= tuple.elements.len) {
+                try emitTypeOperationOnce(context, "tuple index is outside its declared elements", "index", span);
+                break :blk context.type_store.builtins.unknown;
+            }
+            const element = tuple.elements[index];
+            break :blk if (element.optional)
+                try context.type_store.unionOf(&.{ element.type_id, context.type_store.builtins.undefined })
+            else
+                element.type_id;
+        },
+        .union_type => |members| blk: {
+            var results: std.ArrayList(types.TypeId) = .empty;
+            for (members) |member| {
+                const result = try resolveNumericIndex(context, member, value, span);
+                if (result == context.type_store.builtins.unknown) break :blk result;
+                try results.append(context.allocator, result);
+            }
+            break :blk try context.type_store.unionOf(results.items);
+        },
+        .intersection => |members| blk: {
+            var results: std.ArrayList(types.TypeId) = .empty;
+            for (members) |member| {
+                const member_ty = context.type_store.lookup(member) orelse continue;
+                if (member_ty.kind != .array and member_ty.kind != .tuple) continue;
+                try results.append(context.allocator, try resolveNumericIndex(context, member, value, span));
+            }
+            if (results.items.len == 0) break :blk try unsupportedIndex(context, "numeric index requires an array or tuple", span);
+            break :blk try context.type_store.unionOf(results.items);
+        },
+        else => unsupportedIndex(context, "numeric index requires an array or tuple", span),
+    };
+}
+
 fn resolveTypeQuery(context: *TypeResolutionContext, name: []const u8, span: ast_mod.tokens.Span) !types.TypeId {
+    if (std.mem.eql(u8, name, "<unsupported-import>")) {
+        try emitTypeOperationOnce(context, "typeof import() is outside the supported type-query subset", name, span);
+        return context.type_store.builtins.unknown;
+    }
     const symbol = findVisibleSymbol(context, name, .value) orelse {
         try emitTypeOperationOnce(context, "type query cannot find value", name, span);
         return context.type_store.builtins.unknown;
+    };
+    if (symbol.kind == .import) if (findImportedType(context, name, symbol.id)) |imported| {
+        if (!imported.placeholder) return imported.type_id;
+    };
+    for (context.value_symbol_types) |entry| if (entry.symbol_id == symbol.id) {
+        if (entry.effective()) |type_id| return type_id;
+        break;
     };
     if (declaredType(context.semantic_symbol_types.items, symbol.id)) |type_id| return type_id;
     const declaration = switch (context.tree.node(symbol.declaration).data) {
         .VariableDeclarator => |value| value,
         else => {
-            try emitTypeOperationOnce(context, "type query currently requires an explicitly annotated binding", name, span);
+            try emitTypeOperationOnce(context, "type query target has no resolved value type", name, span);
             return context.type_store.builtins.unknown;
         },
     };
     const annotation = declaration.type_annotation orelse {
-        try emitTypeOperationOnce(context, "type query currently requires an explicitly annotated binding", name, span);
+        try emitTypeOperationOnce(context, "type query target has no resolved value type", name, span);
         return context.type_store.builtins.unknown;
     };
     const old_scope = context.scope;
     defer context.scope = old_scope;
     context.scope = symbol.scope;
-    const type_id = try resolveAnnotation(context, annotation);
+    const type_id = try resolveTypeAnnotation(context, annotation);
     try putDeclared(context.semantic_symbol_types, context.allocator, symbol.id, type_id);
     return type_id;
-}
-
-fn expectedTypeArgumentCount(context: *const TypeResolutionContext, declaration_id: ?types.SemanticDeclId) ?usize {
-    const identity = declaration_id orelse return 0;
-    if (identity.module_id != context.current_module) return null;
-    return switch (context.tree.node(identity.declaration_id).data) {
-        .TypeAliasDeclaration => |value| value.type_parameters.len,
-        .InterfaceDeclaration => |value| value.type_parameters.len,
-        .ClassDeclaration => |value| value.type_parameters.len,
-        .FunctionDeclaration => |value| value.type_parameters.len,
-        else => 0,
-    };
 }
 
 pub fn resolveTypeName(context: *TypeResolutionContext, name: []const u8) anyerror!TypeNameResolution {
@@ -732,9 +1164,12 @@ fn ensureSymbolType(context: *TypeResolutionContext, symbol_id: binder.SymbolId)
     const old_scope = context.scope;
     defer context.scope = old_scope;
     context.scope = declarationTypeScope(context, symbol.declaration, symbol.scope);
-    const type_id = try resolveAnnotation(context, declaration.type_annotation);
+    const type_id = try resolveTypeAnnotation(context, declaration.type_annotation);
     context.alias_states[index] = 2;
     try putDeclared(context.semantic_symbol_types, context.allocator, symbol.id, type_id);
+    const identity = types.SemanticDeclId.init(context.current_module, symbol.declaration);
+    if (context.type_store.lookupGenericDeclaration(identity)) |generic|
+        try context.type_store.updateGenericDeclaration(identity, type_id, generic.parameters);
     return type_id;
 }
 
@@ -843,5 +1278,11 @@ fn findScope(scopes: []const binder.Scope, id: binder.ScopeId) ?binder.Scope {
 
 fn findDeclarationSymbol(symbols: []const binder.Symbol, declaration: ast_mod.NodeId, kind: binder.SymbolKind) ?binder.Symbol {
     for (symbols) |symbol| if (symbol.declaration == declaration and symbol.kind == kind) return symbol;
+    return null;
+}
+
+fn findTypeParameterSymbol(symbols: []const binder.Symbol, declaration: ast_mod.NodeId, name: []const u8) ?binder.Symbol {
+    for (symbols) |symbol| if (symbol.declaration == declaration and symbol.kind == .type_parameter and
+        symbol.namespace == .type and std.mem.eql(u8, symbol.name, name)) return symbol;
     return null;
 }

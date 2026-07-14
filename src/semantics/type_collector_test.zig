@@ -19,6 +19,11 @@ fn collectedType(collected: type_collector.TypeInfoCollectResult, symbol_id: u32
     return null;
 }
 
+fn containsType(items: []const types.TypeId, expected: types.TypeId) bool {
+    for (items) |item| if (item == expected) return true;
+    return false;
+}
+
 test "variable declared type is collected from source annotation" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -476,7 +481,10 @@ test "Goal 140 exhaustively lowers supported type-node variants" {
     );
     const keys = type_store.lookup(collectedType(collected, symbolByName(result, "Keys", .type).?.id).?).?.kind.union_type;
     try testing.expectEqual(@as(usize, 2), keys.len);
-    try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "Boxed", .type).?.id).?).?.kind == .object);
+    const boxed = collectedType(collected, symbolByName(result, "Boxed", .type).?.id).?;
+    try testing.expect(type_store.lookup(boxed).?.kind == .applied_generic);
+    const boxed_target = try type_store.resolveAppliedTarget(boxed);
+    try testing.expectEqual(test_builtins.number, type_store.lookup(boxed_target).?.kind.object[0].type_id);
     try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "ArrayShape", .type).?.id).?).?.kind == .array);
     try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "TupleShape", .type).?.id).?).?.kind.tuple.readonly);
     try testing.expect(type_store.lookup(collectedType(collected, symbolByName(result, "UnionShape", .type).?.id).?).?.kind == .union_type);
@@ -522,6 +530,107 @@ test "Goal 140 invalid type operators diagnose instead of silently becoming unkn
             collectedType(collected, symbolByName(result, name, .type).?.id).?,
         );
     }
+}
+
+test "Goal 152 generic aliases apply defaults constraints indexed access and recursion" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\type Box<T = string> = { value: T };
+        \\type NumberBox = Box<number>;
+        \\type NumberBoxAgain = Box<number>;
+        \\type StringBox = Box;
+        \\type Value = NumberBox["value"];
+        \\type TextOnly<T extends string> = { value: T };
+        \\type Good = TextOnly<string>;
+        \\type Bad = TextOnly<number>;
+        \\type Node<T> = { value: T; next?: Node<T> };
+        \\type NumberNode = Node<number>;
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+
+    try testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try testing.expectEqual(@as(usize, 1), collected.diagnostics.len);
+    try testing.expect(std.mem.indexOf(u8, collected.diagnostics[0].message, "constraint") != null);
+    const number_box = collectedType(collected, symbolByName(result, "NumberBox", .type).?.id).?;
+    const repeated = collectedType(collected, symbolByName(result, "NumberBoxAgain", .type).?.id).?;
+    const string_box = collectedType(collected, symbolByName(result, "StringBox", .type).?.id).?;
+    try testing.expectEqual(number_box, repeated);
+    try testing.expect(number_box != string_box);
+    try testing.expectEqual(test_builtins.number, collectedType(collected, symbolByName(result, "Value", .type).?.id).?);
+    try testing.expectEqual(test_builtins.unknown, collectedType(collected, symbolByName(result, "Bad", .type).?.id).?);
+    const recursive = collectedType(collected, symbolByName(result, "NumberNode", .type).?.id).?;
+    const recursive_target = type_store.lookup(try type_store.resolveAppliedTarget(recursive)).?.kind.object;
+    try testing.expectEqual(test_builtins.number, recursive_target[0].type_id);
+    try testing.expect(type_store.lookup(recursive_target[1].type_id).?.kind == .applied_generic);
+}
+
+test "Goal 153 type operators use canonical local inherited and generic shapes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\interface Base { readonly id: number }
+        \\interface User extends Base { name?: string }
+        \\class Parent { base: boolean; }
+        \\class Child extends Parent { count: number; }
+        \\type Box<T> = { readonly value?: T };
+        \\type Name = User["name"];
+        \\type Id = User["id"];
+        \\type UserKeys = keyof User;
+        \\type ChildBase = Child["base"];
+        \\type ChildKeys = keyof Child;
+        \\type BoxValue = Box<number>["value"];
+        \\type TupleValue = [string, number][1];
+        \\type ArrayValue = string[][number];
+        \\type SharedKeys = keyof ({ onlyA: string; shared: number } | { onlyB: boolean; shared: number });
+        \\type CombinedKeys = keyof ({ left: string } & { right: number });
+        \\type Invalid = User["missing"];
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+
+    try testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try testing.expectEqual(@as(usize, 1), collected.diagnostics.len);
+    try testing.expectEqualStrings("property does not exist on indexed type", collected.diagnostics[0].message);
+    const undefined_or_string = try type_store.unionOf(&.{ test_builtins.string, test_builtins.undefined });
+    const undefined_or_number = try type_store.unionOf(&.{ test_builtins.number, test_builtins.undefined });
+    try testing.expectEqual(undefined_or_string, collectedType(collected, symbolByName(result, "Name", .type).?.id).?);
+    try testing.expectEqual(test_builtins.number, collectedType(collected, symbolByName(result, "Id", .type).?.id).?);
+    try testing.expectEqual(test_builtins.boolean, collectedType(collected, symbolByName(result, "ChildBase", .type).?.id).?);
+    try testing.expectEqual(undefined_or_number, collectedType(collected, symbolByName(result, "BoxValue", .type).?.id).?);
+    try testing.expectEqual(test_builtins.number, collectedType(collected, symbolByName(result, "TupleValue", .type).?.id).?);
+    try testing.expectEqual(test_builtins.string, collectedType(collected, symbolByName(result, "ArrayValue", .type).?.id).?);
+
+    const id_key = try type_store.intern(.{ .literal = .{ .string = "id" } });
+    const name_key = try type_store.intern(.{ .literal = .{ .string = "name" } });
+    const base_key = try type_store.intern(.{ .literal = .{ .string = "base" } });
+    const count_key = try type_store.intern(.{ .literal = .{ .string = "count" } });
+    const shared_key = try type_store.intern(.{ .literal = .{ .string = "shared" } });
+    const left_key = try type_store.intern(.{ .literal = .{ .string = "left" } });
+    const right_key = try type_store.intern(.{ .literal = .{ .string = "right" } });
+    const user_keys = type_store.lookup(collectedType(collected, symbolByName(result, "UserKeys", .type).?.id).?).?.kind.union_type;
+    try testing.expect(containsType(user_keys, id_key));
+    try testing.expect(containsType(user_keys, name_key));
+    const child_keys = type_store.lookup(collectedType(collected, symbolByName(result, "ChildKeys", .type).?.id).?).?.kind.union_type;
+    try testing.expect(containsType(child_keys, base_key));
+    try testing.expect(containsType(child_keys, count_key));
+    try testing.expectEqual(shared_key, collectedType(collected, symbolByName(result, "SharedKeys", .type).?.id).?);
+    const combined_keys = type_store.lookup(collectedType(collected, symbolByName(result, "CombinedKeys", .type).?.id).?).?.kind.union_type;
+    try testing.expect(containsType(combined_keys, left_key));
+    try testing.expect(containsType(combined_keys, right_key));
 }
 
 test "Goal 142 collects class and interface member foundations" {
