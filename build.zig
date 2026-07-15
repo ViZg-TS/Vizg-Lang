@@ -367,7 +367,7 @@ pub fn build(b: *std.Build) void {
         "-c",
         \\set -eu
         \\archive="$1"
-        \\actual="$(nm -g --defined-only "$archive" | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^vizg_/ { print $3 }' | sort -u)"
+        \\actual="$(nm -g --defined-only "$archive" | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^vizg_/ { print $3 }' | LC_ALL=C sort -u)"
         \\expected='vizg_abi_version
         \\vizg_project_add_source
         \\vizg_project_create
@@ -390,7 +390,7 @@ pub fn build(b: *std.Build) void {
         \\    printf '%s\n' "$actual" >&2
         \\    exit 1
         \\fi
-        \\imports="$(nm -g --undefined-only "$archive" | awk 'NF && $NF !~ /:$/ { print $NF }' | sort -u)"
+        \\imports="$(nm -g --undefined-only "$archive" | awk 'NF && $NF !~ /:$/ { print $NF }' | LC_ALL=C sort -u)"
         \\expected_imports="$2"
         \\if [ "$imports" != "$expected_imports" ]; then
         \\    echo "unexpected native archive imports:" >&2
