@@ -1,10 +1,10 @@
 # Portable Core And Official ABI v1 — Local Final Audit Checklist
 
-This document accompanies the Goals 189–196 patch series. The patches were
-constructed and statically reviewed, but the Zig build/test matrix was not run
-in the patch-generation environment. ABI v1 remains a release candidate and
-HIR planning remains blocked until the repository owner completes this checklist
-locally with no unresolved in-scope finding.
+This is the historical pre-validation checklist for Goals 189–196. Goal 202
+subsequently repeated the audit from source, fixed every confirmed finding, ran
+the complete local validation and symbol matrix, froze ABI v1, and authorized
+HIR planning. The authoritative closure record is
+[`FINAL_AUDIT.md`](FINAL_AUDIT.md).
 
 ## Scope
 
@@ -96,9 +96,16 @@ ABI v1 frozen: yes
 HIR planning authorized: yes
 ```
 
-Until this record is completed, the correct status is:
+This checklist's former pre-validation status was:
 
 ```txt
 ABI v1 release candidate
 HIR gate closed
+```
+
+That status is superseded by Goal 202. The current status is:
+
+```txt
+ABI v1 frozen
+HIR planning authorized
 ```
