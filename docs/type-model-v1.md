@@ -38,10 +38,12 @@ The initial type universe starts as a small closed set:
 
 The implemented model also includes `symbol`, `bigint`, objects, tuples, arrays, unions, intersections, callable types, nominal declarations, and type parameters. Decorator and namespace syntax remains outside the supported frontend subset.
 
-Class, interface, and enum declarations use `SemanticDeclId`, the pair
-`(module_id, declaration_id)`. A raw AST `NodeId` is only local to one module and
-is never a semantic declaration key. TypeStore maps, cloning, compatibility,
-debug output, and project import/export links preserve this qualified identity.
+Source class, interface, and enum declarations use `SemanticDeclId`, the pair
+`(module_id, declaration_id)`. Descriptor-backed external declarations use the
+same shape with a distinct external-domain marker, so equal numeric IDs cannot
+collide. A raw AST `NodeId` is only local to one module and is never a semantic
+declaration key. TypeStore maps, cloning, compatibility, and project
+import/export links preserve this qualified identity.
 
 A class declaration creates two distinct types: its constructor value and its
 instance. The constructor points to the instance, while the authoritative class
@@ -313,16 +315,23 @@ LinkedImport {
 Implemented data flow:
 
 ```txt
-ModuleGraph owns FrontendResult[] and LinkedImport[]
+ModuleGraph owns FrontendResult[], LinkedImport[], and external descriptors
   -> analyzeModuleGraph consumes those snapshots without reparsing
-  -> collect direct export identities in one shared TypeStore
-  -> propagate named/default/namespace/type-only imports and re-exports
-  -> iterate to a bounded fixed point for cycles
+  -> collect direct and descriptor-backed identities in one shared TypeStore
+  -> propagate named/default/namespace/type-only imports and re-exports in one
+     bounded fixed point for cycles
   -> run the checker over propagated TypeInfo
   -> return one owned, partially inspectable ProjectSemanticResult
 ```
 
-Aliases and re-exports preserve the target's qualified declaration identity. Named and aliased imports used in annotations reuse the exported target `TypeId`; declaration-level type-only imports do not create runtime bindings. Default imports resolve the default export. External, missing, and incomplete cyclic imports receive stable `unknown` placeholders, so collection terminates while known declarations remain available and the project is marked partial.
+Aliases and re-exports preserve the target's qualified declaration identity. Named and aliased imports used in annotations reuse the exported target `TypeId`; declaration-level type-only imports do not create runtime bindings. Default imports resolve the default export. Missing external members and incomplete cyclic imports receive stable `unknown` placeholders, so collection terminates while known declarations remain available and the project is marked partial.
+
+Descriptor-backed external exports have their declared portable metadata
+materialized before propagation. Value-only
+descriptors participate only in value lookup, type-only descriptors participate
+only in type lookup, and combined object descriptors provide paired nominal
+class constructor and instance identities. External re-exports propagate those
+same canonical identities to downstream consumers before checking.
 
 Namespace-import policy for v1 is intentionally narrow: runtime namespace objects contain value exports only. A type-only namespace import has no runtime binding, and qualified namespace type-member lookup is deferred; v1 does not merge value and type namespaces.
 
@@ -412,7 +421,7 @@ The parser captures the annotation syntax and the binder creates the parameter s
 
 ### 5. How do cross-file imported functions/values expose types?
 
-Project semantics walks the linker identity from file A to module B, propagates B's canonical type and qualified identity into A's import symbol, then refreshes dependent inference to a bounded fixed point. Namespace imports expose runtime exports as an object type. Default, named, type-only, and re-export forms preserve their target identity. Missing, external, and incomplete cyclic links stay inspectable with `unknown`.
+Project semantics walks the linker identity from file A to module B, propagates B's canonical type and qualified identity into A's import symbol, then refreshes dependent inference to a bounded fixed point. Namespace imports expose runtime exports as an object type. Default, named, type-only, and re-export forms preserve their target identity. Descriptor-backed external links propagate their declared canonical metadata; missing and incomplete cyclic links stay inspectable with `unknown`.
 
 ### 6. What diagnostics are reserved for Type Checker v1?
 

@@ -8,11 +8,29 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
-- Froze official ABI v1 after the clean Goal 202 final audit: 439 tests and the
-  validation, cross-target, native/Android, layout, symbol, hostile-host,
-  allocation-failure, and import-free freestanding WASM gates pass with no
-  unresolved in-scope finding. HIR planning is now authorized against this
-  frozen contract.
+- Capped every source at the public `VIZG_MAX_SOURCE_LENGTH` (`UINT32_MAX`)
+  representation boundary, rejecting oversized configuration and source
+  descriptors before pointer access, copying, or scanning while keeping
+  aggregate byte accounting overflow-safe.
+- Made official ABI result summaries cover every canonical error phase with an
+  explicit project-error flag and an `is_partial` OR across syntax, semantic,
+  project, and module-host failures. Parser recursion now reports its own exact
+  limit kind, and non-limit project calls clear the previous limit category.
+- Enforced semantic-type and diagnostic limits from the first project module,
+  bounded diagnostic collection before retained allocation, and made
+  over-depth source responses transactional so rejected responses leave the
+  pending request and graph unchanged.
+- Moved external-module metadata into the project semantic graph before import
+  and re-export propagation. External value/type identities now participate in
+  the single bounded fixed point and reach the checker, so value-only names are
+  rejected as types, combined class exports retain constructor/instance
+  identities, and downstream external re-exports preserve canonical `TypeId`s.
+- Froze official ABI v1 only after the repeated Goal 207 audit closed Goals
+  203–206, fixed the newly found oversized-configuration limit-kind lifecycle
+  gap with a regression, and passed 448 tests plus the validation,
+  cross-target, native/Android, layout, symbol, hostile-host,
+  allocation-failure, and import-free freestanding WASM gates. HIR planning is
+  now authorized against this frozen contract.
 - Hardened scanner/parser boundaries found by the final audit: `\\0` is accepted
   only as the complete legacy-free null escape, parser depth limits cover all
   recursive expression/type paths, disabled recovery stops after the first

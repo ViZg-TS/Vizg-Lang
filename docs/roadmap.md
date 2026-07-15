@@ -4,7 +4,7 @@ This roadmap separates implemented frontend work from planned layers. It is not 
 
 ## Closed Foundation: Portable Core And Official ABI v1
 
-Goals 189–202 are closed. The memory-first host-driven API uses
+Goals 189–207 are closed. The memory-first host-driven API uses
 `VIZG_ABI_VERSION = 1`; earlier unpublished surfaces were deleted without
 compatibility shims. The final repeated audit and exact command evidence are in
 [`FINAL_AUDIT.md`](FINAL_AUDIT.md).
@@ -16,7 +16,7 @@ The responsibility split is fixed:
 - Concrete filesystem hosts in this repository are validation fixtures only.
 - The project ABI is one-shot; changed source requires a new project.
 
-ABI v1 is frozen. Goal 202 passed the complete local validation matrix with no
+ABI v1 is frozen. Goal 207 passed the repeated complete local validation matrix with no
 unresolved in-scope finding, so HIR planning is authorized. HIR remains
 unimplemented and cannot retroactively change the frozen ABI v1 contract.
 
@@ -68,17 +68,19 @@ Planned, not implemented:
 - Prepare for interpretation, analysis, or code generation.
 - Reserve `VZG7xxx` diagnostics for lowering errors.
 
-### HIR Entry Gate — Opened By Goal 202
+### HIR Entry Gate — Opened By Goal 207
 
-Goal 202 closed the gate after the applied patch series passed the complete
-local command matrix and repeated audit. HIR planning may begin from the frozen
-portable project and ABI v1 contracts. The verified conditions and limitations
-are recorded in [`FINAL_AUDIT.md`](FINAL_AUDIT.md).
+Goal 207 closed the gate only after Goals 203–206 corrected external semantic
+propagation, pre-growth limits, summary/limit consistency, and oversized-source
+safety, and the resulting tree passed the repeated complete local command
+matrix. HIR planning may begin from the frozen portable project and ABI v1
+contracts. The verified conditions and limitations are recorded in
+[`FINAL_AUDIT.md`](FINAL_AUDIT.md).
 
 ### Superseded portable-core closure records
 
 The earlier Goal 187/188 closure records and the Goals 189–196 pre-validation
-checklist are superseded by Goal 202's
+checklist and the premature Goal 202 freeze claim are superseded by Goal 207's
 [`FINAL_AUDIT.md`](FINAL_AUDIT.md). They must not be used as current freeze
 evidence.
 

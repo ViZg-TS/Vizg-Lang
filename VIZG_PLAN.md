@@ -3,9 +3,9 @@
 *Created: 2026-07-10 — Informed by V8 engine architecture, JavaScriptCore Inspector protocol, TypeScript compiler design.*
 
 > **Historical and non-executable.** This document is retained only as design
-> context. Goals 189–202 closed the portable project API and official ABI v1.
+> context. Goals 189–207 closed the portable project API and official ABI v1.
 > The unpublished prototype ABI was removed and receives no compatibility
-> support. Goal 202 passed the complete local gate matrix with no unresolved
+> support. Goal 207 passed the repeated complete local gate matrix with no unresolved
 > in-scope finding, froze ABI v1, and authorized HIR planning. See
 > `docs/FINAL_AUDIT.md` for the current evidence.
 
@@ -63,9 +63,9 @@ Vizg maps this to its existing analysis layers since vizg is **analysis-only** (
 | `src/semantics/type_inference.zig` | Canonical Expression Inference | Infers expressions, calls, access, operators, aggregates, and function returns into the owned semantic result | ✅ Complete for supported syntax |
 | `src/semantics/dataflow.zig` | CFG Dataflow | Computes deterministic block facts and narrowing program points | ✅ Complete for supported syntax |
 | `src/project/contracts.zig` | Host Contract | Opaque module/request identities and source/external response descriptors | ✅ Implemented |
-| `src/project/session.zig` | Project Session | One-shot host-driven module ingestion, graph construction, and semantic completion | ✅ Implemented; Goal 202 audit closed |
-| `src/project/state_machine.zig` | Request State Machine | Deterministic pull-based module requests and host responses | ✅ Implemented; Goal 202 audit closed |
-| `src/project/graph.zig` | Project Graph | Host-resolved source/external edges and discovered module metadata | ✅ Implemented; Goal 202 audit closed |
+| `src/project/session.zig` | Project Session | One-shot host-driven module ingestion, graph construction, and semantic completion | ✅ Implemented; Goal 207 audit closed |
+| `src/project/state_machine.zig` | Request State Machine | Deterministic pull-based module requests and host responses | ✅ Implemented; Goal 207 audit closed |
+| `src/project/graph.zig` | Project Graph | Host-resolved source/external edges and discovered module metadata | ✅ Implemented; Goal 207 audit closed |
 | `src/modules/linker.zig` | Cross-file Linking | Named/default/namespace import linking to host-supplied module identities | ✅ Implemented for supported syntax |
 | `test/support/fs_validation_host.zig` | Validation Fixture | Test/reference filesystem provider used only to exercise the host API | 🧪 Test-only; not ViZG module resolution |
 
@@ -402,7 +402,7 @@ Document in `docs/protocol.md`:
 ## Implementation Order & Dependencies
 
 ```txt
-Goals 189–202
+Goals 189–207
 ├── complete result ABI and runtime version query
 ├── harden host/WASM memory validation
 ├── make project updates transactional
@@ -413,7 +413,7 @@ Goals 189–202
 └── repeat the complete local audit and freeze ABI v1
 
 HIR
-└── planning authorized after Goal 202 passed every local gate
+└── planning authorized after Goal 207 passed every repeated local gate
 
 Runtime module resolution
 └── belongs to a separate runtime/consumer layer and is not a ViZG phase
@@ -421,8 +421,8 @@ Runtime module resolution
 
 ### Required order
 
-1. Goals 189–202 are complete and validated in strict sequence.
-2. Official ABI v1 is frozen by the clean Goal 202 audit.
+1. Goals 189–207 are complete and validated in strict sequence.
+2. Official ABI v1 is frozen by the repeated clean Goal 207 audit.
 3. HIR planning is authorized after that freeze.
 4. Build filesystem/package/URL resolution in the runtime or consumer that
    implements the module-provider contract.
@@ -449,7 +449,7 @@ They must not encode filesystem, package-manager, URL, or path-resolution policy
 
 ## Open Decisions / Risks
 
-1. **HIR representation:** choose the first HIR shape from the frozen Goal 202
+1. **HIR representation:** choose the first HIR shape from the frozen Goal 207
    foundation. It must consume the stable semantic contract rather than
    compensate for ABI or module-provider defects.
 

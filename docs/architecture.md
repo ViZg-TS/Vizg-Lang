@@ -97,8 +97,11 @@ result remain borrowed from the project until destruction.
 Finalization computes the closure reachable from submitted roots through
 resolved local import edges. Only that closure is validated and retained in the
 final module, edge, diagnostic, import, and export views; unreachable
-pre-supplied source is excluded. The summary is partial when either reachable
-module-host work failed or semantic analysis produced a partial result.
+pre-supplied source is excluded. Summary flags are computed from canonical
+error diagnostics by phase: scanner/parser, binder/resolver/types/checker,
+project, and module-host errors populate the syntax, semantic, project, and
+module-failure groups respectively. The summary is partial when any group is
+set, so every public error diagnostic is represented.
 
 Semantic import and re-export rows retain their exact graph edge index. Local
 and external identities occupy separate fields, and every optional module,
@@ -117,11 +120,22 @@ return `INVALID_ARGUMENT` before project state or host output is mutated.
 Configured project-owned limits cover per-module and aggregate source bytes,
 modules, requests, edges, diagnostics, graph depth, and semantic types. Each
 owner checks its bound before copying retained data or growing a collection.
+The single-source representation ceiling is `VIZG_MAX_SOURCE_LENGTH`
+(`UINT32_MAX`) because source offsets, span endpoints, lines, and columns are
+stable `uint32_t` values. Configuration cannot raise the per-source limit above
+that ceiling; the rejected create returns a destroy-only handle whose limit kind
+is `SOURCE_BYTES`. Source descriptors over it are rejected before nested pointer
+range access, copying, or scanner entry; aggregate byte addition is
+overflow-checked before mutation.
 Graph depth is computed after resolution as the shortest resolved-edge distance
 from any root; relaxation makes cycles converge and removes discovery-order and
-host-response-order dependence. Limit or allocation exhaustion is terminal for
-that project, and `vizg_project_limit_kind` identifies the exact limit category
-for the immediately preceding failed project call.
+host-response-order dependence. The source-response path preflights that
+prospective shortest depth and rejects an over-depth response without consuming
+the request or mutating source/module/edge state. Limit or allocation exhaustion
+is terminal for that project. Immediately after `LIMIT_EXCEEDED`,
+`vizg_project_limit_kind` identifies the exact non-`NONE` limit category,
+including parser recursion; successful and non-limit project calls reset it to
+`NONE`.
 
 Fallible project mutations are ownership-transactional even though allocation
 exhaustion remains terminal for the caller. Source copying, the frontend and
@@ -159,7 +173,7 @@ Native, Android, and `wasm32-freestanding` builds use the same header and ABI.
 The WASM build exports linear memory and the allowlist above and imports no host
 service.
 
-This ABI v1 surface is frozen. Goal 202's complete source, lifecycle, hostile
+This ABI v1 surface is frozen. Goal 207's repeated source, lifecycle, hostile
 input, fault-injection, limit-boundary, native-symbol, and WASM-export audit is
 recorded in [`FINAL_AUDIT.md`](FINAL_AUDIT.md). Future incompatible contract
 changes require a new ABI version; HIR may consume this contract but must not
@@ -296,13 +310,29 @@ The store interns anonymous structural shapes, retains declaration identity for 
 
 ### Project semantic contract
 
-`analyzeProject` builds the existing `ModuleGraph`, then `analyzeModuleGraph` consumes every module's existing `FrontendResult` without reparsing. One project-wide canonical `TypeStore` supplies every module `TypeInfo` and every exported/imported `TypeId`; IDs are comparable only inside that `ProjectSemanticResult`.
+`analyzeProject` builds the existing `ModuleGraph`, including descriptor-backed
+external modules, then `analyzeModuleGraph` consumes every source module's
+existing `FrontendResult` without reparsing. External descriptors are lowered
+to canonical value/type identities in the shared store before import and
+re-export propagation begins. One project-wide canonical `TypeStore` supplies
+every module `TypeInfo` and every exported/imported `TypeId`; IDs are comparable
+only inside that `ProjectSemanticResult`.
 
-`SemanticIdentity` is a value-qualified identity: module ID, optional binder symbol ID, declaration node ID, namespace, and canonical type ID. `SemanticExport` covers value declarations, functions, classes, enums, interfaces, and type aliases. Aliases and named/star/default re-exports retain the target identity rather than inventing a second declaration identity.
+`SemanticIdentity` contains a source or external-module identity, optional
+binder symbol ID, declaration identity, namespace, and canonical type ID.
+`SemanticExport` covers value declarations, functions, classes, enums,
+interfaces, type aliases, and descriptor-backed external declarations. Aliases
+and named/star/default re-exports retain the target identity rather than
+inventing a second declaration identity.
 
 `SemanticImport` records named, default, namespace, type-only, external, unresolved, and cyclic-partial states with its local symbol, target identity when known, runtime-binding flag, and stable source span. Namespace imports use an owned structural object made from runtime exports. Descriptor-backed external imports retain external provenance, declared portable types, and value/type namespace availability; missing external members remain inspectable unresolved links and emit a stable graph diagnostic.
 
-Propagation uses a bounded fixed point. Cyclic graphs terminate; known declarations remain available while incomplete links keep stable `unknown` or cyclic-partial states. The final checker consumes the propagated `TypeInfo` and never duplicates inference. Diagnostics mark the result partial but do not invalidate modules, identities, types, or links.
+Propagation uses one bounded project fixed point over source and external
+identities. Cyclic graphs terminate; known declarations remain available while
+incomplete links keep stable `unknown` or cyclic-partial states. The final
+checker consumes the propagated `TypeInfo` and canonical `TypeId`s directly;
+semantic types are not patched after checking. Diagnostics mark the result
+partial but do not invalidate modules, identities, types, or links.
 
 `ProjectSemanticResult` owns the module graph and one semantic arena containing the shared store and all project semantic slices. Call `deinit` exactly once. No result-backed slice or pointer may outlive it. Rebuilds create independent ownership contexts, so old `TypeId` values must never be compared with new ones.
 

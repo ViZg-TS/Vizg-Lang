@@ -140,8 +140,11 @@ The result API exposes:
 `finish` retains only the module closure reachable from submitted roots through
 resolved local imports. Pre-supplied modules outside that closure do not appear
 in module, edge, diagnostic, import, or export result views and cannot make an
-otherwise valid project fail. `summary.is_partial` is set when either reachable
-module-host work failed or the semantic result itself is partial.
+otherwise valid project fail. The summary derives its error flags from the
+canonical diagnostic table: scanner/parser errors set `has_syntax_errors`,
+binder/resolver/types/checker errors set `has_semantic_errors`, linking/project
+errors set `has_project_errors`, and module-host errors set
+`has_module_failures`. `summary.is_partial` is the OR of those four flags.
 
 Allocation exhaustion is terminal, but every fallible project phase rolls back
 its in-progress ownership before returning. No semantic result or ABI result
@@ -194,7 +197,9 @@ bounds per-module and cumulative source bytes, modules, requests, edges,
 diagnostics, graph depth, and semantic types. Collection limits are checked
 before retained input is copied or collection capacity grows. Graph depth is the
 shortest resolved-edge distance from any root, independent of request and host
-response order. Every typed input and output must have its C alignment, and
+response order. An over-depth source response is rejected before its source,
+module identity, request state, or graph edge is mutated. Every typed input and
+output must have its C alignment, and
 every non-empty range must be complete and overflow-safe. Project creation
 rejects config/output aliasing, and host input or output may not overlap the
 exclusive workspace. Pointer validation completes before any output write or
@@ -203,7 +208,19 @@ rejects lifecycle and response-order errors.
 `LIMIT_EXCEEDED` and `OUT_OF_MEMORY` are terminal for that project: destroy it
 and create a new one with corrected limits or capacity. After
 `LIMIT_EXCEEDED`, `vizg_project_limit_kind` reports the exact stable category
-for the immediately preceding project call.
+for the immediately preceding project call, including
+`VIZG_LIMIT_PARSE_DEPTH` for parser recursion. Every successful or non-limit
+project call resets that accessor to `VIZG_LIMIT_NONE`.
+
+`VIZG_MAX_SOURCE_LENGTH` is the representation ceiling for one source and is
+equal to `UINT32_MAX`; `max_source_bytes` may not exceed it. Source byte offsets,
+span endpoints, lines, and columns remain stable `uint32_t` ABI values. An
+oversized `source_len` is rejected as `VIZG_LIMIT_SOURCE_BYTES` before its source
+pointer is range-checked, copied, or passed to the scanner. Aggregate source-byte
+accounting rejects integer overflow before project mutation. When project
+creation rejects `max_source_bytes` above this ceiling, it returns a destroy-only
+handle so `vizg_project_limit_kind` reports `VIZG_LIMIT_SOURCE_BYTES`; the caller
+must destroy that handle.
 
 On `wasm32`, pointers and `size_t` values are unsigned 32-bit offsets/counts in
 exported linear memory. Every non-empty range, including nested strings and
@@ -238,7 +255,7 @@ vizg_project_result_export
 driver at `test/support/fs_validation_host.zig` is validation-only and is not
 part of the Zig package or C ABI.
 
-ABI v1 is frozen by the clean Goal 202 closure recorded in
+ABI v1 is frozen by the repeated Goal 207 closure recorded in
 [`docs/FINAL_AUDIT.md`](docs/FINAL_AUDIT.md). Re-run its complete command matrix
 before changing any public structure, constant, lifecycle rule, or symbol.
 

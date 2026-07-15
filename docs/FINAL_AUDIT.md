@@ -1,33 +1,53 @@
 # ViZG ABI v1 Final Audit
 
-## Commit audited
+## Audited revision
 
-`38b336391158aa2730e953a723bf3999ed4982c6`
+`1dec758704510c52a82bf751945aecb36574a1d4`
 
 - Date: 2026-07-15
 - Zig: `0.16.0`
-- Scope: Goal 202, including the current applied Goals 189–201 working-tree
-  series based on the commit above
-- Unresolved in-scope findings: **0**
+- Scope: the Goals 203–207 working-tree series applied to the revision above
+- Unresolved in-scope P0/P1/P2 findings: **0**
 
-The audit restarted at the active build and composition roots, traced every
-relevant frontend, semantic, project, graph, native ABI, and WASM path, fixed
-each confirmed finding, added a regression, and repeated the required gates.
-Generated or cached output was not treated as source evidence.
+This is the repeated Goal 207 audit. It supersedes the earlier Goal 202 freeze
+claim because Goals 203–206 found and corrected material semantic, resource,
+summary, and source-representation gaps after that claim.
 
-## ABI surface
+The audit restarted from `build.zig`, `src/root.zig`, `Lib/vizg.zig`, and the
+public C header; traced the active frontend, semantic, project, native ABI, and
+WASM paths; inspected the registered assertions; ran the complete fresh command
+matrix below; fixed the new finding; added a regression; and repeated the
+affected validation. Generated and cached output was not treated as source
+evidence.
 
-- Version: 1
-- Symbols: the 18-function native/WASM allowlist recorded below
-- Result ownership: project-owned immutable view
-- Lifecycle: one-shot
+## Closure of Goals 203–207
 
-`src/root.zig` is the portable Zig root. It exposes source-byte frontend,
-semantic, type, and host-driven project APIs without a filesystem/package/URL
-resolver. `Lib/vizg.zig` composes that root with `Lib/abi.zig`; `Lib/vizg.h` is
-the only public C contract. The only concrete filesystem host is the
-repository-only fixture in `test/support/fs_validation_host.zig`, composed by
-the development CLI and tests rather than exported by the core or ABI.
+| Goal | Result | Confirmed closure |
+|---|---|---|
+| 203 | PASS | External descriptors participate in the bounded semantic propagation before final checking. Value/type/both namespaces, downstream re-exports, `SymbolTypeInfo`, `NodeTypeInfo`, `SemanticImport`, and checker-visible `TypeId` identity are covered together. |
+| 204 | PASS | Semantic-type, diagnostic, module, request, edge, source, and graph-depth limits are checked at their owning growth points. Over-depth source responses roll back without consuming the request or mutating source/module/edge state. Exact N/N+1 cases pass. |
+| 205 | PASS | Canonical diagnostic phases drive syntax, semantic, project, and module-host summary flags; `is_partial` is their OR. Every `LIMIT_EXCEEDED` path has a stable non-`NONE` kind, including parser recursion. Native, Zig, and WASM layouts agree. |
+| 206 | PASS | One-source representation is capped at `UINT32_MAX`; configuration and descriptors above it return `SOURCE_BYTES` before nested pointer access, copying, or scanner entry. Aggregate accounting is overflow-safe and source-index casts have a preceding invariant. |
+| 207 | PASS | The complete static and executable audit was repeated, the new finding below was fixed and regressed, the native/WASM surface matches the exact allowlist, and no in-scope P0/P1/P2 remains. |
+
+## New Goal 207 finding
+
+| ID | Severity | Reproduction | Root cause | Fix | Regression |
+|---|---|---|---|---|---|
+| G207-01 | P1 | On a native target, create with `max_source_bytes = UINT32_MAX + 1`, receive `LIMIT_EXCEEDED`, then query `vizg_project_limit_kind`. | Creation rejected the configuration without publishing a handle, so the required `SOURCE_BYTES` category could not be observed. | Create a limit-inspection-and-destroy-only handle, record `SOURCE_BYTES`, reject operational calls with `INVALID_STATE`, and retain normal validation/output behavior for other create failures. | The official ABI lifecycle test checks the status, non-null handle, exact kind, rejected operational use without clearing the kind, and destruction. |
+
+No regression weakens an existing assertion or special-cases a fixture.
+
+## Active contract and evidence
+
+`src/root.zig` is the portable Zig composition root. It exposes source-byte
+frontend, semantic, type, and host-driven project APIs without filesystem,
+package, URL, or runtime resolution. `Lib/vizg.zig` composes that root with
+`Lib/abi.zig`; `Lib/vizg.h` is the public C contract. The only concrete
+filesystem host is the repository validation fixture in
+`test/support/fs_validation_host.zig`, reached by development/test composition
+and not exported by the portable root or ABI. The active
+`lint-module-host-boundary` gate enforces this boundary.
 
 The ABI is caller-workspace-owned and one-shot:
 
@@ -36,57 +56,29 @@ create -> add roots/sources -> step/respond -> complete -> finish
        -> immutable project-owned result views -> destroy
 ```
 
-Input is borrowed only for each call and copied before retention. `finish` is
-terminal and idempotently returns the same immutable view without allocating.
-The result and all nested strings remain valid until project destruction; there
-is no separate result owner or destructor. Pointer/range/alignment and workspace
-overlap validation completes before output writes or mutation. Limit and
-allocation exhaustion are terminal, but in-progress ownership rolls back and
-no incomplete semantic or ABI result is published.
-
-The final result retains only the root-reachable local-module closure. Module
-identity is always the host-assigned `ModuleId`, never a logical label. External
-modules use a separate identity domain. Import and re-export rows use explicit
-presence flags and exact graph-edge provenance. Graph depth is the shortest
-resolved path from any root and is independent of discovery/response order.
-
-## Findings
-
-| ID | Severity | Reproduction | Root cause | Fix | Regression test |
-|---|---|---|---|---|---|
-| G202-01 | Medium | Scan string `"\\0"` and template `` `\\01` ``. | String/template escape paths enforced different legacy-free null rules. | Unified the complete null-escape rule. | Valid and invalid scanner escape cases. |
-| G202-02 | High | Parse nested assignment, unary, exponentiation, or recursive type syntax at the configured depth boundary. | Depth guards did not wrap the actual recursive entry paths. | Moved guards to every recursive expression/type entry. | Exact boundary tests for each path. |
-| G202-03 | Medium | Parse multiple invalid constructs with `recover_errors = false`. | Reporting an error did not request parser termination. | Stop immediately after the first parser error when recovery is disabled. | First-error-only parser regression. |
-| G202-04 | High | Call the public parser with empty, missing-EOF, embedded-EOF, or duplicate-EOF token slices. | The parser trusted scanner-only token-stream invariants. | Require exactly one terminal EOF before parsing. | Four hostile caller token-stream cases. |
-| G202-05 | High | Resolve named/star re-exports from an external module across value/type namespaces. | External re-exports bypassed the semantic fixed point and lost identity, edge, or namespace data. | Link named/star external re-exports with exact provenance and namespace filtering. | Project and ABI named/star, value/type/both, type-only, and default-exclusion cases. |
-| G202-06 | Medium | Pass hostile native pointers/WASM offsets to `vizg_project_limit_kind`. | This public accessor was absent from the direct hostile-pointer matrix. | Added native C and JavaScript WASM probes with controlled returns. | Misaligned/range/near-end no-trap cases. |
-| G202-07 | Medium | Run the required object dump after `zig build wasm-freestanding`. | The WASM artifact installed outside the required documented path. | Install it as `zig-out/lib/vizg.wasm` and align documentation. | The exact object-dump and WASM host gates consume that path. |
-| G202-08 | Low | Compare `Lib/vizg.zig` with the public C namespace/limit declarations. | Zig binding comments/re-exports lagged the stable C surface. | Exported limit and namespace types/constants and corrected the ABI version description. | Native/WASM symbol, layout, and cross-check gates. |
-
-No regression weakens an existing assertion or special-cases a fixture.
-
-## Boundary and adversarial coverage
+Input is borrowed only for a call and copied before retention. `finish` is
+terminal and idempotently returns the same immutable project-owned view without
+allocating. Pointer/range/alignment, nested input, alias, and workspace overlap
+validation precedes output mutation or access. Limit and allocation exhaustion
+do not publish incomplete semantic or ABI results.
 
 The registered suite covers:
 
-- malformed syntax through the official ABI;
-- duplicate logical names with distinct `ModuleId` values and duplicate
-  identities with conflicting source;
-- null, misaligned, overflowed, past-end, nested, aliased, and
-  config/output/workspace-overlapping host ranges;
-- unreachable pre-supplied modules and reachable side-effect unresolved edges;
-- local and external named/star re-export provenance;
-- external value, type, and combined namespaces;
-- shortest-depth order independence and cycles;
-- exact N/N+1 boundaries for per-module/total source bytes, modules, requests,
+- external checker mismatch, value/type/both namespaces, combined class
+  constructor/instance identity, and transitive external re-export consumers;
+- exact N/N+1 limits for individual/aggregate source bytes, modules, requests,
   edges, diagnostics, graph depth, and semantic types;
-- exhaustive allocation-failure injection through project and ABI publication;
-- repeated create/add/step/respond/finish/destroy stress across module, request,
-  edge, diagnostic, and external-metadata flows.
-
-Focused source inspection and boundary linting also confirmed that public roots
-contain no `vizg_analyze_file`, no production module resolver policy, and no
-concrete host implementation outside test/development fixtures.
+- graph-depth rollback, later shorter paths, order independence, and cycles;
+- every public summary group and stable limit-kind mapping;
+- exact `UINT32_MAX` configuration plus fake native `UINT32_MAX + 1` source
+  length without a giant allocation or pointer access;
+- hostile null, alignment, overflow, near-end, nested, aliased, and
+  workspace-overlap native/WASM inputs;
+- allocation-failure injection through frontend, project graph, semantic
+  metadata, external linking, result construction, and ABI publication;
+- one-shot lifecycle and repeated create/add/step/respond/finish/destroy flows;
+- exact native symbols, import-free WASM, C/Zig layouts, and Android/C consumer
+  compilation.
 
 ## Commands executed
 
@@ -105,23 +97,41 @@ nm -g --defined-only zig-out/lib/libvizg.a
 wasm-objdump -x zig-out/lib/vizg.wasm
 ```
 
+Additional registered safety and freeze gates were also run:
+
+```text
+git diff --name-only -- '*.zig' | xargs -r zig fmt --check
+zig build audit-safety
+zig build lint-portable-core
+zig build lint-module-host-boundary
+zig build abi-symbols-test
+zig build abi-native-consumer-test
+```
+
+The optional whole-tree `zig fmt --check .` was also run. It reports
+`src/modules/linker.zig`, an unmodified baseline file outside Goals 203–207;
+the changed-file formatter command above passes.
+
 ## Observed results
 
 | Command | Observed result |
 |---|---|
-| `zig build test --summary all` | PASS — 30/30 build steps, 439/439 tests |
-| `zig build validate` | PASS — installed artifacts, tests, portable/boundary lints, CLI fixture check |
+| `zig build test --summary all` | PASS — 30/30 build steps, 448/448 tests |
+| `zig build validate` | PASS — install, aggregate tests, portable/boundary lints, and CLI fixture validation |
+| `zig build audit-safety` | PASS |
+| `zig build lint-portable-core` | PASS |
+| `zig build lint-module-host-boundary` | PASS |
 | `zig build cross-check` | PASS |
 | `zig build abi-cross-check` | PASS |
 | `zig build abi-layout-test` | PASS |
+| `zig build abi-symbols-test` | PASS — exact native allowlist |
+| `zig build abi-native-consumer-test` | PASS — official C consumer and hostile-pointer probe |
 | `zig build android-aarch64-lib` | PASS |
-| `zig build wasm-freestanding` | PASS — JavaScript host and exact import/export assertions passed |
+| `zig build wasm-freestanding` | PASS — JavaScript host matrix and exact import/export assertions |
+| changed Zig files, `zig fmt --check` | PASS |
 | `git diff --check` | PASS |
-| `nm -g --defined-only zig-out/lib/libvizg.a` | PASS — exactly the 18 ABI v1 functions listed below |
+| `nm -g --defined-only zig-out/lib/libvizg.a` | PASS — the official 18 functions below are the only `vizg_` globals |
 | `wasm-objdump -x zig-out/lib/vizg.wasm` | PASS — no import section; `memory` plus exactly the same 18 functions |
-
-`wasm-objdump` came from WABT 1.0.34 extracted under `/tmp` and selected through
-`PATH`; no repository or system package artifact was added.
 
 Native and WASM function allowlist:
 
@@ -148,26 +158,31 @@ vizg_project_result_export
 
 ## Remaining limitations
 
-- ViZG remains a frontend and semantic analysis engine for its documented
+- ViZG remains a frontend and semantic-analysis engine for its documented
   TypeScript/JavaScript-like subset, not a complete TypeScript checker.
 - It has no HIR, lowering, runtime, emitter, backend, bundler, package resolver,
   or production filesystem/URL/network module host.
-- The project lifecycle is intentionally one-shot; source revision requires a
-  new project.
-- Native C cannot portably prove whether an arbitrary non-null integer address
-  is mapped before dereference. The contract validates null, alignment,
-  overflow, complete ranges, and forbidden overlap; callers must supply mapped
-  memory. WASM offsets additionally receive complete linear-memory bounds
-  validation.
+- Source revision requires a new one-shot project.
+- Native C cannot portably prove that an arbitrary non-null integer address is
+  mapped before dereference. The contract validates null, alignment, overflow,
+  complete ranges, and forbidden overlap; WASM additionally validates complete
+  linear-memory bounds.
 - Cross-target and Android gates are compile/layout/consumer checks, not foreign
   runtime execution.
+- The optional whole-tree formatter check still reports the unmodified baseline
+  file `src/modules/linker.zig`; every Zig file changed by Goals 203–207 passes
+  `zig fmt --check`.
 
-## Decision
+## Final decision
 
-ABI v1 frozen: **yes**. The public structures, constants, ownership/lifecycle
-rules, and 18-function symbol allowlist are the compatibility contract.
-Incompatible changes require a new ABI version rather than mutation of v1.
+- Goals 203–207: **PASS**
+- Unresolved P0: **0**
+- Unresolved P1: **0**
+- Unresolved P2: **0**
+- ABI v1 frozen: **yes**
+- HIR planning authorized: **yes**
 
-HIR planning authorized: **yes**. No HIR implementation is part of this closure;
-future HIR work begins only as a consumer of the frozen frontend, semantic,
-project, and ABI v1 foundation.
+The public layouts, enum values, ownership/lifecycle rules, and 18-function
+symbol allowlist are the ABI v1 compatibility contract. Incompatible changes
+require a new ABI version. HIR work may consume this frozen foundation but may
+not mutate it.
