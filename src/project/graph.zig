@@ -12,7 +12,6 @@ pub const EdgeState = enum(u32) {
     not_found,
     denied,
     failed,
-    stale,
 };
 
 pub const DiagnosticCode = enum(u32) {
@@ -28,7 +27,8 @@ pub const Edge = struct {
     target: ?contracts.ModuleId = null,
     external_target: ?contracts.ExternalModuleId = null,
     raw_specifier: []const u8,
-    kind: contracts.RequestKind,
+    operation: contracts.RequestOperation,
+    type_only: bool,
     import_kind: ast.ImportKind,
     state: EdgeState = .unresolved,
     span: contracts.SourceSpan,
@@ -48,6 +48,12 @@ pub const GraphDiagnostic = struct {
     span: contracts.SourceSpan,
 };
 
+pub const Checkpoint = struct {
+    module_count: usize,
+    edge_count: usize,
+    diagnostic_count: usize,
+};
+
 pub const Graph = struct {
     allocator: std.mem.Allocator,
     modules: std.ArrayList(ModuleMetadata) = .empty,
@@ -63,6 +69,20 @@ pub const Graph = struct {
         self.edges.deinit(self.allocator);
         self.diagnostics.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    pub fn checkpoint(self: *const Graph) Checkpoint {
+        return .{
+            .module_count = self.modules.items.len,
+            .edge_count = self.edges.items.len,
+            .diagnostic_count = self.diagnostics.items.len,
+        };
+    }
+
+    pub fn rollback(self: *Graph, checkpoint_value: Checkpoint) void {
+        self.modules.shrinkRetainingCapacity(checkpoint_value.module_count);
+        self.edges.shrinkRetainingCapacity(checkpoint_value.edge_count);
+        self.diagnostics.shrinkRetainingCapacity(checkpoint_value.diagnostic_count);
     }
 
     pub fn recordModule(self: *Graph, metadata: ModuleMetadata) !void {
@@ -81,7 +101,7 @@ pub const Graph = struct {
 
     pub fn resolve(self: *Graph, request_id: contracts.RequestId, state: EdgeState, target: ?contracts.ModuleId) !void {
         for (self.edges.items) |*edge| {
-            if (edge.request_id != request_id or edge.state == .stale) continue;
+            if (edge.request_id != request_id) continue;
             edge.state = state;
             edge.target = target;
             edge.external_target = null;
@@ -104,7 +124,7 @@ pub const Graph = struct {
 
     pub fn resolveExternal(self: *Graph, request_id: contracts.RequestId, target: contracts.ExternalModuleId) void {
         for (self.edges.items) |*edge| {
-            if (edge.request_id != request_id or edge.state == .stale) continue;
+            if (edge.request_id != request_id) continue;
             edge.state = .external;
             edge.target = null;
             edge.external_target = target;
@@ -124,17 +144,4 @@ pub const Graph = struct {
         });
     }
 
-    pub fn invalidateImporter(self: *Graph, importer: contracts.ModuleId) void {
-        for (self.edges.items) |*edge| {
-            if (edge.importer == importer) edge.state = .stale;
-        }
-        var index: usize = 0;
-        while (index < self.modules.items.len) {
-            if (self.modules.items[index].id == importer) {
-                _ = self.modules.orderedRemove(index);
-            } else {
-                index += 1;
-            }
-        }
-    }
 };
