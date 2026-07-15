@@ -3,7 +3,7 @@
 const std = @import("std");
 const contracts = @import("contracts.zig");
 
-pub const RequestStatus = enum(u32) { queued, waiting, responded, stale };
+pub const RequestStatus = enum(u32) { queued, waiting, responded };
 pub const ResponseKind = enum(u32) { source, external, not_found, denied, failed };
 
 pub const Resolution = struct {
@@ -23,6 +23,11 @@ pub const RequestRecord = struct {
     resolution: ?Resolution = null,
 };
 
+pub const Checkpoint = struct {
+    record_count: usize,
+    next_id: u64,
+};
+
 /// Scheduling policy: insertion-order FIFO with at most one dispatched request.
 /// Calling step repeatedly before responding returns the same request value.
 pub const StateMachine = struct {
@@ -40,9 +45,23 @@ pub const StateMachine = struct {
         self.* = undefined;
     }
 
+    pub fn checkpoint(self: *const StateMachine) Checkpoint {
+        return .{ .record_count = self.records.items.len, .next_id = self.next_id };
+    }
+
+    pub fn rollback(self: *StateMachine, checkpoint_value: Checkpoint) void {
+        while (self.records.items.len > checkpoint_value.record_count) {
+            const index = self.records.items.len - 1;
+            const record = self.records.items[index];
+            self.freeRequest(record.request);
+            self.records.items.len = index;
+        }
+        self.next_id = checkpoint_value.next_id;
+    }
+
     pub fn enqueue(self: *StateMachine, input: contracts.ModuleRequestInput) !contracts.RequestId {
         for (self.records.items) |record| {
-            if (record.status != .stale and equivalent(record.request, input)) return record.request.id;
+            if (equivalent(record.request, input)) return record.request.id;
         }
 
         const specifier = try self.allocator.dupe(u8, input.raw_specifier);
@@ -57,7 +76,8 @@ pub const StateMachine = struct {
                 .id = id,
                 .importer = input.importer,
                 .raw_specifier = specifier,
-                .kind = input.kind,
+                .operation = input.operation,
+                .type_only = input.type_only,
                 .attributes = attributes,
                 .span = input.span,
             },
@@ -86,7 +106,6 @@ pub const StateMachine = struct {
             .queued => return error.InvalidResponseOrder,
             .waiting => {},
             .responded => return error.DuplicateResponse,
-            .stale => return error.StaleRequest,
         }
     }
 
@@ -97,15 +116,13 @@ pub const StateMachine = struct {
         record.status = .responded;
     }
 
-    pub fn invalidateImporter(self: *StateMachine, importer: contracts.ModuleId) void {
-        for (self.records.items) |*record| {
-            if (record.request.importer == importer) record.status = .stale;
-        }
-    }
-
     pub fn lookup(self: *const StateMachine, id: contracts.RequestId) ?RequestRecord {
         for (self.records.items) |record| if (record.request.id == id) return record;
         return null;
+    }
+
+    pub fn count(self: *const StateMachine) usize {
+        return self.records.items.len;
     }
 
     pub fn hasUnresolved(self: *const StateMachine) bool {
@@ -165,7 +182,7 @@ pub const StateMachine = struct {
 };
 
 fn equivalent(request: contracts.ModuleRequest, input: contracts.ModuleRequestInput) bool {
-    if (request.importer != input.importer or request.kind != input.kind) return false;
+    if (request.importer != input.importer or request.operation != input.operation or request.type_only != input.type_only) return false;
     if (!std.mem.eql(u8, request.raw_specifier, input.raw_specifier)) return false;
     if (request.attributes.len != input.attributes.len) return false;
     for (request.attributes, input.attributes) |left, right| {
@@ -196,7 +213,8 @@ test "mutated request inputs and response order cannot alter retained state" {
         const id = try machine.enqueue(.{
             .importer = .init(iteration + 1),
             .raw_specifier = &specifier,
-            .kind = @enumFromInt(iteration % 4),
+            .operation = @enumFromInt(iteration % 3),
+            .type_only = iteration % 2 == 0,
             .attributes = &attributes,
             .span = .{ .start = 0, .end = 24, .line = 1, .column = 0 },
         });

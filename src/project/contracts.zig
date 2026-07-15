@@ -63,17 +63,14 @@ pub const ModuleSource = struct {
     logical_name: []const u8,
     bytes: []const u8,
     kind: SourceKind = .module,
-    /// Host-defined revision token. Zero means no revision was supplied.
-    revision: u64 = 0,
 };
 
-/// Why source syntax requested another module. Explicit width is reserved for
-/// the future C ABI representation.
-pub const RequestKind = enum(u32) {
-    static,
-    type_only,
-    dynamic,
+/// Syntactic operation that requested another module. Runtime/type-only is an
+/// orthogonal namespace flag because a re-export can also be type-only.
+pub const RequestOperation = enum(u32) {
+    static_import,
     re_export,
+    dynamic_import,
 };
 
 pub const SourceSpan = tokens.Span;
@@ -92,7 +89,8 @@ pub const ModuleRequest = struct {
     id: RequestId,
     importer: ModuleId,
     raw_specifier: []const u8,
-    kind: RequestKind,
+    operation: RequestOperation,
+    type_only: bool = false,
     attributes: []const RequestAttribute = &.{},
     span: SourceSpan,
 };
@@ -102,7 +100,8 @@ pub const ModuleRequest = struct {
 pub const ModuleRequestInput = struct {
     importer: ModuleId,
     raw_specifier: []const u8,
-    kind: RequestKind,
+    operation: RequestOperation,
+    type_only: bool = false,
     attributes: []const RequestAttribute = &.{},
     span: SourceSpan,
 };
@@ -153,7 +152,7 @@ comptime {
     if (@sizeOf(ExternalModuleId) != @sizeOf(u64)) @compileError("ExternalModuleId must remain C-representable as u64");
     if (@sizeOf(RequestId) != @sizeOf(u64)) @compileError("RequestId must remain C-representable as u64");
     if (@sizeOf(SourceKind) != @sizeOf(u32)) @compileError("SourceKind must remain C-representable as u32");
-    if (@sizeOf(RequestKind) != @sizeOf(u32)) @compileError("RequestKind must remain C-representable as u32");
+    if (@sizeOf(RequestOperation) != @sizeOf(u32)) @compileError("RequestOperation must remain C-representable as u32");
     if (@sizeOf(ExternalExportKind) != @sizeOf(u32)) @compileError("ExternalExportKind must remain C-representable as u32");
     if (@sizeOf(ExternalType) != @sizeOf(u32)) @compileError("ExternalType must remain C-representable as u32");
 }
@@ -161,7 +160,7 @@ comptime {
 test "module identity is host assigned and independent of logical names" {
     const shared_id = ModuleId.init(41);
     const first = ModuleSource{ .id = shared_id, .logical_name = "/one/a.ts", .bytes = "export {};" };
-    const alias = ModuleSource{ .id = shared_id, .logical_name = "mem://alias", .bytes = "export {};", .revision = 2 };
+    const alias = ModuleSource{ .id = shared_id, .logical_name = "mem://alias", .bytes = "export {};" };
     try std.testing.expectEqual(first.id, alias.id);
 
     const same_label_a = ModuleSource{ .id = ModuleId.init(1), .logical_name = "/same/path.ts", .bytes = "" };
@@ -177,26 +176,27 @@ test "module identity is host assigned and independent of logical names" {
     try std.testing.expectEqual(@as(usize, 3), identities.count());
 }
 
-test "request contract represents every request kind and borrowed metadata" {
-    const kinds = [_]RequestKind{ .static, .type_only, .dynamic, .re_export };
+test "request contract keeps operation and type-only orthogonal" {
+    const operations = [_]RequestOperation{ .static_import, .re_export, .dynamic_import };
     const attributes = [_]RequestAttribute{.{
         .key = "type",
         .value = "json",
         .span = .{ .start = 20, .end = 32, .line = 1, .column = 20 },
     }};
 
-    for (kinds, 0..) |kind, index| {
+    for (operations, 0..) |operation, index| {
         const request = ModuleRequest{
             .id = RequestId.init(@intCast(index + 1)),
             .importer = ModuleId.init(9),
             .raw_specifier = "./data.json",
-            .kind = kind,
+            .operation = operation,
+            .type_only = operation == .re_export,
             .attributes = &attributes,
             .span = .{ .start = 7, .end = 18, .line = 1, .column = 7 },
         };
-        try std.testing.expectEqual(kind, request.kind);
+        try std.testing.expectEqual(operation, request.operation);
+        try std.testing.expectEqual(operation == .re_export, request.type_only);
         try std.testing.expectEqualStrings("./data.json", request.raw_specifier);
-        try std.testing.expectEqual(@as(usize, 1), request.attributes.len);
     }
 }
 

@@ -23,7 +23,8 @@ pub const ModuleState = enum(u32) {
 };
 
 /// One project-owned module record. Source slices and the semantic result stay
-/// valid until a newer revision replaces them or the Project is deinitialized.
+/// valid until the Project is deinitialized. Projects are one-shot: a ModuleId
+/// may receive source exactly once and finish is terminal.
 pub const Module = struct {
     id: contracts.ModuleId,
     state: ModuleState,
@@ -57,6 +58,8 @@ pub const Project = struct {
     graph: project_graph.Graph,
     project_semantics: ?*semantics.BorrowedProjectSemanticResult = null,
     external_modules: std.ArrayList(OwnedExternalModule) = .empty,
+    finished: bool = false,
+    finish_result: ?FinishResult = null,
 
     pub fn init(allocator: std.mem.Allocator) Project {
         return .{ .allocator = allocator, .requests = .init(allocator), .graph = .init(allocator) };
@@ -75,6 +78,10 @@ pub const Project = struct {
 
     pub fn moduleCount(self: *const Project) usize {
         return self.modules.items.len;
+    }
+
+    pub fn modulesView(self: *const Project) []const Module {
+        return self.modules.items;
     }
 
     pub fn state(self: *const Project, id: contracts.ModuleId) ModuleState {
@@ -99,11 +106,17 @@ pub const Project = struct {
         });
     }
 
+    fn ensureOpen(self: *const Project) !void {
+        if (self.finished) return error.ProjectFinished;
+    }
+
     pub fn addRoot(self: *Project, source: contracts.ModuleSource) !void {
+        try self.ensureOpen();
         try self.submit(source, true);
     }
 
     pub fn supplySource(self: *Project, source: contracts.ModuleSource) !void {
+        try self.ensureOpen();
         try self.submit(source, false);
     }
 
@@ -113,12 +126,17 @@ pub const Project = struct {
     }
 
     pub fn step(self: *Project) !state_machine.Step {
+        try self.ensureOpen();
         try self.analyze();
         return self.requests.step();
     }
 
     pub fn edges(self: *const Project) []const project_graph.Edge {
         return self.graph.edges.items;
+    }
+
+    pub fn requestCount(self: *const Project) usize {
+        return self.requests.count();
     }
 
     pub fn graphDiagnostics(self: *const Project) []const project_graph.GraphDiagnostic {
@@ -134,13 +152,14 @@ pub const Project = struct {
     }
 
     pub fn respondSource(self: *Project, id: contracts.RequestId, source: contracts.ModuleSource) !void {
+        try self.ensureOpen();
         try self.requests.validateResponse(id);
         if (self.find(source.id)) |existing| {
             if (existing.source) |owned| {
-                const identical = source.revision == owned.revision and source.kind == owned.kind and
+                const identical = source.kind == owned.kind and
                     std.mem.eql(u8, source.logical_name, owned.logical_name) and
                     std.mem.eql(u8, source.bytes, owned.bytes);
-                if (!identical) try self.supplySource(source);
+                if (!identical) return error.DuplicateModule;
             } else {
                 try self.supplySource(source);
             }
@@ -154,6 +173,7 @@ pub const Project = struct {
 
     /// Satisfy one request with copied source-less module metadata.
     pub fn respondExternalModule(self: *Project, id: contracts.RequestId, descriptor: contracts.ExternalModuleDescriptor) !void {
+        try self.ensureOpen();
         try self.requests.validateResponse(id);
         try validateExternalDescriptor(descriptor);
         try self.registerExternalModule(descriptor);
@@ -163,26 +183,36 @@ pub const Project = struct {
     }
 
     pub fn respondNotFound(self: *Project, id: contracts.RequestId) !void {
-        try self.requests.commitResponse(id, .{ .kind = .not_found });
-        try self.graph.resolve(id, .not_found, null);
-        self.clearProjectSemantics();
+        try self.commitFailureResponse(id, .not_found, .not_found);
     }
 
     pub fn respondDenied(self: *Project, id: contracts.RequestId) !void {
-        try self.requests.commitResponse(id, .{ .kind = .denied });
-        try self.graph.resolve(id, .denied, null);
-        self.clearProjectSemantics();
+        try self.commitFailureResponse(id, .denied, .denied);
     }
 
     pub fn respondFailed(self: *Project, id: contracts.RequestId) !void {
-        try self.requests.commitResponse(id, .{ .kind = .failed });
-        try self.graph.resolve(id, .failed, null);
+        try self.commitFailureResponse(id, .failed, .failed);
+    }
+
+    fn commitFailureResponse(
+        self: *Project,
+        id: contracts.RequestId,
+        response_kind: state_machine.ResponseKind,
+        edge_state: project_graph.EdgeState,
+    ) !void {
+        try self.ensureOpen();
+        try self.requests.validateResponse(id);
+        const graph_checkpoint = self.graph.checkpoint();
+        errdefer self.graph.rollback(graph_checkpoint);
+        try self.graph.resolve(id, edge_state, null);
+        try self.requests.commitResponse(id, .{ .kind = response_kind });
         self.clearProjectSemantics();
     }
 
     /// Finish is legal only after every request has a response and every source
     /// has reached complete or failed. It never performs hidden analysis.
     pub fn finish(self: *Project) !FinishResult {
+        if (self.finish_result) |result| return result;
         if (self.requests.hasUnresolved()) return error.PendingRequests;
         var has_failures = self.requests.hasFailures();
         for (self.modules.items) |module| switch (module.state) {
@@ -191,11 +221,14 @@ pub const Project = struct {
             .unseen, .requested, .supplied, .parsing, .analyzed, .external => return error.IncompleteModules,
         };
         if (self.project_semantics == null) try self.buildProjectSemantics();
-        return .{ .module_count = self.modules.items.len, .has_failures = has_failures };
+        const result: FinishResult = .{ .module_count = self.modules.items.len, .has_failures = has_failures };
+        self.finish_result = result;
+        self.finished = true;
+        return result;
     }
 
-    /// Analyze a supplied module. A completed unchanged revision is returned
-    /// without re-analysis. Allocation or internal analysis failures leave this
+    /// Analyze a supplied module. A completed module is returned without
+    /// re-analysis. Allocation or internal analysis failures leave this
     /// module inspectably failed and do not modify other completed modules.
     fn analyzeModule(self: *Project, id: contracts.ModuleId) !*const semantics.SemanticResult {
         const initial = self.find(id) orelse return error.UnknownModule;
@@ -210,26 +243,39 @@ pub const Project = struct {
             self.findMut(id).?.state = .failed;
             return err;
         };
-        errdefer self.allocator.destroy(result_ptr);
+        var result_initialized = false;
+        errdefer {
+            if (result_initialized) result_ptr.deinit();
+            self.allocator.destroy(result_ptr);
+            const failed = self.findMut(id).?;
+            failed.semantic_result = null;
+            failed.metadata_derived = false;
+            failed.state = .failed;
+        }
 
         const source = self.find(id).?.source.?;
-        result_ptr.* = semantics.analyzeSource(self.allocator, .{
+        result_ptr.* = try semantics.analyzeSource(self.allocator, .{
             .path = source.logical_name,
             .text = source.bytes,
             .kind = switch (source.kind) {
                 .script => .script,
                 .module => .module,
             },
-        }, .{}) catch |err| {
-            self.findMut(id).?.state = .failed;
-            return err;
-        };
+        }, .{});
+        result_initialized = true;
+
+        const request_checkpoint = self.requests.checkpoint();
+        const graph_checkpoint = self.graph.checkpoint();
+        errdefer {
+            self.requests.rollback(request_checkpoint);
+            self.graph.rollback(graph_checkpoint);
+        }
 
         const module = self.findMut(id).?;
         module.semantic_result = result_ptr;
         module.state = .analyzed;
-        module.state = .complete;
         try self.deriveModuleMetadata(id);
+        module.state = .complete;
         self.clearProjectSemantics();
         return result_ptr;
     }
@@ -240,10 +286,19 @@ pub const Project = struct {
         var index: usize = 0;
         while (index < self.modules.items.len) : (index += 1) {
             const module = &self.modules.items[index];
-            if (module.source != null and module.state != .complete) {
+            if (module.source != null and module.state != .complete and self.isReachable(module.id)) {
                 _ = try self.analyzeModule(module.id);
             }
         }
+    }
+
+    fn isReachable(self: *const Project, id: contracts.ModuleId) bool {
+        const module = self.find(id) orelse return false;
+        if (module.is_root) return true;
+        for (self.graph.edges.items) |edge| {
+            if (edge.state == .resolved and edge.target != null and edge.target.? == id) return true;
+        }
+        return false;
     }
 
     fn submit(self: *Project, source: contracts.ModuleSource, is_root: bool) !void {
@@ -256,25 +311,10 @@ pub const Project = struct {
             .logical_name = logical_name,
             .bytes = bytes,
             .kind = source.kind,
-            .revision = source.revision,
         };
 
         if (self.findMut(source.id)) |module| {
-            if (module.source) |previous| {
-                if (source.revision < previous.revision) return error.StaleRevision;
-                if (source.revision == previous.revision) {
-                    const identical = source.kind == previous.kind and
-                        std.mem.eql(u8, source.logical_name, previous.logical_name) and
-                        std.mem.eql(u8, source.bytes, previous.bytes);
-                    if (identical) return error.DuplicateModule;
-                    return error.RevisionConflict;
-                }
-                self.requests.invalidateImporter(source.id);
-                self.graph.invalidateImporter(source.id);
-                self.clearProjectSemantics();
-                self.clearResult(module);
-                self.freeSource(previous);
-            }
+            if (module.source != null) return error.DuplicateModule;
             module.source = owned;
             module.state = .supplied;
             module.metadata_derived = false;
@@ -311,7 +351,8 @@ pub const Project = struct {
             .ImportDeclaration => |decl| try self.appendDerivedEdge(
                 id,
                 decl.source,
-                if (decl.type_only) .type_only else .static,
+                .static_import,
+                decl.type_only,
                 decl.kind,
                 decl.attributes,
                 decl.source_span,
@@ -320,6 +361,7 @@ pub const Project = struct {
                 id,
                 decl.source,
                 .re_export,
+                decl.type_only,
                 .named,
                 null,
                 decl.source_span orelse node.span,
@@ -328,7 +370,8 @@ pub const Project = struct {
                 .Literal => |literal| try self.appendDerivedEdge(
                     id,
                     literal.value,
-                    .dynamic,
+                    .dynamic_import,
+                    false,
                     .side_effect,
                     expr.attributes,
                     result.frontend.ast.node(expr.source).span,
@@ -350,7 +393,8 @@ pub const Project = struct {
         self: *Project,
         importer: contracts.ModuleId,
         raw_specifier: []const u8,
-        kind: contracts.RequestKind,
+        operation: contracts.RequestOperation,
+        type_only: bool,
         import_kind: ast.ImportKind,
         source_attributes: ?ast.ImportAttributes,
         span: contracts.SourceSpan,
@@ -367,7 +411,8 @@ pub const Project = struct {
         const request_id = try self.queueRequest(.{
             .importer = importer,
             .raw_specifier = raw_specifier,
-            .kind = kind,
+            .operation = operation,
+            .type_only = type_only,
             .attributes = attributes.items,
             .span = span,
         });
@@ -376,7 +421,8 @@ pub const Project = struct {
             .request_id = request_id,
             .importer = importer,
             .raw_specifier = owned_request.raw_specifier,
-            .kind = kind,
+            .operation = operation,
+            .type_only = type_only,
             .import_kind = import_kind,
             .span = span,
         });
@@ -411,12 +457,11 @@ pub const Project = struct {
 
         var graph_edges: std.ArrayList(modules_mod.ImportEdge) = .empty;
         for (self.graph.edges.items) |edge| {
-            if (edge.state == .stale or edge.kind == .dynamic) continue;
+            if (edge.operation == .dynamic_import) continue;
             const status: modules_mod.ImportStatus = switch (edge.state) {
                 .resolved => .local,
                 .external => .external,
                 .unresolved, .not_found, .denied, .failed => .missing,
-                .stale => unreachable,
             };
             try graph_edges.append(allocator, .{
                 .id = @intCast(graph_edges.items.len),
@@ -424,8 +469,8 @@ pub const Project = struct {
                 .to = if (edge.target) |target| target.value() else null,
                 .specifier = edge.raw_specifier,
                 .kind = edge.import_kind,
-                .type_only = edge.kind == .type_only,
-                .re_export = edge.kind == .re_export,
+                .type_only = edge.type_only,
+                .re_export = edge.operation == .re_export,
                 .status = status,
                 .span = edge.span,
             });
@@ -480,6 +525,7 @@ pub const Project = struct {
         const result = try self.allocator.create(semantics.BorrowedProjectSemanticResult);
         errdefer self.allocator.destroy(result);
         result.* = try semantics.analyzeBorrowedModuleGraph(self.allocator, &semantic_graph);
+        errdefer result.deinit();
         try self.linkExternalImports(result);
         self.project_semantics = result;
     }
@@ -723,32 +769,37 @@ test "multiple roots share one requested dependency identity" {
     try std.testing.expectEqual(ModuleState.supplied, project.state(.init(3)));
 }
 
-test "duplicate identities and revisions have explicit behavior" {
+test "duplicate module identities are rejected in one-shot projects" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
 
-    const original: contracts.ModuleSource = .{ .id = .init(7), .logical_name = "item", .bytes = "let x = 1;", .revision = 4 };
+    const original: contracts.ModuleSource = .{ .id = .init(7), .logical_name = "item", .bytes = "let x = 1;" };
     try project.supplySource(original);
     try std.testing.expectError(error.DuplicateModule, project.supplySource(original));
-    try std.testing.expectError(error.RevisionConflict, project.supplySource(.{ .id = .init(7), .logical_name = "item", .bytes = "let x = 2;", .revision = 4 }));
-    try std.testing.expectError(error.StaleRevision, project.supplySource(.{ .id = .init(7), .logical_name = "item", .bytes = "old", .revision = 3 }));
-    try project.supplySource(.{ .id = .init(7), .logical_name = "renamed", .bytes = "let x = 2;", .revision = 5 });
-    try std.testing.expectEqualStrings("renamed", project.lookup(.init(7)).?.source.?.logical_name);
+    try std.testing.expectError(error.DuplicateModule, project.supplySource(.{ .id = .init(7), .logical_name = "item", .bytes = "let x = 2;" }));
 }
 
-test "repeated analysis reuses a completed revision and replacement reanalyzes" {
+test "finish is terminal and returns the cached result" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
 
-    try project.addRoot(.{ .id = .init(8), .logical_name = "root", .bytes = "let x = 1;", .revision = 1 });
-    const first = try project.analyzeModule(.init(8));
-    const repeated = try project.analyzeModule(.init(8));
-    try std.testing.expectEqual(first, repeated);
+    try project.addRoot(.{ .id = .init(8), .logical_name = "root", .bytes = "let x = 1;" });
+    _ = try project.step();
+    const first = try project.finish();
+    const repeated = try project.finish();
+    try std.testing.expectEqualDeep(first, repeated);
+    try std.testing.expectError(error.ProjectFinished, project.addRoot(.{ .id = .init(9), .logical_name = "late", .bytes = "" }));
+}
 
-    try project.supplySource(.{ .id = .init(8), .logical_name = "root", .bytes = "let x = 2;", .revision = 2 });
-    try std.testing.expectEqual(ModuleState.supplied, project.state(.init(8)));
-    _ = try project.analyzeModule(.init(8));
-    try std.testing.expectEqual(ModuleState.complete, project.state(.init(8)));
+test "unreachable pre-supplied modules are not analyzed" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+
+    try project.addRoot(.{ .id = .init(1), .logical_name = "root", .bytes = "export {};" });
+    try project.supplySource(.{ .id = .init(2), .logical_name = "unreachable", .bytes = "import './missing';" });
+    const step_value = try project.step();
+    try std.testing.expect(step_value == .complete);
+    try std.testing.expectEqual(ModuleState.supplied, project.state(.init(2)));
 }
 
 test "failed module preserves completed module and teardown remains complete" {
@@ -775,9 +826,9 @@ test "step is deterministic, deduplicates requests, and enforces response order"
     try project.addRoot(.{ .id = .init(1), .logical_name = "root", .bytes = "export {};" });
     _ = try project.analyzeModule(.init(1));
 
-    const first = try project.queueRequest(.{ .importer = .init(1), .raw_specifier = "./a", .kind = .static, .span = .{ .start = 1, .end = 4, .line = 1, .column = 1 } });
-    const duplicate = try project.queueRequest(.{ .importer = .init(1), .raw_specifier = "./a", .kind = .static, .span = .{ .start = 10, .end = 13, .line = 2, .column = 1 } });
-    const second = try project.queueRequest(.{ .importer = .init(1), .raw_specifier = "./b", .kind = .dynamic, .span = .{ .start = 20, .end = 23, .line = 3, .column = 1 } });
+    const first = try project.queueRequest(.{ .importer = .init(1), .raw_specifier = "./a", .operation = .static_import, .span = .{ .start = 1, .end = 4, .line = 1, .column = 1 } });
+    const duplicate = try project.queueRequest(.{ .importer = .init(1), .raw_specifier = "./a", .operation = .static_import, .span = .{ .start = 10, .end = 13, .line = 2, .column = 1 } });
+    const second = try project.queueRequest(.{ .importer = .init(1), .raw_specifier = "./b", .operation = .dynamic_import, .span = .{ .start = 20, .end = 23, .line = 3, .column = 1 } });
     try std.testing.expectEqual(first, duplicate);
 
     const dispatched = (try project.step()).request;
@@ -793,13 +844,13 @@ test "step is deterministic, deduplicates requests, and enforces response order"
     try std.testing.expect(finished.has_failures);
 }
 
-test "responses reject foreign duplicate and stale request ids without mutation" {
+test "responses reject foreign and duplicate request ids without mutation" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
-    try project.addRoot(.{ .id = .init(4), .logical_name = "root", .bytes = "export {};", .revision = 1 });
+    try project.addRoot(.{ .id = .init(4), .logical_name = "root", .bytes = "export {};" });
     _ = try project.analyzeModule(.init(4));
 
-    const external_id = try project.queueRequest(.{ .importer = .init(4), .raw_specifier = "runtime", .kind = .static, .span = .{ .start = 0, .end = 7, .line = 1, .column = 0 } });
+    const external_id = try project.queueRequest(.{ .importer = .init(4), .raw_specifier = "runtime", .operation = .static_import, .span = .{ .start = 0, .end = 7, .line = 1, .column = 0 } });
     _ = try project.step();
     const external: contracts.ExternalModuleDescriptor = .{
         .id = .init(40),
@@ -809,12 +860,6 @@ test "responses reject foreign duplicate and stale request ids without mutation"
     try std.testing.expectError(error.ForeignRequest, project.respondExternalModule(.init(999), external));
     try project.respondExternalModule(external_id, external);
     try std.testing.expectError(error.DuplicateResponse, project.respondExternalModule(external_id, external));
-
-    const stale_id = try project.queueRequest(.{ .importer = .init(4), .raw_specifier = "./old", .kind = .re_export, .span = .{ .start = 8, .end = 13, .line = 2, .column = 0 } });
-    _ = try project.step();
-    try project.supplySource(.{ .id = .init(4), .logical_name = "root", .bytes = "export const next = 1;", .revision = 2 });
-    try std.testing.expectError(error.StaleRequest, project.respondFailed(stale_id));
-    try std.testing.expectEqual(ModuleState.supplied, project.state(.init(4)));
 }
 
 test "source responses close cycles without recursive callbacks" {
@@ -827,8 +872,8 @@ test "source responses close cycles without recursive callbacks" {
     _ = try project.analyzeModule(source_a.id);
     _ = try project.analyzeModule(source_b.id);
 
-    const a_to_b = try project.queueRequest(.{ .importer = source_a.id, .raw_specifier = "./b", .kind = .static, .span = .{ .start = 7, .end = 10, .line = 1, .column = 7 } });
-    const b_to_a = try project.queueRequest(.{ .importer = source_b.id, .raw_specifier = "./a", .kind = .static, .span = .{ .start = 7, .end = 10, .line = 1, .column = 7 } });
+    const a_to_b = try project.queueRequest(.{ .importer = source_a.id, .raw_specifier = "./b", .operation = .static_import, .span = .{ .start = 7, .end = 10, .line = 1, .column = 7 } });
+    const b_to_a = try project.queueRequest(.{ .importer = source_b.id, .raw_specifier = "./a", .operation = .static_import, .span = .{ .start = 7, .end = 10, .line = 1, .column = 7 } });
     try std.testing.expectEqual(a_to_b, (try project.step()).request.id);
     try project.respondSource(a_to_b, source_b);
     try std.testing.expectEqual(b_to_a, (try project.step()).request.id);
@@ -843,14 +888,14 @@ test "all terminal response kinds are inspectable and finish rejects pending wor
     try project.addRoot(.{ .id = .init(20), .logical_name = "root", .bytes = "export {};" });
     _ = try project.analyzeModule(.init(20));
 
-    const source_id = try project.queueRequest(.{ .importer = .init(20), .raw_specifier = "source", .kind = .static, .span = .{ .start = 0, .end = 1, .line = 1, .column = 0 } });
+    const source_id = try project.queueRequest(.{ .importer = .init(20), .raw_specifier = "source", .operation = .static_import, .span = .{ .start = 0, .end = 1, .line = 1, .column = 0 } });
     try std.testing.expectError(error.PendingRequests, project.finish());
     _ = try project.step();
     try project.respondSource(source_id, .{ .id = .init(21), .logical_name = "dependency", .bytes = "export {};" });
     try std.testing.expectError(error.IncompleteModules, project.finish());
     _ = try project.analyzeModule(.init(21));
 
-    const failed_id = try project.queueRequest(.{ .importer = .init(20), .raw_specifier = "failed", .kind = .type_only, .span = .{ .start = 2, .end = 3, .line = 1, .column = 2 } });
+    const failed_id = try project.queueRequest(.{ .importer = .init(20), .raw_specifier = "failed", .operation = .static_import, .type_only = true, .span = .{ .start = 2, .end = 3, .line = 1, .column = 2 } });
     _ = try project.step();
     try project.respondFailed(failed_id);
     try std.testing.expectEqual(state_machine.ResponseKind.source, project.lookupRequest(source_id).?.resolution.?.kind);
@@ -895,7 +940,7 @@ test "source graph derives requests and preserves semantic identities with opaqu
             } else if (std.mem.eql(u8, request.raw_specifier, "./types")) {
                 try project.respondSource(request.id, types_source);
             } else {
-                try std.testing.expectEqual(contracts.RequestKind.dynamic, request.kind);
+                try std.testing.expectEqual(contracts.RequestOperation.dynamic_import, request.operation);
                 try project.respondExternalModule(request.id, .{
                     .id = .init(0x4_0000_0004),
                     .logical_name = "lazy",
@@ -912,10 +957,10 @@ test "source graph derives requests and preserves semantic identities with opaqu
     var saw_dynamic = false;
     for (project.edges()) |edge| {
         try std.testing.expectEqual(root_id, edge.importer);
-        if (edge.kind == .static and std.mem.eql(u8, edge.raw_specifier, "./dep")) static_dep_edges += 1;
-        if (edge.kind == .re_export) saw_re_export = edge.target == dep_id;
-        if (edge.kind == .type_only) saw_type_only = edge.target == types_id;
-        if (edge.kind == .dynamic) saw_dynamic = edge.state == .external;
+        if (edge.operation == .static_import and std.mem.eql(u8, edge.raw_specifier, "./dep")) static_dep_edges += 1;
+        if (edge.operation == .re_export) saw_re_export = edge.target == dep_id;
+        if (edge.type_only) saw_type_only = edge.target == types_id;
+        if (edge.operation == .dynamic_import) saw_dynamic = edge.state == .external;
     }
     try std.testing.expectEqual(@as(usize, 2), static_dep_edges);
     try std.testing.expect(saw_re_export and saw_type_only and saw_dynamic);
