@@ -48,18 +48,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     safety_abi.addImport("vizg-impl", safety_impl);
-    const safety_native_fs = b.createModule(.{
-        .root_source_file = b.path("src/native_fs_adapter.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-    });
-    safety_native_fs.addImport("vizg-core", safety_impl);
     const safety_tests = b.addRunArtifact(b.addTest(.{ .root_module = safety_impl }));
-    const safety_native_tests = b.addRunArtifact(b.addTest(.{ .root_module = safety_native_fs }));
-    const safety_step = b.step("audit-safety", "Run the full suite with Zig runtime safety enabled");
+    const safety_step = b.step("audit-safety", "Run the portable suite with Zig runtime safety enabled");
     safety_step.dependOn(&safety_tests.step);
-    safety_step.dependOn(&safety_native_tests.step);
 
     // Compile the OS-independent frontend/types/semantics layers for a small
     // representative target matrix. Objects are compiled only: no foreign
@@ -107,6 +98,17 @@ pub fn build(b: *std.Build) void {
         "Reject OS, native-adapter, and ABI dependencies in src/root.zig",
     );
     portable_core_lint_step.dependOn(&portable_core_probe.step);
+
+    const module_host_boundary = b.addSystemCommand(&.{
+        "sh",
+        "tools/check_module_host_boundary.sh",
+        ".",
+    });
+    const module_host_boundary_step = b.step(
+        "lint-module-host-boundary",
+        "Reject concrete module-resolution policy in the portable core and public ABI",
+    );
+    module_host_boundary_step.dependOn(&module_host_boundary.step);
     // Compile the same static-library graph installed for consumers, plus a C
     // translation unit that includes the public header, for every matrix target.
     // This is compile-only: no foreign archive is installed or executed.
@@ -224,7 +226,7 @@ pub fn build(b: *std.Build) void {
     wasm_module.export_memory = true;
 
     const install_wasm = b.addInstallArtifact(wasm_module, .{
-        .dest_dir = .{ .override = .{ .custom = "wasm-freestanding" } },
+        .dest_dir = .{ .override = .{ .custom = "lib" } },
     });
     const wasm_host_test = b.addSystemCommand(&.{
         "node",
@@ -266,6 +268,14 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     run_mod.addImport("vizg-core", lib_mod);
+    const run_fs_validation_host = b.createModule(.{
+        .root_source_file = b.path("test/support/fs_validation_host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    run_fs_validation_host.addImport("vizg-core", lib_mod);
+    run_mod.addImport("fs-validation-host", run_fs_validation_host);
 
     const main_exe = b.addExecutable(.{
         .name = "vizg",
@@ -304,13 +314,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    const native_fs_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/native_fs_adapter.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    native_fs_test_mod.addImport("vizg-core", unit_test_mod);
     const cli_test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -318,8 +321,15 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     cli_test_mod.addImport("vizg-core", unit_test_mod);
+    const test_fs_validation_host = b.createModule(.{
+        .root_source_file = b.path("test/support/fs_validation_host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_fs_validation_host.addImport("vizg-core", unit_test_mod);
+    cli_test_mod.addImport("fs-validation-host", test_fs_validation_host);
     const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = unit_test_mod }));
-    const run_native_fs_tests = b.addRunArtifact(b.addTest(.{ .root_module = native_fs_test_mod }));
     const run_cli_tests = b.addRunArtifact(b.addTest(.{ .root_module = cli_test_mod }));
     const abi_lifecycle_mod = b.createModule(.{
         .root_source_file = b.path("test/abi_lifecycle.zig"),
@@ -328,6 +338,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     abi_lifecycle_mod.addIncludePath(b.path("Lib"));
+    abi_lifecycle_mod.addCSourceFile(.{
+        .file = b.path("test/c_abi/hostile_pointer_probe.c"),
+        .flags = &.{"-std=c11"},
+    });
     abi_lifecycle_mod.linkLibrary(vizg_lib);
     const abi_lifecycle_tests = b.addRunArtifact(b.addTest(.{
         .root_module = abi_lifecycle_mod,
@@ -357,16 +371,21 @@ pub fn build(b: *std.Build) void {
         "-c",
         \\set -eu
         \\archive="$1"
-        \\actual="$(nm -g --defined-only "$archive" | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^vizg_/ { print $3 }' | sort -u)"
-        \\expected='vizg_project_add_source
-        \\vizg_project_analyze_source
+        \\actual="$(nm -g --defined-only "$archive" | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^vizg_/ { print $3 }' | LC_ALL=C sort -u)"
+        \\expected='vizg_abi_version
+        \\vizg_project_add_source
         \\vizg_project_create
         \\vizg_project_destroy
         \\vizg_project_finish
+        \\vizg_project_limit_kind
         \\vizg_project_respond_external
         \\vizg_project_respond_failure
         \\vizg_project_respond_source
-        \\vizg_project_result_destroy
+        \\vizg_project_result_diagnostic
+        \\vizg_project_result_edge
+        \\vizg_project_result_export
+        \\vizg_project_result_import
+        \\vizg_project_result_module
         \\vizg_project_result_summary
         \\vizg_project_step
         \\vizg_project_workspace_alignment
@@ -376,7 +395,7 @@ pub fn build(b: *std.Build) void {
         \\    printf '%s\n' "$actual" >&2
         \\    exit 1
         \\fi
-        \\imports="$(nm -g --undefined-only "$archive" | awk 'NF && $NF !~ /:$/ { print $NF }' | sort -u)"
+        \\imports="$(nm -g --undefined-only "$archive" | awk 'NF && $NF !~ /:$/ { print $NF }' | LC_ALL=C sort -u)"
         \\expected_imports="$2"
         \\if [ "$imports" != "$expected_imports" ]; then
         \\    echo "unexpected native archive imports:" >&2
@@ -421,7 +440,8 @@ pub fn build(b: *std.Build) void {
     const native_consumer_source = b.addWriteFiles().add("official_abi_v1_consumer.c",
         \\#include "vizg.h"
         \\int main(void) {
-        \\    return vizg_project_workspace_alignment() == 0 ? 1 : 0;
+        \\    if (vizg_abi_version() != VIZG_ABI_VERSION) return 1;
+        \\    return vizg_project_workspace_alignment() == 0 ? 2 : 0;
         \\}
     );
     const native_consumer_link = b.addSystemCommand(&.{ "cc", "-std=c11", "-I", "Lib" });
@@ -459,8 +479,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Compile & run all unit tests");
     test_step.dependOn(lint_silent_step);
     test_step.dependOn(portable_core_lint_step);
+    test_step.dependOn(module_host_boundary_step);
     test_step.dependOn(&run_tests.step);
-    test_step.dependOn(&run_native_fs_tests.step);
     test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&abi_lifecycle_tests.step);
     test_step.dependOn(&abi_internal_tests.step);

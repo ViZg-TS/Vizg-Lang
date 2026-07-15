@@ -2,101 +2,49 @@
 
 This roadmap separates implemented frontend work from planned layers. It is not a release promise.
 
-## Completed Program: Portable Core And First Official ABI v1
+## Closed Foundation: Portable Core And Official ABI v1
 
-Goals 174–188 are the only executable portability and ABI plan. They strictly
-replace Goals 159–173, which are superseded and non-executable. Each goal is a
-serial hard gate.
+Goals 189–207 are closed. The memory-first host-driven API uses
+`VIZG_ABI_VERSION = 1`; earlier unpublished surfaces were deleted without
+compatibility shims. The final repeated audit and exact command evidence are in
+[`FINAL_AUDIT.md`](FINAL_AUDIT.md).
 
-The memory-first, host-driven API is the first official public ABI and uses
-`VIZG_ABI_VERSION = 1`. Earlier unpublished internal surfaces were deleted.
-No compatibility shim, deprecated alias, old library, or parallel versioned
-ABI remains.
+The responsibility split is fixed:
 
-The target responsibility split is fixed:
+- ViZG discovers and links modules but does not resolve specifiers.
+- A runtime/consumer assigns `ModuleId` values and supplies source/external data.
+- Concrete filesystem hosts in this repository are validation fixtures only.
+- The project ABI is one-shot; changed source requires a new project.
 
-- ViZG core parses source, derives imports and exports, and owns graph and
-  semantic state.
-- Hosts resolve specifiers, assign opaque module identities, and provide source
-  bytes or external metadata.
-- Optional adapters provide platform services such as native filesystem access.
-- Executables compose core and adapters and own process I/O and lifecycle.
+ABI v1 is frozen. Goal 207 passed the repeated complete local validation matrix with no
+unresolved in-scope finding, so HIR planning is authorized. HIR remains
+unimplemented and cannot retroactively change the frozen ABI v1 contract.
 
-Paths and URLs are labels, not module identities. Core never calls host code.
-Goal 188 closed the final portability and security audit on 2026-07-14. HIR
-planning is now authorized; implementation requires a separate executable goal.
-
-## Current Implementation Snapshot: Frontend And Module Graph
+## Current Implementation Snapshot: Frontend And Host-Resolved Module Graph
 
 Implemented:
 
-- Scanner with tokens, comments, spans, and lexical diagnostics.
-- Parser for the current TypeScript/JavaScript-like subset.
-- AST model for supported declarations, statements, and expressions.
-- Binder with scopes, symbols, imports, exports, and duplicate diagnostics.
-- Resolver with read/write/call/export references and missing-name diagnostics.
-- Preliminary function CFGs.
-- Minimal multi-file module graph for static local imports.
-- Relative import resolution by `.ts` and `/index.ts`.
-- Module cache keyed by canonical file path.
-- Named import validation against target value-space exports.
-- Cross-file import linking via `src/modules/linker.zig`: each named/default/namespace or external import becomes a `LinkedImport` carrying local name, imported name, kind (`named`, `default`, `namespace`, `external`, or `unresolved`), and the resolved target module/symbol when available.
-- Linker output surfaced in CLI as the "Links" section on `vizg modules <file>`.
-- Module graph diagnostics `VZG5001`, `VZG5002`, and `VZG5003`.
-- CLI inspection commands.
-- Portable `src/root.zig` core with a freestanding dependency lint and a
-  separate native filesystem adapter under `src/adapters/native_fs/`.
-- Portable host/core contracts for opaque module and request identities,
-  borrowed source and request metadata, and all four request kinds. Logical
-  names are diagnostic-only and never imply filesystem identity.
-- Owned portable project sessions that copy host buffers, track explicit module
-  lifecycle states and revisions, retain partial results, and release all
-  sources and semantic arenas on teardown.
-- Deterministic pull-based module request scheduling with project-local IDs,
-  FIFO dispatch, equivalent-request deduplication, explicit terminal response
-  kinds, stale/foreign/duplicate rejection, cycle-safe source responses, and
-  guarded finish states.
-- Copied external-module descriptors with identities distinct from source
-  modules; named, default, namespace-valued, and type-only exports; validated
-  export tables; portable type metadata; and explicit unknown/any policy.
-- Official memory-first C ABI v1 with opaque project/result handles,
-  explicit source/external/failure host responses, pull-based stepping,
-  source-only convenience through the same engine, platform-identical layouts,
-  caller-owned bounded storage, and independent result ownership.
-- Optional reference native `FsModuleHost` that drives project step/respond,
-  assigns canonical per-session identities, resolves relative extension/index
-  candidates, confines traversal and symlinks to the root directory, bounds
-  source/module growth, and maps I/O outcomes to portable responses.
-- CLI migration to memory-first APIs: single-file commands call source-only
-  semantics after executable-owned reads, while multi-module inspection drives
-  the portable project through `FsModuleHost`, including missing, cyclic, and
-  registered external outcomes with original paths and spans.
-- Zig build and test wiring.
-- Static library `libvizg.a` rooted at the official ABI v1 in `Lib/vizg.zig`,
-  with its implementation in `Lib/abi.zig` over `src/root.zig`.
-- Public C header for host-driven project analysis and explicit ownership.
-- Exact exported-symbol allowlist in `zig build abi-symbols-test`.
-- Scanner diagnostic `VZG1005` for invalid or incomplete escape sequences.
+- scanner, parser, AST, binder, resolver, CFG, typed semantics, and checker for
+  the documented language subset;
+- opaque host-assigned module identities and project-local request identities;
+- source-derived imports, exports, re-exports, type-only metadata, and dynamic
+  requests;
+- deterministic pull-based request/response scheduling and cycle-safe graph
+  construction;
+- external-module descriptors with a distinct identity domain;
+- one-shot project lifecycle with project-owned immutable result views;
+- result ABI accessors for summary, modules, diagnostics, edges, imports, and
+  exports;
+- native, Android, and import-free `wasm32-freestanding` ABI targets;
+- in-memory project tests plus optional test-only host fixtures;
+- exact ABI symbol/layout gates and portable-core/module-boundary lints.
 
-Deferred backlog, not executable before the active portable-core gates allow it:
+## Runtime-Owned Module Resolution — Explicit Non-Goal
 
-- Add more parser recovery tests.
-- Expand fixture coverage for unsupported syntax errors.
-- Improve CLI formatting consistency.
-- Add snapshot-style tests for CLI output (including `modules` Links section).
-- Document each AST node in source comments or generated docs.
-- Add module graph snapshot tests.
-
-## Next Milestone: Module Layer Expansion
-
-Planned, not implemented:
-
-- Package or `node_modules` lookup.
-- `package.json` or `tsconfig` path resolution.
-- Dynamic import resolution.
-- CommonJS interop.
-- Default import export validation.
-- Code emission, bundling, or tree shaking.
+ViZG will not implement package lookup, `node_modules`, `package.json`,
+`tsconfig` path mapping, URL fetching, filesystem canonicalization, import maps,
+or CommonJS resolution. Those policies belong to the future runtime or another
+consumer of the module-provider API.
 
 ## Type Checker Milestone
 
@@ -120,46 +68,21 @@ Planned, not implemented:
 - Prepare for interpretation, analysis, or code generation.
 - Reserve `VZG7xxx` diagnostics for lowering errors.
 
-### HIR Entry Gate — Open After Goal 188
+### HIR Entry Gate — Opened By Goal 207
 
-Typed Semantics v2 and the portable-core audit are closed. HIR planning is
-authorized. Implementation remains pending a separate executable goal.
+Goal 207 closed the gate only after Goals 203–206 corrected external semantic
+propagation, pre-growth limits, summary/limit consistency, and oversized-source
+safety, and the resulting tree passed the repeated complete local command
+matrix. HIR planning may begin from the frozen portable project and ABI v1
+contracts. The verified conditions and limitations are recorded in
+[`FINAL_AUDIT.md`](FINAL_AUDIT.md).
 
-- [x] The owned `SemanticResult` and `ProjectSemanticResult` contracts are stable, including teardown and partial-result behavior.
-- [x] One canonical `TypeStore` per result/project and context-local ID rules remain enforced.
-- [x] Tests cover value/function/class/enum/interface/type-alias exports; aliases, default/namespace/re-export/type-only imports; missing/external links; cycles; and repeated rebuild/teardown.
-- [x] Checker diagnostics retain stable source and related spans while recovered semantic data stays inspectable.
-- [x] Full test, validation, cross-target, Android, and ABI gates are green.
-- [x] Future HIR must consume semantic results. It must not parse, bind, infer again, or create a competing `TypeStore`.
-- [x] Portable core and official ABI v1 release candidate closed through Goal 187.
-- [x] Final bug, vulnerability, portability, and correctness audit closed through Goal 188.
-- [x] Official ABI allocation is caller-owned and bounded: workspace, source,
-  module, diagnostic, graph-depth, and semantic-type exhaustion have explicit
-  portable statuses with no hidden allocator or WASM allocation import.
-- [x] Goal 186 provides an import-free `wasm32-freestanding` module exporting
-  only linear memory and official ABI v1, with JS-host coverage for single,
-  multi, missing, and external module flows.
+### Superseded portable-core closure records
 
-### Portable core and official ABI v1 RC closure — 2026-07-14
-
-Goal 187 audited the public Zig and C surfaces, removed the last metadata-free
-external response, and made orchestration helpers private. Native archives are
-PIC and link into a default PIE C consumer. Exact export and undefined-import
-tables are enforced for Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall;
-freestanding WASM has no imports. Full native, cross-target, Android, WASM,
-safety, layout, lifecycle, and consumer gates pass. At RC closure, Goal 188 was
-still the final mandatory adversarial audit before HIR work could begin.
-
-### Portable core and official ABI v1 final audit — 2026-07-14
-
-Goal 188 remediated ABI workspace aliasing and stale handles, reclaimable
-external-response scratch, native filesystem path-replacement races, and Linux
-executable-stack inference. Mutation, malformed-input, repeated lifecycle, and
-parallel independent-project regressions pass. The repeated dependency, state,
-identity, resource, filesystem, pointer, layout, and symbol audit has no known
-unresolved in-scope finding. Full evidence and residual contract limits are in
-[`portable-core-official-abi-v1-audit.md`](portable-core-official-abi-v1-audit.md).
-HIR planning is authorized; HIR implementation is not part of this program.
+The earlier Goal 187/188 closure records and the Goals 189–196 pre-validation
+checklist and the premature Goal 202 freeze claim are superseded by Goal 207's
+[`FINAL_AUDIT.md`](FINAL_AUDIT.md). They must not be used as current freeze
+evidence.
 
 ### Typed Semantics v2 closure verification — 2026-07-13
 

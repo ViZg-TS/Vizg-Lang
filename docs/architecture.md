@@ -7,181 +7,200 @@ analysis owns a host-driven module graph and its semantic results.
 
 ## Frozen Portable Target Architecture
 
-The first official public ABI is identified by `VIZG_ABI_VERSION = 1`.
-All earlier ABI surfaces were internal and unpublished. They were deleted
-without a compatibility shim, deprecated aliases, a legacy library, or a
-parallel versioned library.
+ViZG is an environment-independent frontend and semantic engine. It does not
+resolve module specifiers.
 
 Responsibilities are fixed:
 
-- Core parses host-supplied source, derives imports and exports, owns graph and
-  semantic analysis, and returns owned data through memory-first APIs.
-- Hosts resolve import specifiers, assign opaque `ModuleId` values, and provide
-  source bytes or external-module metadata. Paths and URLs are labels, never
-  implicit identities.
-- Executables compose core and host adapters and own arguments, output,
-  environment access, and lifecycle.
+- ViZG parses host-supplied source, discovers imports/exports/re-exports, emits
+  unresolved module requests, owns the graph, and performs semantic analysis.
+- The runtime or consumer resolves raw specifiers, assigns opaque `ModuleId`
+  values, and supplies source bytes, external metadata, or failure responses.
+- Filesystem, URL, package, database, memory, and virtual-module policies remain
+  outside ViZG.
+- Concrete hosts in this repository are tests or development examples only.
 
-Core never calls host code. Requests and responses cross the API boundary, and
-the host drives progress by calling the core again. Native filesystem support
-is an optional host adapter, not a core dependency. Goal 188 closed the final
-portable-core audit on 2026-07-14; HIR planning is authorized, while
-implementation requires a separate executable goal.
+Paths, URLs, logical names, and raw specifiers are labels. Only host-assigned
+`ModuleId` values identify source modules. `ExternalModuleId` is a separate
+identity domain.
 
 ## Portable Roots And ABI Boundary
 
 `src/root.zig` is the portable Zig package root. It exports frontend, project,
-semantics, and type APIs and imports neither ABI nor adapter code.
+semantic, and type APIs and imports neither ABI nor host fixtures.
 
 ### Portable project contracts
 
-`src/project/` defines the project boundary. Hosts assign opaque 64-bit
-`ModuleId` values and supply `ModuleSource` descriptors. A logical name is
-diagnostic text only: it is never an identity, cache key, resolved path, or URL.
-Equal names may identify different modules, and one identity may be shown under
-different names.
+`src/project/contracts.zig` defines fixed-width module/request identities,
+source descriptors, request attributes, external descriptors, and orthogonal
+request metadata:
 
-The core assigns opaque 64-bit `RequestId` values to unresolved
-`ModuleRequest` records. Each request preserves importer identity, raw
-specifier, source span, borrowed attributes, and one explicit kind: static,
-type-only, dynamic, or re-export. Resolution remains host-owned.
+```txt
+operation = static_import | re_export | dynamic_import
+type_only = false | true
+```
 
-Descriptor slices are borrowed for the receiving call. Any retained data is
-copied into core-owned storage. IDs and enums have fixed widths. The C ABI uses
-pointer/length spans and never embeds Zig slice layout.
+This represents `export type ... from` without treating type-only as a resolver
+kind. Requests preserve the raw source specifier, attributes, and source span.
+ViZG does not normalize or interpret the specifier.
 
-`project.Project` owns the session, copied source, module state, analysis, and
-result arenas. Revisions, duplicate/conflict handling, partial failure, request
-deduplication, FIFO stepping, stale response rejection, cycles, external
-modules, export tables, and hard limits are explicit and deterministic.
-`finish()` performs no hidden analysis.
+Each external export independently declares its namespace availability as
+`value`, `type`, or `both`. The zero flag set is invalid. Linking filters the
+descriptor against the namespace requested by the import; `both` therefore
+supports one imported class name in both `new ExternalClass()` and an
+`ExternalClass` type annotation. The C ABI represents the same contract with
+`VIZG_EXTERNAL_NAMESPACE_VALUE`, `VIZG_EXTERNAL_NAMESPACE_TYPE`, and
+`VIZG_EXTERNAL_NAMESPACE_BOTH`.
+
+`Project` is one-shot. A source identity is supplied once, `step()` analyzes
+reachable modules and returns one pending request at a time, every request is
+answered once, and `finish()` is terminal. There are no source revisions or
+stale-request states. A host needing a new source revision creates a new project.
+
+After `finish()`, `Project` owns one deterministic canonical diagnostic table.
+Every module-originated row carries its host-assigned `ModuleId` directly;
+logical names remain labels and are never identity lookup keys. The table maps
+single-file diagnostics to scanner, parser, binder, resolver, types, or checker,
+host request failures to module-host, and graph/link failures to project. The
+Zig and C result accessors read this same table without a late merge.
+
+All submitted slices are borrowed for the call and copied when retained.
+Project state and semantic output live until project destruction.
 
 ### Official C ABI v1
 
-`Lib/abi.zig` adapts the portable project engine to the declarations in
-`Lib/vizg.h`. `Lib/vizg.zig` is the library root. `Vizg_Project` and
-`Vizg_ProjectResult` are opaque handles. Hosts create a project, add root
-source, repeatedly pull one request, answer with source, external metadata, or
-failure, and finish only after completion. `vizg_project_analyze_source`
-drives the same engine and resolves derived imports as not found.
+`Lib/vizg.zig` roots the static library and `Lib/abi.zig` implements
+`Lib/vizg.h`. The ABI uses opaque `Vizg_Project` and `Vizg_ProjectResult`
+handles over one caller-owned aligned workspace.
 
-The ABI performs no filesystem operation or callback. Strings are exact
-pointer/length spans. Submitted bytes are borrowed for one call and copied when
-retained. Step output is borrowed until the next project call. A finished
-result is immutable, survives project destruction, and has explicit cleanup.
-
-Ownership and recovery are exact:
-
-- The caller owns the workspace and every submitted span. Retained descriptors
-  are copied; request output remains borrowed until the next project call.
-- One project handle is single-threaded. Independent workspaces and immutable
-  result reads may run in parallel. Destruction must be externally synchronized.
-- Destroy a non-null project and result exactly once. Result data survives
-  project destruction, but the workspace remains reserved and immutable until
-  result destruction.
-- `INVALID_ARGUMENT` and `INVALID_STATE` identify rejected input or sequencing.
-  `LIMIT_EXCEEDED` and `OUT_OF_MEMORY` identify configured-bound and workspace
-  exhaustion. `INTERNAL_ERROR` is terminal.
-- Non-OK operations are not a general rollback boundary once analysis or
-  allocation starts. After exhaustion, limit failure, or internal failure,
-  destroy and restart. A successful `finish` may return a partial result:
-  completed modules and links remain inspectable and `has_failures` records
-  terminal source/external resolution failures.
-
-All tags use `uint32_t`, identities use `uint64_t`, booleans use `uint8_t`,
-and lengths use `size_t`; public structures contain no C `enum` or `bool`.
-Reserved bytes must be zero and boolean bytes accept only 0 or 1.
-
-Project storage is one aligned caller-owned workspace. All state, retained
-source, semantic state, and result storage comes from that bounded region.
-Limits cover cumulative source bytes, modules, diagnostics, graph depth, and
-canonical semantic types. Inputs must not overlap the workspace. Separate
-workspaces isolate independent analyses.
-
-The same header and exact official symbol set are used for native, Android,
-and freestanding WebAssembly builds. `zig build abi-symbols-test` enforces the
-native tables. `zig build wasm-freestanding` additionally inspects
-the WebAssembly tables: there are zero imports and the only exports are linear
-`memory` plus those official functions.
-
-The exact official function export table is:
+Lifecycle:
 
 ```txt
-vizg_project_add_source
-vizg_project_analyze_source
-vizg_project_create
-vizg_project_destroy
-vizg_project_finish
-vizg_project_respond_external
-vizg_project_respond_failure
-vizg_project_respond_source
-vizg_project_result_destroy
-vizg_project_result_summary
-vizg_project_step
-vizg_project_workspace_alignment
-vizg_project_workspace_overhead
+create
+  -> add source(s)
+  -> step / respond exactly once per request
+  -> step complete
+  -> finish
+  -> read immutable result views
+  -> destroy project
 ```
 
-On `x86_64-linux`, the exact undefined native archive table depends on the
-selected optimization mode:
+`finish()` returns a project-owned immutable view. Repeated calls return the
+same view without allocation. The view becomes invalid when the project is
+destroyed. There is no independent result owner, result destructor, convenience
+file function, or convenience single-source ABI.
 
-| Mode | Imports |
-| --- | --- |
-| Debug | `_DYNAMIC`, `__divti3`, `__modti3`, `__tls_get_addr`, `getauxval`, `memcpy`, `memmove` |
-| ReleaseSafe | `_DYNAMIC`, `__divti3`, `__tls_get_addr`, `__zig_probe_stack`, `getauxval`, `memcpy`, `memmove`, `memset` |
-| ReleaseFast / ReleaseSmall | `memcpy`, `memmove`, `memset` |
+The result surface provides summary, modules, canonical diagnostics, graph
+edges, semantic imports, and semantic exports. Strings and spans returned from a
+result remain borrowed from the project until destruction.
 
-These are native compiler/runtime support symbols. They do not represent
-filesystem, process, POSIX, WASI, allocator, or host-callback use by core. The
-`wasm32-freestanding` import table is exactly empty; its export table is
-`memory` followed by the 13 functions above.
+Finalization computes the closure reachable from submitted roots through
+resolved local import edges. Only that closure is validated and retained in the
+final module, edge, diagnostic, import, and export views; unreachable
+pre-supplied source is excluded. Summary flags are computed from canonical
+error diagnostics by phase: scanner/parser, binder/resolver/types/checker,
+project, and module-host errors populate the syntax, semantic, project, and
+module-failure groups respectively. The summary is partial when any group is
+set, so every public error diagnostic is represented.
 
-For `wasm32`, every pointer and `size_t` is a 32-bit byte offset/count in the
-exported linear memory. The host grows memory, chooses a workspace satisfying
-`vizg_project_workspace_alignment`, and keeps config/input descriptors and
-their byte spans outside that exclusive workspace. Non-empty spans must be
-in-bounds. The module never allocates through a host import. Because
-`memory.grow` replaces the JavaScript `ArrayBuffer`, a host must rebuild its
-typed views after growth. Request/step pointers are borrowed until the next
-project call, while a finished result continues to occupy the workspace until
-result destruction.
+Semantic import and re-export rows retain their exact graph edge index. Local
+and external identities occupy separate fields, and every optional module,
+external-module, and edge value has an explicit `has_*` flag. Consumers must not
+interpret numeric zero as an absent identity or edge.
 
-The reference glue in `test/wasm/official_abi_v1.mjs` remains outside
-`src/root.zig`. It writes the fixed ABI records into linear memory and drives
-source, missing, and external responses; native and WebAssembly execution use
-the same `Lib/abi.zig` engine.
+Every public typed pointer is checked for C alignment and its complete range is
+validated before dereference or output initialization. Nested strings and typed
+arrays are validated before slices are formed. WASM offsets are checked against
+current linear memory; host input and output must not overlap the exclusive
+project workspace, and project creation also rejects config/output aliasing.
+Range overflow, invalid tags, non-zero reserved bytes, invalid booleans, and
+invalid response order return a controlled status. Pointer-validation failures
+return `INVALID_ARGUMENT` before project state or host output is mutated.
 
-### Reference native filesystem host
+Configured project-owned limits cover per-module and aggregate source bytes,
+modules, requests, edges, diagnostics, graph depth, and semantic types. Each
+owner checks its bound before copying retained data or growing a collection.
+The single-source representation ceiling is `VIZG_MAX_SOURCE_LENGTH`
+(`UINT32_MAX`) because source offsets, span endpoints, lines, and columns are
+stable `uint32_t` values. Configuration cannot raise the per-source limit above
+that ceiling; the rejected create returns a destroy-only handle whose limit kind
+is `SOURCE_BYTES`. Source descriptors over it are rejected before nested pointer
+range access, copying, or scanner entry; aggregate byte addition is
+overflow-checked before mutation.
+Graph depth is computed after resolution as the shortest resolved-edge distance
+from any root; relaxation makes cycles converge and removes discovery-order and
+host-response-order dependence. The source-response path preflights that
+prospective shortest depth and rejects an over-depth response without consuming
+the request or mutating source/module/edge state. Limit or allocation exhaustion
+is terminal for that project. Immediately after `LIMIT_EXCEEDED`,
+`vizg_project_limit_kind` identifies the exact non-`NONE` limit category,
+including parser recursion; successful and non-limit project calls reset it to
+`NONE`.
 
-`src/adapters/fs_module_host.zig` is an optional driver for the portable
-project API. It loads a root file, repeatedly calls `Project.step()`, and maps
-filesystem outcomes to source, not-found, denied, or failed responses. Core has
-no filesystem branch or policy.
+Fallible project mutations are ownership-transactional even though allocation
+exhaustion remains terminal for the caller. Source copying, the frontend and
+semantic pipeline, derived metadata, requests and edges, external descriptors,
+project semantics, canonical diagnostics, and ABI snapshot preparation remove
+all partially retained allocations on failure. Semantic and ABI result pointers
+are published only after their complete commit. Exhaustive fault-injection tests
+run each scenario once successfully and then fail every allocation index,
+checking teardown and publication invariants at every boundary.
 
-Within one host session, canonical real paths key stable module identities.
-Only relative specifiers are accepted. Extension-less requests try TypeScript
-and JavaScript extensions and matching index files. The canonical root
-directory confines traversal and symlinks. File metadata is checked before
-source allocation, and configured source/module limits are enforced.
+The official export table is:
 
-`src/main.zig` owns command-line file reads. Single-file commands call the
-source-only semantic API. The `modules` command composes the portable project
-with `FsModuleHost`. Alternate hosts replace only this driver.
+```txt
+vizg_abi_version
+vizg_project_workspace_alignment
+vizg_project_workspace_overhead
+vizg_project_create
+vizg_project_destroy
+vizg_project_limit_kind
+vizg_project_add_source
+vizg_project_step
+vizg_project_respond_source
+vizg_project_respond_external
+vizg_project_respond_failure
+vizg_project_finish
+vizg_project_result_summary
+vizg_project_result_module
+vizg_project_result_diagnostic
+vizg_project_result_edge
+vizg_project_result_import
+vizg_project_result_export
+```
+
+Native, Android, and `wasm32-freestanding` builds use the same header and ABI.
+The WASM build exports linear memory and the allowlist above and imports no host
+service.
+
+This ABI v1 surface is frozen. Goal 207's repeated source, lifecycle, hostile
+input, fault-injection, limit-boundary, native-symbol, and WASM-export audit is
+recorded in [`FINAL_AUDIT.md`](FINAL_AUDIT.md). Future incompatible contract
+changes require a new ABI version; HIR may consume this contract but must not
+silently change it.
+
+### Module-host validation fixtures
+
+`test/support/fs_validation_host.zig` proves that an external host can drive the
+contract from files. It is not a resolver supplied by ViZG and is not exported
+through `src/root.zig` or `Lib/vizg.h`.
+
+The development CLI may compose this fixture to validate multi-file behavior.
+Production runtimes implement their own resolution policy. In-memory project
+tests are the primary core validation mechanism.
 
 Build dependency direction:
 
 ```txt
 consumer -> Lib/vizg.h -> libvizg.a
-libvizg.a root: Lib/vizg.zig -> Lib/abi.zig -> src/root.zig
-native executable: src/main.zig -> src/root.zig + src/adapters/
-filesystem adapter -> src/root.zig
-src/root.zig -/-> ABI or adapters
+libvizg.a: Lib/vizg.zig -> Lib/abi.zig -> src/root.zig
+validation CLI: src/main.zig -> src/root.zig + test/support fixture
+src/root.zig -/-> ABI, filesystem, or host fixtures
 ```
 
-`zig build lint-portable-core` references every public declaration while
-compiling `src/root.zig` for `wasm32-freestanding`. It rejects filesystem,
-process, POSIX, WASI, environment, adapter, and ABI dependencies and is required
-by both `test` and `validate`.
+`zig build lint-portable-core` compiles all public declarations for
+`wasm32-freestanding`. `zig build lint-module-host-boundary` additionally scans
+public core/ABI roots and rejects concrete resolver-policy dependencies.
 
 ## Current Implemented Layer
 
@@ -205,49 +224,37 @@ source text
 
 `src/frontend/frontend.zig` owns this orchestration through `frontend.analyze`.
 
-`src/adapters/native_fs/graph.zig` builds on `frontend.analyze` and the portable
-records in `src/modules/graph.zig`:
+The portable `Project` layer supplies analyzed frontend results to the borrowed
+semantic graph records in `src/modules/`. No file loading or specifier
+resolution occurs there.
 
 ```txt
-entry path
-  -> read source
+host-supplied source + ModuleId
   -> frontend.analyze
-  -> collect static imports
-  -> resolve relative imports
-  -> recursively analyze local modules
-  -> cache by canonical path
-  -> build import edges
-  -> validate named imports
-  -> module diagnostics
+  -> discover raw imports/exports/re-exports
+  -> emit ModuleRequest
+  -> host responds with source/external/failure
+  -> record host-resolved edge
+  -> build semantic graph and linked imports
 ```
 
-### Cross-file Linking (Linker)
+### Cross-file Linking
 
-Above the loader/resolver, `src/modules/linker.zig` builds per-build cross-file import links. Each link records a local name in one file and the symbol it resolves to (or will resolve to after further passes) inside another module:
-
-```txt
-entry path
-  -> read source
-  -> frontend.analyze
-  -> build linked imports
-    for each static named/default/namespace import:
-      classify kind as .named, .default, .namespace, or .external
-    record unresolved imports when no target is resolved yet
-  -> graph.zig exposes linked_imports to the CLI
-  -> `vizg modules` prints Links section in output
-```
-
-The linker lives strictly inside the module layer. It owns no filesystem work and produces immutable snapshots for one `Linker` instance. It does not bundle, execute, or resolve packages — it is a structural analysis pass.
+`src/modules/linker.zig` links binder import records against the target modules
+selected by host-resolved edges. Links classify named, default, namespace,
+external, and unresolved bindings. The linker does not open files, interpret
+specifiers, call a host, or apply package policy.
 
 ### Module Layer Files
 
-- `src/modules/root.zig`: public API re-export.
-- `src/modules/graph.zig`: graph structure, recursive traversal, import edges, export validation, module diagnostics (`VZG5xxx`).
-- `src/modules/loader.zig`: source loading and single-file frontend analysis.
-- `src/modules/resolver.zig`: relative import resolution and path canonicalization.
-- `src/modules/linker.zig`: per-build cross-file import link construction (named/default/namespace imports resolve to exported symbols; external imports preserved as `.external`).
-
-
+- `src/project/`: owned request/response session and source-derived graph.
+- `src/modules/root.zig`: borrowed graph/link structures used by project
+  semantics.
+- `src/modules/graph.zig`: modules, host-resolved edges, linked imports, and
+  module diagnostics.
+- `src/modules/linker.zig`: cross-module symbol link construction.
+- `src/modules/externals.zig`: legacy-neutral external metadata helpers; no
+  loading or resolution.
 
 ## Types And Semantics Layers
 
@@ -303,13 +310,29 @@ The store interns anonymous structural shapes, retains declaration identity for 
 
 ### Project semantic contract
 
-`analyzeProject` builds the existing `ModuleGraph`, then `analyzeModuleGraph` consumes every module's existing `FrontendResult` without reparsing. One project-wide canonical `TypeStore` supplies every module `TypeInfo` and every exported/imported `TypeId`; IDs are comparable only inside that `ProjectSemanticResult`.
+`analyzeProject` builds the existing `ModuleGraph`, including descriptor-backed
+external modules, then `analyzeModuleGraph` consumes every source module's
+existing `FrontendResult` without reparsing. External descriptors are lowered
+to canonical value/type identities in the shared store before import and
+re-export propagation begins. One project-wide canonical `TypeStore` supplies
+every module `TypeInfo` and every exported/imported `TypeId`; IDs are comparable
+only inside that `ProjectSemanticResult`.
 
-`SemanticIdentity` is a value-qualified identity: module ID, optional binder symbol ID, declaration node ID, namespace, and canonical type ID. `SemanticExport` covers value declarations, functions, classes, enums, interfaces, and type aliases. Aliases and named/star/default re-exports retain the target identity rather than inventing a second declaration identity.
+`SemanticIdentity` contains a source or external-module identity, optional
+binder symbol ID, declaration identity, namespace, and canonical type ID.
+`SemanticExport` covers value declarations, functions, classes, enums,
+interfaces, type aliases, and descriptor-backed external declarations. Aliases
+and named/star/default re-exports retain the target identity rather than
+inventing a second declaration identity.
 
-`SemanticImport` records named, default, namespace, type-only, external, unresolved, and cyclic-partial states with its local symbol, target identity when known, runtime-binding flag, and stable source span. Namespace imports use an owned structural object made from runtime exports. Descriptor-backed external imports retain external provenance and declared portable types; missing external members remain inspectable unresolved links and emit a stable graph diagnostic.
+`SemanticImport` records named, default, namespace, type-only, external, unresolved, and cyclic-partial states with its local symbol, target identity when known, runtime-binding flag, and stable source span. Namespace imports use an owned structural object made from runtime exports. Descriptor-backed external imports retain external provenance, declared portable types, and value/type namespace availability; missing external members remain inspectable unresolved links and emit a stable graph diagnostic.
 
-Propagation uses a bounded fixed point. Cyclic graphs terminate; known declarations remain available while incomplete links keep stable `unknown` or cyclic-partial states. The final checker consumes the propagated `TypeInfo` and never duplicates inference. Diagnostics mark the result partial but do not invalidate modules, identities, types, or links.
+Propagation uses one bounded project fixed point over source and external
+identities. Cyclic graphs terminate; known declarations remain available while
+incomplete links keep stable `unknown` or cyclic-partial states. The final
+checker consumes the propagated `TypeInfo` and canonical `TypeId`s directly;
+semantic types are not patched after checking. Diagnostics mark the result
+partial but do not invalidate modules, identities, types, or links.
 
 `ProjectSemanticResult` owns the module graph and one semantic arena containing the shared store and all project semantic slices. Call `deinit` exactly once. No result-backed slice or pointer may outlive it. Rebuilds create independent ownership contexts, so old `TypeId` values must never be compared with new ones.
 
@@ -395,24 +418,25 @@ The frontend is split into small modules:
 - `resolver.zig`: resolves read/write/call/export references to bound symbols and reports missing names.
 - `cfg.zig`: builds preliminary function-level control-flow graphs.
 
-The single-file pipeline does not require file system access except for CLI input. `frontend.analyze` receives source text directly. The module graph layer is the file-system-aware wrapper.
+The single-file pipeline receives source text directly. The project and module layers are host-resolved and contain no filesystem-aware wrapper.
 
 ## Platform Boundary
 
 `cross_check.zig` references the public declarations in the frontend, types, and semantics layers. `zig build cross-check` compiles that generic probe as an object for representative Linux, Windows, macOS, WASI, and Android targets. `zig build abi-cross-check` separately compiles target static archives using the consumer dependency graph (`src/root.zig` and `Lib/vizg.zig`) and compiles the official C ABI v1 header probe. Neither step runs foreign code.
 
-Generic layers must not branch on the target OS. Platform-dependent work stays in adapters such as `src/main.zig` for CLI interaction, `src/adapters/native_fs/` for filesystem-backed loading, `Lib/vizg.zig` for the official C ABI v1, and build/packaging helpers. The ABI matrix proves that its adapter compiles for the listed targets; it does not claim runtime validation there.
+Generic layers must not branch on the target OS. Platform-dependent work stays in adapters such as `src/main.zig` for CLI interaction, `test/support/fs_validation_host.zig` for test-only filesystem-backed loading, `Lib/vizg.zig` for the official C ABI v1, and build/packaging helpers. The ABI matrix proves that its adapter compiles for the listed targets; it does not claim runtime validation there.
 
 Shared diagnostics live outside the frontend:
 
 - `src/diagnostics/root.zig`: severity, phase, stable diagnostic codes, messages, spans, and optional paths.
+
 ## CLI Layer
 
 `src/main.zig` is an inspection CLI around the source-only semantic API and the
 portable project API. Single-file commands read one file into memory and create
 one `SemanticResult`; they reuse its frontend snapshot and never reparse for
 `check` or `types`. The `modules` command drives `Project.step()` through the
-optional `FsModuleHost` adapter:
+test-only `FsValidationHost` fixture:
 
 - `check`
 - `tokens`
@@ -436,7 +460,7 @@ Diagnostics are phase-tagged records with a severity, stable code, display name,
 
 Likely future layers are intentionally separate from the current frontend and module graph:
 
-- Expanded module layer: package lookup, configuration-aware resolution, and richer import/export forms.
+- Module contract expansion: richer source-derived import/export metadata without adding resolver policy.
 - Type checker expansion: add advanced TypeScript forms beyond the supported Typed Semantics v2 subset.
 - HIR/lowering: lower AST or typed AST into a more compiler-friendly intermediate form.
 - Runtime/compiler layers: execute, interpret, compile, or emit code from lowered forms.

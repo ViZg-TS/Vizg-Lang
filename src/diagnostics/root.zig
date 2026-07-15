@@ -1,3 +1,4 @@
+const std = @import("std");
 const tokens = @import("../frontend/tokens.zig");
 
 pub const Severity = enum {
@@ -25,6 +26,8 @@ pub const DiagnosticCode = enum {
     duplicate_export,
     cannot_find_name,
     module_not_found,
+    module_access_denied,
+    module_host_failed,
     missing_export,
     circular_import,
     unknown_type_name,
@@ -63,6 +66,56 @@ pub const Diagnostic = struct {
 pub const RelatedSpan = struct {
     span: tokens.Span,
     message: []const u8,
+};
+
+/// A diagnostic collector that rejects the next entry before growing beyond
+/// its configured logical limit. Callers can therefore propagate the stable
+/// `DiagnosticLimitExceeded` error without first allocating the diagnostic or
+/// any diagnostic-owned metadata.
+pub const LimitedList = struct {
+    values: std.ArrayList(Diagnostic) = .empty,
+    max_items: usize = std.math.maxInt(usize),
+
+    pub fn init(max_items: usize) LimitedList {
+        return .{ .max_items = max_items };
+    }
+
+    pub fn len(self: *const LimitedList) usize {
+        return self.values.items.len;
+    }
+
+    pub fn items(self: *const LimitedList) []const Diagnostic {
+        return self.values.items;
+    }
+
+    pub fn mutableItems(self: *LimitedList) []Diagnostic {
+        return self.values.items;
+    }
+
+    pub fn ensureUnusedCapacity(self: *const LimitedList, additions: usize) !void {
+        const next = std.math.add(usize, self.values.items.len, additions) catch
+            return error.DiagnosticLimitExceeded;
+        if (next > self.max_items) return error.DiagnosticLimitExceeded;
+    }
+
+    pub fn append(self: *LimitedList, allocator: std.mem.Allocator, diagnostic: Diagnostic) !void {
+        try self.ensureUnusedCapacity(1);
+        try self.values.append(allocator, diagnostic);
+    }
+
+    pub fn appendSlice(self: *LimitedList, allocator: std.mem.Allocator, new_items: []const Diagnostic) !void {
+        try self.ensureUnusedCapacity(new_items.len);
+        try self.values.appendSlice(allocator, new_items);
+    }
+
+    pub fn toOwnedSlice(self: *LimitedList, allocator: std.mem.Allocator) ![]Diagnostic {
+        return self.values.toOwnedSlice(allocator);
+    }
+
+    pub fn deinit(self: *LimitedList, allocator: std.mem.Allocator) void {
+        self.values.deinit(allocator);
+        self.* = .{};
+    }
 };
 
 pub fn lexicalErrorCode(err: tokens.LexicalError) DiagnosticCode {
@@ -117,6 +170,8 @@ pub fn diagnosticCodeId(code: DiagnosticCode) []const u8 {
         .duplicate_export => "VZG3002",
         .cannot_find_name => "VZG4001",
         .module_not_found => "VZG5001",
+        .module_access_denied => "VZG5004",
+        .module_host_failed => "VZG5005",
         .missing_export => "VZG5002",
         .circular_import => "VZG5003",
         .unknown_type_name => "VZG6004",
@@ -148,6 +203,8 @@ pub fn diagnosticCodeName(code: DiagnosticCode) []const u8 {
         .duplicate_export => "duplicate_export",
         .cannot_find_name => "cannot_find_name",
         .module_not_found => "module_not_found",
+        .module_access_denied => "module_access_denied",
+        .module_host_failed => "module_host_failed",
         .missing_export => "missing_export",
         .circular_import => "circular_import",
         .unknown_type_name => "unknown_type_name",

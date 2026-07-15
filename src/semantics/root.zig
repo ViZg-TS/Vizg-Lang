@@ -47,6 +47,8 @@ pub const SemanticExport = struct {
     module_id: ModuleId,
     name: []const u8,
     identity: SemanticIdentity,
+    type_identity: ?SemanticIdentity = null,
+    edge_index: ?usize,
     type_only: bool,
     re_export: bool,
     span: @import("../frontend/tokens.zig").Span,
@@ -54,6 +56,7 @@ pub const SemanticExport = struct {
 
 pub const SemanticImport = struct {
     module_id: ModuleId,
+    edge_index: usize,
     import_symbol: ?binder.SymbolId,
     local_name: []const u8,
     imported_name: []const u8,
@@ -61,7 +64,16 @@ pub const SemanticImport = struct {
     runtime_binding: bool,
     state: SemanticLinkState,
     target: ?SemanticIdentity,
+    type_target: ?SemanticIdentity = null,
     span: @import("../frontend/tokens.zig").Span,
+};
+
+const ExternalSemanticExport = struct {
+    external_module_id: u64,
+    name: []const u8,
+    kind: modules_mod.graph.ExternalExportKind,
+    value_identity: ?SemanticIdentity,
+    type_identity: ?SemanticIdentity,
 };
 
 pub const ProjectSemanticModule = struct {
@@ -240,11 +252,25 @@ test {
     _ = type_compat;
 }
 
+pub const SemanticLimits = struct {
+    max_types: usize = std.math.maxInt(usize),
+    max_diagnostics: usize = std.math.maxInt(usize),
+};
+
 /// Analyze one source exactly once and return the single owned semantic output.
 pub fn analyzeSource(
     backing_allocator: std.mem.Allocator,
     source: frontend.SourceFile,
     options: frontend.FrontendOptions,
+) !SemanticResult {
+    return analyzeSourceWithLimits(backing_allocator, source, options, .{});
+}
+
+pub fn analyzeSourceWithLimits(
+    backing_allocator: std.mem.Allocator,
+    source: frontend.SourceFile,
+    options: frontend.FrontendOptions,
+    limits: SemanticLimits,
 ) !SemanticResult {
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer arena.deinit();
@@ -255,14 +281,35 @@ pub fn analyzeSource(
         .text = try allocator.dupe(u8, source.text),
         .kind = source.kind,
     };
-    const fe = try frontend.analyze(allocator, owned_source, options);
-    var type_store = types.TypeStore.init(allocator);
-    const info = try buildTypeInfo(allocator, @as(modules_mod.ModuleId, 0), fe, &type_store, true, &.{}, true);
+    var bounded_options = options;
+    bounded_options.max_diagnostics = @min(options.max_diagnostics, limits.max_diagnostics);
+    const fe = try frontend.analyze(allocator, owned_source, bounded_options);
+    var type_store = types.TypeStore.initWithLimit(allocator, limits.max_types);
+    const info = try buildTypeInfo(
+        allocator,
+        @as(modules_mod.ModuleId, 0),
+        fe,
+        &type_store,
+        true,
+        &.{},
+        true,
+        try remainingDiagnostics(limits.max_diagnostics, fe.diagnostics.len),
+    );
 
     const syntax_diags = try selectDiagnostics(allocator, fe.diagnostics, true, owned_source.path);
     const frontend_semantic_diags = try selectDiagnostics(allocator, fe.diagnostics, false, owned_source.path);
-    const semantic_diags = try combineDiagnostics(allocator, &.{ frontend_semantic_diags, info.diagnostics }, owned_source.path);
-    const all_diags = try combineDiagnostics(allocator, &.{ syntax_diags, semantic_diags }, owned_source.path);
+    const semantic_diags = try combineDiagnosticsWithLimit(
+        allocator,
+        &.{ frontend_semantic_diags, info.diagnostics },
+        owned_source.path,
+        limits.max_diagnostics,
+    );
+    const all_diags = try combineDiagnosticsWithLimit(
+        allocator,
+        &.{ syntax_diags, semantic_diags },
+        owned_source.path,
+        limits.max_diagnostics,
+    );
 
     const module: SemanticModule = .{
         .id = 0,
@@ -300,7 +347,7 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
     var graph = input_graph;
     errdefer graph.deinit();
 
-    const data = try analyzeModuleGraphData(backing_allocator, &graph);
+    const data = try analyzeModuleGraphData(backing_allocator, &graph, .{});
     return .{
         .arena = data.arena,
         .graph = graph,
@@ -315,7 +362,23 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
 
 /// Analyze already-owned frontend results without taking graph ownership.
 pub fn analyzeBorrowedModuleGraph(backing_allocator: std.mem.Allocator, graph: *const modules_mod.ModuleGraph) !BorrowedProjectSemanticResult {
-    const data = try analyzeModuleGraphData(backing_allocator, graph);
+    return analyzeBorrowedModuleGraphWithLimit(backing_allocator, graph, std.math.maxInt(usize));
+}
+
+pub fn analyzeBorrowedModuleGraphWithLimit(
+    backing_allocator: std.mem.Allocator,
+    graph: *const modules_mod.ModuleGraph,
+    max_types: usize,
+) !BorrowedProjectSemanticResult {
+    return analyzeBorrowedModuleGraphWithLimits(backing_allocator, graph, .{ .max_types = max_types });
+}
+
+pub fn analyzeBorrowedModuleGraphWithLimits(
+    backing_allocator: std.mem.Allocator,
+    graph: *const modules_mod.ModuleGraph,
+    limits: SemanticLimits,
+) !BorrowedProjectSemanticResult {
+    const data = try analyzeModuleGraphData(backing_allocator, graph, limits);
     return .{
         .arena = data.arena,
         .type_store = data.type_store,
@@ -327,27 +390,34 @@ pub fn analyzeBorrowedModuleGraph(backing_allocator: std.mem.Allocator, graph: *
     };
 }
 
-fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const modules_mod.ModuleGraph) !ProjectSemanticData {
+fn analyzeModuleGraphData(
+    backing_allocator: std.mem.Allocator,
+    graph: *const modules_mod.ModuleGraph,
+    limits: SemanticLimits,
+) !ProjectSemanticData {
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer arena.deinit();
     const allocator = arena.allocator();
-    var type_store = types.TypeStore.init(allocator);
+    var type_store = types.TypeStore.initWithLimit(allocator, limits.max_types);
+
+    var external_exports: std.ArrayList(ExternalSemanticExport) = .empty;
+    try collectExternalExports(allocator, graph.external_modules, &type_store, &external_exports);
 
     var project_modules: std.ArrayList(ProjectSemanticModule) = .empty;
     for (graph.modules) |module| {
         try project_modules.append(allocator, .{
             .id = module.id,
             .path = module.display_path,
-            .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false, &.{}, false),
+            .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false, &.{}, false, limits.max_diagnostics),
         });
     }
 
     var export_list: std.ArrayList(SemanticExport) = .empty;
     try collectDirectExports(allocator, graph.modules, project_modules.items, &type_store, &export_list);
-    try resolveReExports(allocator, graph, project_modules.items, &type_store, &export_list);
+    try resolveReExports(allocator, graph, external_exports.items, &export_list);
 
     var import_list: std.ArrayList(SemanticImport) = .empty;
-    try collectSemanticImports(allocator, graph, &type_store, export_list.items, &import_list);
+    try collectSemanticImports(allocator, graph, &type_store, external_exports.items, export_list.items, &import_list);
 
     // The first pass establishes exported identities. Once imports are linked,
     // complete nominal tables exactly once in dependency-first graph order so
@@ -360,7 +430,7 @@ fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const mo
         const module = &project_modules.items[completion_index];
         const graph_module = graphModule(graph, module.id) orelse continue;
         const imported_types = try importedTypeBindings(allocator, module.id, import_list.items, &type_store);
-        _ = try type_collector.collectDeclaredTypesInModuleWithImports(
+        _ = try type_collector.collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
             allocator,
             graph_module.result.source,
             graph_module.result.ast,
@@ -368,7 +438,9 @@ fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const mo
             module.id,
             &type_store,
             imported_types,
+            &.{},
             true,
+            limits.max_diagnostics,
         );
     }
 
@@ -385,6 +457,7 @@ fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const mo
             false,
             imported_types,
             false,
+            limits.max_diagnostics,
         );
     }
 
@@ -398,8 +471,8 @@ fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const mo
             changed = (try applyImportedTypes(module, import_list.items, &type_store)) or changed;
             changed = (try refreshProjectTypes(allocator, module.id, graph_module.result, &module.type_info, &type_store)) or changed;
         }
-        changed = refreshDirectExportTypes(project_modules.items, export_list.items) or changed;
-        try resolveReExports(allocator, graph, project_modules.items, &type_store, &export_list);
+        changed = refreshDirectExportTypes(project_modules.items, &type_store, export_list.items) or changed;
+        try resolveReExports(allocator, graph, external_exports.items, &export_list);
         // Namespace objects cache export TypeIds. Rebuild them after direct and
         // re-export propagation so the next round refreshes imported symbols,
         // references, expressions, and dependent exports from the final shape.
@@ -412,7 +485,7 @@ fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const mo
         try finishProjectTypes(allocator, graph_module.result, &module.type_info, &type_store);
     }
 
-    var all_diags: std.ArrayList(diagnostics.Diagnostic) = .empty;
+    var all_diags = diagnostics.LimitedList.init(limits.max_diagnostics);
     try all_diags.appendSlice(allocator, graph.diagnostics);
     for (project_modules.items) |module| try all_diags.appendSlice(allocator, module.type_info.diagnostics);
 
@@ -429,6 +502,62 @@ fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const mo
         .diagnostics = diagnostic_slice,
         .is_partial = diagnostic_slice.len != 0 or hasUnresolvedLinks(import_slice),
     };
+}
+
+fn externalBuiltinTypeId(builtins: *const types.Builtins, metadata: ?modules_mod.graph.ExternalType) types.TypeId {
+    return switch (metadata orelse .unknown) {
+        .unknown => builtins.unknown,
+        .any => builtins.any,
+        .never => builtins.never,
+        .void => builtins.void,
+        .undefined => builtins.undefined,
+        .null_ => builtins.null_,
+        .boolean => builtins.boolean,
+        .number => builtins.number,
+        .bigint => builtins.bigint,
+        .string => builtins.string,
+        .symbol => builtins.symbol,
+        .object => builtins.object,
+    };
+}
+
+fn collectExternalExports(
+    allocator: std.mem.Allocator,
+    modules: []const modules_mod.graph.ExternalModule,
+    type_store: *types.TypeStore,
+    exports: *std.ArrayList(ExternalSemanticExport),
+) !void {
+    for (modules) |module| {
+        for (module.exports, 0..) |exported, index| {
+            const declaration = types.SemanticDeclId.initExternal(module.id, @intCast(index));
+            var value_type = externalBuiltinTypeId(&type_store.builtins, exported.type_metadata);
+            var type_type = value_type;
+            if (exported.type_metadata == .object and exported.namespace.value and exported.namespace.type) {
+                const class_type = try type_store.createClassSemanticType(declaration, exported.name);
+                value_type = class_type.constructor_type;
+                type_type = class_type.instance_type;
+            }
+            try exports.append(allocator, .{
+                .external_module_id = module.id,
+                .name = exported.name,
+                .kind = exported.kind,
+                .value_identity = if (exported.namespace.value) .{
+                    .symbol_id = null,
+                    .declaration = declaration,
+                    .type_id = value_type,
+                    .namespace = .value,
+                    .external_module_id = module.id,
+                } else null,
+                .type_identity = if (exported.namespace.type) .{
+                    .symbol_id = null,
+                    .declaration = declaration,
+                    .type_id = type_type,
+                    .namespace = .type,
+                    .external_module_id = module.id,
+                } else null,
+            });
+        }
+    }
 }
 
 fn graphModule(graph: *const modules_mod.ModuleGraph, id: ModuleId) ?*const modules_mod.Module {
@@ -450,6 +579,20 @@ fn symbolByName(module: modules_mod.Module, name: []const u8, type_only: bool) ?
     return null;
 }
 
+fn typeNamespaceIdentity(identity: SemanticIdentity, type_store: *const types.TypeStore) ?SemanticIdentity {
+    if (identity.namespace == .type) return identity;
+    const type_value = type_store.lookup(identity.type_id) orelse return null;
+    const type_id = switch (type_value.kind) {
+        .class_constructor => |constructor| constructor.instance_type,
+        .enum_type => identity.type_id,
+        else => return null,
+    };
+    var result = identity;
+    result.type_id = type_id;
+    result.namespace = .type;
+    return result;
+}
+
 fn collectDirectExports(
     allocator: std.mem.Allocator,
     graph_modules: []const modules_mod.Module,
@@ -468,15 +611,18 @@ fn collectDirectExports(
                 const symbol_type = semantic_module.type_info.lookupSymbol(item.id) orelse break :blk type_store.builtins.unknown;
                 break :blk symbol_type.effective() orelse type_store.builtins.unknown;
             } else semantic_module.type_info.lookupNode(record.node) orelse type_store.builtins.unknown;
+            const identity: SemanticIdentity = .{
+                .symbol_id = if (symbol) |item| item.id else null,
+                .declaration = types.SemanticDeclId.init(module.id, declaration),
+                .type_id = type_id,
+                .namespace = namespace,
+            };
             try exports.append(allocator, .{
                 .module_id = module.id,
                 .name = record.name,
-                .identity = .{
-                    .symbol_id = if (symbol) |item| item.id else null,
-                    .declaration = types.SemanticDeclId.init(module.id, declaration),
-                    .type_id = type_id,
-                    .namespace = namespace,
-                },
+                .identity = identity,
+                .type_identity = typeNamespaceIdentity(identity, type_store),
+                .edge_index = null,
                 .type_only = record.type_only or namespace == .type,
                 .re_export = false,
                 .span = module.result.ast.node(record.node).span,
@@ -485,72 +631,150 @@ fn collectDirectExports(
     }
 }
 
-fn edgeForSource(graph: *const modules_mod.ModuleGraph, from: ModuleId, source: []const u8, re_export: bool) ?modules_mod.ImportEdge {
+fn edgeForSpan(graph: *const modules_mod.ModuleGraph, from: ModuleId, span: @import("../frontend/tokens.zig").Span, re_export: bool) ?modules_mod.ImportEdge {
     for (graph.imports) |edge| {
-        if (edge.from == from and edge.re_export == re_export and std.mem.eql(u8, edge.specifier, source)) return edge;
+        if (edge.from == from and edge.re_export == re_export and std.meta.eql(edge.span, span)) return edge;
     }
     return null;
 }
 
 fn exportIndex(exports: []const SemanticExport, module_id: ModuleId, name: []const u8, type_only: bool) ?usize {
-    var fallback: ?usize = null;
     for (exports, 0..) |item, index| {
         if (item.module_id != module_id or !std.mem.eql(u8, item.name, name)) continue;
-        if (item.type_only == type_only) return index;
-        fallback = index;
+        if (type_only) {
+            if (item.type_identity != null or item.type_only) return index;
+        } else if (!item.type_only) return index;
     }
-    return fallback;
+    return null;
 }
 
-fn appendReExport(allocator: std.mem.Allocator, exports: *std.ArrayList(SemanticExport), module_id: ModuleId, name: []const u8, target: SemanticExport, type_only: bool, span: @import("../frontend/tokens.zig").Span) !bool {
+fn optionalIdentityEql(left: ?SemanticIdentity, right: ?SemanticIdentity) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return left.?.type_id == right.?.type_id and
+        left.?.namespace == right.?.namespace and
+        left.?.external_module_id == right.?.external_module_id and
+        left.?.declaration.eql(right.?.declaration);
+}
+
+fn appendReExport(allocator: std.mem.Allocator, exports: *std.ArrayList(SemanticExport), module_id: ModuleId, name: []const u8, target: SemanticExport, edge_index: usize, type_only: bool, span: @import("../frontend/tokens.zig").Span) !bool {
+    const final_type_only = type_only or target.type_only;
+    const identity = if (final_type_only) target.type_identity orelse target.identity else target.identity;
+    const type_identity = if (final_type_only) identity else target.type_identity;
     if (exportIndex(exports.items, module_id, name, type_only)) |index| {
-        const changed = exports.items[index].identity.type_id != target.identity.type_id or !exports.items[index].identity.declaration.eql(target.identity.declaration);
-        exports.items[index].identity = target.identity;
-        exports.items[index].type_only = type_only or target.type_only;
+        const changed = exports.items[index].identity.type_id != identity.type_id or
+            !exports.items[index].identity.declaration.eql(identity.declaration) or
+            !optionalIdentityEql(exports.items[index].type_identity, type_identity) or
+            exports.items[index].edge_index != edge_index;
+        exports.items[index].identity = identity;
+        exports.items[index].type_identity = type_identity;
+        exports.items[index].edge_index = edge_index;
+        exports.items[index].type_only = final_type_only;
         exports.items[index].re_export = true;
         return changed;
     }
     try exports.append(allocator, .{
         .module_id = module_id,
         .name = name,
-        .identity = target.identity,
-        .type_only = type_only or target.type_only,
+        .identity = identity,
+        .type_identity = type_identity,
+        .edge_index = edge_index,
+        .type_only = final_type_only,
         .re_export = true,
         .span = span,
     });
     return true;
 }
 
+fn findExternalSemanticExport(
+    exports: []const ExternalSemanticExport,
+    module_id: u64,
+    name: []const u8,
+    default_export: bool,
+) ?ExternalSemanticExport {
+    for (exports) |item| {
+        if (item.external_module_id != module_id or !std.mem.eql(u8, item.name, name)) continue;
+        if (default_export != (item.kind == .default)) continue;
+        return item;
+    }
+    return null;
+}
+
+fn appendExternalReExport(
+    allocator: std.mem.Allocator,
+    exports: *std.ArrayList(SemanticExport),
+    module_id: ModuleId,
+    name: []const u8,
+    target: ExternalSemanticExport,
+    edge_index: usize,
+    type_only: bool,
+    span: @import("../frontend/tokens.zig").Span,
+) !bool {
+    const identity = if (type_only) target.type_identity orelse return false else target.value_identity orelse return false;
+    return appendReExport(allocator, exports, module_id, name, .{
+        .module_id = module_id,
+        .name = target.name,
+        .identity = identity,
+        .type_identity = target.type_identity,
+        .edge_index = edge_index,
+        .type_only = type_only,
+        .re_export = true,
+        .span = span,
+    }, edge_index, type_only, span);
+}
+
 fn resolveReExports(
     allocator: std.mem.Allocator,
     graph: *const modules_mod.ModuleGraph,
-    semantic_modules: []ProjectSemanticModule,
-    type_store: *types.TypeStore,
+    external_exports: []const ExternalSemanticExport,
     exports: *std.ArrayList(SemanticExport),
 ) !void {
-    _ = semantic_modules;
-    _ = type_store;
     var round: usize = 0;
     while (round < graph.modules.len + 1) : (round += 1) {
         var changed = false;
         for (graph.modules) |module| {
             for (module.result.bind.module.exports) |record| {
                 if (record.source.len == 0 or record.kind == .export_all) continue;
-                const edge = edgeForSource(graph, module.id, record.source, true) orelse continue;
+                const source_span = module.result.ast.node(record.node).data.ExportDeclaration.source_span orelse continue;
+                const edge = edgeForSpan(graph, module.id, source_span, true) orelse continue;
+                if (edge.external_to) |external_module| {
+                    const target = findExternalSemanticExport(
+                        external_exports,
+                        external_module,
+                        record.local_name,
+                        std.mem.eql(u8, record.local_name, "default"),
+                    ) orelse continue;
+                    changed = (try appendExternalReExport(allocator, exports, module.id, record.name, target, edge.project_edge_index, record.type_only, module.result.ast.node(record.node).span)) or changed;
+                    continue;
+                }
                 const target_module = edge.to orelse continue;
                 const target_index = exportIndex(exports.items, target_module, record.local_name, record.type_only) orelse continue;
-                changed = (try appendReExport(allocator, exports, module.id, record.name, exports.items[target_index], record.type_only, module.result.ast.node(record.node).span)) or changed;
+                changed = (try appendReExport(allocator, exports, module.id, record.name, exports.items[target_index], edge.project_edge_index, record.type_only, module.result.ast.node(record.node).span)) or changed;
             }
             for (module.result.ast.nodes) |node| switch (node.data) {
                 .ExportDeclaration => |decl| if (decl.kind == .export_all and decl.source.len != 0) {
-                    const edge = edgeForSource(graph, module.id, decl.source, true) orelse continue;
+                    const edge = edgeForSpan(graph, module.id, decl.source_span orelse continue, true) orelse continue;
+                    if (edge.external_to) |external_module| {
+                        for (external_exports) |target| {
+                            if (target.external_module_id != external_module or target.kind == .default) continue;
+                            const type_only = if (decl.type_only)
+                                if (target.type_identity != null) true else continue
+                            else if (target.value_identity != null)
+                                false
+                            else if (target.type_identity != null)
+                                true
+                            else
+                                continue;
+                            changed = (try appendExternalReExport(allocator, exports, module.id, target.name, target, edge.project_edge_index, type_only, node.span)) or changed;
+                        }
+                        continue;
+                    }
                     const target_module = edge.to orelse continue;
                     const snapshot_len = exports.items.len;
                     var index: usize = 0;
                     while (index < snapshot_len) : (index += 1) {
                         const target = exports.items[index];
                         if (target.module_id != target_module or std.mem.eql(u8, target.name, "default")) continue;
-                        changed = (try appendReExport(allocator, exports, module.id, target.name, target, decl.type_only, node.span)) or changed;
+                        changed = (try appendReExport(allocator, exports, module.id, target.name, target, edge.project_edge_index, decl.type_only, node.span)) or changed;
                     }
                 },
                 else => {},
@@ -569,6 +793,7 @@ fn collectSemanticImports(
     allocator: std.mem.Allocator,
     graph: *const modules_mod.ModuleGraph,
     type_store: *types.TypeStore,
+    external_exports: []const ExternalSemanticExport,
     exports: []const SemanticExport,
     imports: *std.ArrayList(SemanticImport),
 ) !void {
@@ -581,6 +806,12 @@ fn collectSemanticImports(
             }
             break :blk edge.type_only;
         } else edge.type_only;
+        const import_kind = if (source_module) |module| blk: {
+            for (module.result.bind.module.imports) |record| {
+                if (std.mem.eql(u8, record.local_name, link.local_name)) break :blk record.kind;
+            }
+            break :blk ast.ImportSpecifierKind.named;
+        } else ast.ImportSpecifierKind.named;
         var state: SemanticLinkState = switch (link.kind) {
             .external => .external,
             .namespace => .namespace,
@@ -588,6 +819,46 @@ fn collectSemanticImports(
             else => .unresolved,
         };
         var target: ?SemanticIdentity = null;
+        var type_target: ?SemanticIdentity = null;
+        if (edge.external_to) |external_module| {
+            if (import_kind == .namespace) {
+                var properties: std.ArrayList(types.ObjectProperty) = .empty;
+                for (external_exports) |exported| {
+                    if (exported.external_module_id != external_module) continue;
+                    const property_identity = if (type_only) exported.type_identity else exported.value_identity;
+                    if (property_identity) |identity| try properties.append(allocator, .{ .name = exported.name, .type_id = identity.type_id });
+                }
+                const namespace_type = if (properties.items.len == 0)
+                    type_store.builtins.unknown
+                else
+                    try type_store.intern(.{ .object = properties.items });
+                target = .{
+                    .symbol_id = null,
+                    .declaration = types.SemanticDeclId.initExternal(external_module, ast.invalid_node),
+                    .type_id = namespace_type,
+                    .namespace = if (type_only) .type else .value,
+                    .external_module_id = external_module,
+                };
+                if (type_only) type_target = target;
+                state = .namespace;
+            } else if (findExternalSemanticExport(
+                external_exports,
+                external_module,
+                link.imported_name,
+                import_kind == .default,
+            )) |exported| {
+                if (type_only) {
+                    target = exported.type_identity;
+                    type_target = exported.type_identity;
+                } else {
+                    target = exported.value_identity;
+                    type_target = exported.type_identity;
+                }
+                state = if (target != null) .resolved else .unresolved;
+            } else {
+                state = .unresolved;
+            }
+        }
         if (link.target_module) |target_module| {
             if (link.kind == .namespace) {
                 var properties: std.ArrayList(types.ObjectProperty) = .empty;
@@ -602,12 +873,14 @@ fn collectSemanticImports(
                     .namespace = if (type_only) .type else .value,
                 };
             } else if (exportIndex(exports, target_module, link.imported_name, type_only)) |index| {
-                target = exports[index].identity;
+                target = if (type_only) exports[index].type_identity orelse exports[index].identity else exports[index].identity;
+                type_target = exports[index].type_identity;
                 state = .resolved;
             }
         }
         try imports.append(allocator, .{
             .module_id = link.from_module,
+            .edge_index = edge.project_edge_index,
             .import_symbol = link.import_symbol,
             .local_name = link.local_name,
             .imported_name = link.imported_name,
@@ -615,6 +888,7 @@ fn collectSemanticImports(
             .runtime_binding = !type_only and state != .unresolved and state != .cyclic_partial,
             .state = state,
             .target = target,
+            .type_target = type_target,
             .span = link.span,
         });
     }
@@ -629,9 +903,11 @@ fn refreshImportTargets(graph: *const modules_mod.ModuleGraph, exports: []const 
         } else continue;
         const target_module = link.target_module orelse continue;
         const index = exportIndex(exports, target_module, item.imported_name, item.type_only) orelse continue;
-        const target = exports[index].identity;
-        if (item.target == null or item.target.?.type_id != target.type_id or !item.target.?.declaration.eql(target.declaration)) changed = true;
+        const target = if (item.type_only) exports[index].type_identity orelse exports[index].identity else exports[index].identity;
+        const type_target = exports[index].type_identity;
+        if (!optionalIdentityEql(item.target, target) or !optionalIdentityEql(item.type_target, type_target)) changed = true;
         item.target = target;
+        item.type_target = type_target;
         item.state = .resolved;
         item.runtime_binding = !item.type_only;
     }
@@ -668,6 +944,7 @@ fn refreshNamespaceImportTargets(
             .type_id = type_id,
             .namespace = if (item.type_only) .type else .value,
         };
+        if (item.type_only) item.type_target = item.target;
         item.runtime_binding = !item.type_only;
     }
     return changed;
@@ -703,15 +980,19 @@ fn refreshProjectTypes(allocator: std.mem.Allocator, module_id: ModuleId, result
     return changed;
 }
 
-fn refreshDirectExportTypes(modules: []ProjectSemanticModule, exports: []SemanticExport) bool {
+fn refreshDirectExportTypes(modules: []ProjectSemanticModule, type_store: *const types.TypeStore, exports: []SemanticExport) bool {
     var changed = false;
     for (exports) |*item| {
         if (item.re_export) continue;
         const symbol_id = item.identity.symbol_id orelse continue;
         const module = projectModule(modules, item.module_id) orelse continue;
         const type_id = (module.type_info.lookupSymbol(symbol_id) orelse continue).effective() orelse continue;
-        if (item.identity.type_id != type_id) changed = true;
-        item.identity.type_id = type_id;
+        var refreshed_identity = item.identity;
+        refreshed_identity.type_id = type_id;
+        const type_identity = typeNamespaceIdentity(refreshed_identity, type_store);
+        if (item.identity.type_id != type_id or !optionalIdentityEql(item.type_identity, type_identity)) changed = true;
+        item.identity = refreshed_identity;
+        item.type_identity = type_identity;
     }
     return changed;
 }
@@ -739,13 +1020,14 @@ fn importedTypeBindings(
 ) ![]const type_collector.ImportedTypeBinding {
     var bindings: std.ArrayList(type_collector.ImportedTypeBinding) = .empty;
     for (imports) |item| {
-        if (item.module_id != module_id or item.state == .namespace or item.state == .external) continue;
+        if (item.module_id != module_id or item.state == .namespace) continue;
+        const target = item.type_target orelse if (item.state == .unresolved or item.state == .cyclic_partial) null else continue;
         try bindings.append(allocator, .{
             .local_name = item.local_name,
             .symbol_id = item.import_symbol,
-            .type_id = if (item.target) |target| target.type_id else type_store.builtins.unknown,
-            .declaration = if (item.target) |target| target.declaration else null,
-            .placeholder = item.target == null,
+            .type_id = if (target) |identity| identity.type_id else type_store.builtins.unknown,
+            .declaration = if (target) |identity| identity.declaration else null,
+            .placeholder = target == null,
         });
     }
     return bindings.toOwnedSlice(allocator);
@@ -759,11 +1041,12 @@ fn buildTypeInfo(
     run_checker: bool,
     imported_types: []const type_collector.ImportedTypeBinding,
     complete_nominals: bool,
+    max_diagnostics: usize,
 ) !TypeInfo {
     const builtins = &type_store.builtins;
     var symbol_types: std.ArrayList(SymbolTypeInfo) = .empty;
     var node_types: std.ArrayList(NodeTypeInfo) = .empty;
-    var collected = try type_collector.collectDeclaredTypesInModuleWithImports(
+    var collected = try type_collector.collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
         allocator,
         result.source,
         result.ast,
@@ -771,7 +1054,9 @@ fn buildTypeInfo(
         module_id,
         type_store,
         imported_types,
+        &.{},
         complete_nominals,
+        max_diagnostics,
     );
 
     const inferred_nodes = try type_inference.inferLiteralNodeTypes(allocator, result.ast, builtins);
@@ -870,7 +1155,7 @@ fn buildTypeInfo(
     // Type queries consume the resolved value table, which intentionally does
     // not exist during declaration collection. Re-collect once with effective
     // SymbolTypeInfo, then let dependent aliases/contexts flow to a fixed point.
-    collected = try type_collector.collectDeclaredTypesInModuleWithImportsAndValues(
+    collected = try type_collector.collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
         allocator,
         result.source,
         result.ast,
@@ -880,6 +1165,7 @@ fn buildTypeInfo(
         imported_types,
         symbol_types.items,
         false,
+        max_diagnostics,
     );
     for (symbol_types.items) |*entry| {
         if (declaredType(collected.symbol_declared_types, entry.symbol_id)) |declared| entry.declared_type = declared;
@@ -917,7 +1203,13 @@ fn buildTypeInfo(
         if (!variables_changed and !functions_changed) break;
     }
 
-    const coverage_diags = try completeExpressionCoverage(allocator, result.ast, &node_types, builtins);
+    const coverage_diags = try completeExpressionCoverage(
+        allocator,
+        result.ast,
+        &node_types,
+        builtins,
+        try remainingDiagnostics(max_diagnostics, collected.diagnostics.len),
+    );
 
     const narrowed = try narrowing.analyze(allocator, result, type_store, symbol_types.items, &node_types);
     const checker_info: TypeInfo = .{
@@ -928,13 +1220,20 @@ fn buildTypeInfo(
         .diagnostics = &.{},
     };
     const checker_diags = if (run_checker)
-        try checker.checkFile(allocator, result, checker_info, type_store)
+        try checker.checkFileWithLimit(
+            allocator,
+            result,
+            checker_info,
+            type_store,
+            try remainingDiagnostics(max_diagnostics, collected.diagnostics.len + coverage_diags.len),
+        )
     else
         &.{};
-    const semantic_diags = try combineDiagnostics(
+    const semantic_diags = try combineDiagnosticsWithLimit(
         allocator,
         &.{ collected.diagnostics, coverage_diags, checker_diags },
         result.source.path,
+        max_diagnostics,
     );
 
     return .{
@@ -1030,8 +1329,9 @@ fn completeExpressionCoverage(
     tree: ast.Ast,
     entries: *std.ArrayList(NodeTypeInfo),
     builtins: *const types.Builtins,
+    max_diagnostics: usize,
 ) ![]const diagnostics.Diagnostic {
-    var recovery: std.ArrayList(diagnostics.Diagnostic) = .empty;
+    var recovery = diagnostics.LimitedList.init(max_diagnostics);
     for (tree.nodes, 0..) |node, raw_id| {
         if (!isExecutableExpression(node.data)) continue;
         const node_id: ast.NodeId = @intCast(raw_id);
@@ -1339,8 +1639,20 @@ fn combineDiagnostics(
     lists: []const []const diagnostics.Diagnostic,
     path: []const u8,
 ) ![]const diagnostics.Diagnostic {
+    return combineDiagnosticsWithLimit(allocator, lists, path, std.math.maxInt(usize));
+}
+
+fn combineDiagnosticsWithLimit(
+    allocator: std.mem.Allocator,
+    lists: []const []const diagnostics.Diagnostic,
+    path: []const u8,
+    max_diagnostics: usize,
+) ![]const diagnostics.Diagnostic {
     var total: usize = 0;
-    for (lists) |list| total += list.len;
+    for (lists) |list| {
+        total = std.math.add(usize, total, list.len) catch return error.DiagnosticLimitExceeded;
+        if (total > max_diagnostics) return error.DiagnosticLimitExceeded;
+    }
     if (total == 0) return &.{};
 
     const combined = try allocator.alloc(diagnostics.Diagnostic, total);
@@ -1378,6 +1690,11 @@ fn combineDiagnostics(
         }
     }
     return combined[0..write];
+}
+
+fn remainingDiagnostics(max_diagnostics: usize, used: usize) !usize {
+    if (used > max_diagnostics) return error.DiagnosticLimitExceeded;
+    return max_diagnostics - used;
 }
 
 fn testVariableInitializer(result: *const SemanticResult, name: []const u8) ?ast.NodeId {
