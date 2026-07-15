@@ -46,6 +46,8 @@ const PAGE_BYTES = 64 * 1024;
 const WORKSPACE_BYTES = 8 * 1024 * 1024;
 const STATUS_OK = 0;
 const STATUS_INVALID_ARGUMENT = 1;
+const STATUS_LIMIT_EXCEEDED = 4;
+const LIMIT_PARSE_DEPTH = 9;
 const STEP_COMPLETE = 0;
 const STEP_REQUEST = 1;
 const FAILURE_NOT_FOUND = 0;
@@ -170,9 +172,11 @@ function beginFlow() {
     const summary = alloc(28, 4);
     check(api.vizg_project_result_summary(result, summary), "result_summary");
     const modules = view.getUint32(summary, true);
-    const failures = view.getUint8(summary + 23) !== 0;
-    if (modules !== expectedModules || failures !== expectedFailures) {
-      throw new Error(`unexpected summary: modules=${modules} failures=${failures}`);
+    const partial = view.getUint8(summary + 20) !== 0;
+    const projectErrors = view.getUint8(summary + 23) !== 0;
+    const failures = view.getUint8(summary + 24) !== 0;
+    if (modules !== expectedModules || partial !== expectedFailures || projectErrors || failures !== expectedFailures) {
+      throw new Error(`unexpected summary: modules=${modules} partial=${partial} projectErrors=${projectErrors} failures=${failures}`);
     }
     api.vizg_project_destroy(project);
   }
@@ -272,6 +276,26 @@ function expectNoTrap(operation, callback) {
   ), "single add_source");
   if (host.step(project).kind !== STEP_COMPLETE) throw new Error("single did not complete");
   host.finish(project, 1, false);
+}
+
+{
+  const host = beginFlow();
+  const project = host.createProject();
+  const source = `const value = ${"!".repeat(1025)}value;`;
+  check(api.vizg_project_add_source(
+    project,
+    host.writeSource(1, "deep.ts", source, true),
+  ), "parse-depth add_source");
+  const step = host.alloc(64, 8);
+  const status = api.vizg_project_step(project, step);
+  if (status !== STATUS_LIMIT_EXCEEDED) {
+    throw new Error(`parse-depth step returned ${status}, expected LIMIT_EXCEEDED`);
+  }
+  const kind = api.vizg_project_limit_kind(project);
+  if (kind !== LIMIT_PARSE_DEPTH) {
+    throw new Error(`parse-depth limit kind ${kind}, expected ${LIMIT_PARSE_DEPTH}`);
+  }
+  api.vizg_project_destroy(project);
 }
 
 // Every handle-taking export and every host output validates the complete

@@ -53,3 +53,22 @@ uint32_t vizg_test_limit_kind_misaligned_handle(void) {
     return (uint32_t)vizg_project_limit_kind(
         (Vizg_Project *)(void *)(storage + 1));
 }
+
+Vizg_ProjectStatus vizg_test_add_oversized_source(Vizg_Project *project) {
+#if SIZE_MAX > UINT32_MAX
+    const char byte = 0;
+    Vizg_ProjectSource source;
+    memset(&source, 0, sizeof(source));
+    source.module_id = 1;
+    source.logical_name_ptr = "oversized.ts";
+    source.logical_name_len = sizeof("oversized.ts") - 1;
+    source.source_ptr = &byte;
+    source.source_len = (size_t)UINT32_MAX + 1u;
+    source.kind = VIZG_PROJECT_SOURCE_MODULE;
+    source.is_root = 1;
+    return vizg_project_add_source(project, &source);
+#else
+    (void)project;
+    return VIZG_PROJECT_STATUS_INVALID_ARGUMENT;
+#endif
+}

@@ -19,6 +19,9 @@ extern fn vizg_test_summary_misaligned_output(
 ) callconv(.c) c.Vizg_ProjectStatus;
 extern fn vizg_test_destroy_misaligned_handle() callconv(.c) void;
 extern fn vizg_test_limit_kind_misaligned_handle() callconv(.c) u32;
+extern fn vizg_test_add_oversized_source(
+    project: *c.Vizg_Project,
+) callconv(.c) c.Vizg_ProjectStatus;
 
 fn projectSource(id: u64, name: []const u8, source: []const u8, is_root: bool) c.Vizg_ProjectSource {
     return .{
@@ -110,6 +113,11 @@ test "official ABI v1 exposes version and a project-owned terminal result" {
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(first, &summary));
     try std.testing.expectEqual(@as(usize, 1), summary.module_count);
     try std.testing.expectEqual(@as(usize, 1), summary.export_count);
+    try std.testing.expectEqual(@as(u8, 0), summary.is_partial);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_syntax_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_semantic_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_project_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_module_failures);
 
     var module: c.Vizg_ProjectModuleInfo = undefined;
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_module(first, 0, &module));
@@ -214,6 +222,68 @@ test "official ABI v1 marks a failed side-effect import partial" {
     var summary: c.Vizg_ProjectResultSummary = undefined;
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
     try std.testing.expectEqual(@as(u8, 1), summary.has_module_failures);
+    try std.testing.expectEqual(@as(u8, 1), summary.is_partial);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_syntax_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_semantic_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_project_errors);
+}
+
+test "official ABI v1 syntax and checker errors set their exact summary groups" {
+    const cases = [_]struct {
+        source: []const u8,
+        syntax: u8,
+        semantic: u8,
+    }{
+        .{ .source = "@", .syntax = 1, .semantic = 0 },
+        .{ .source = "const x: string = 1;", .syntax = 0, .semantic = 1 },
+    };
+    for (cases, 0..) |fixture, index| {
+        var workspace = try Workspace.init(8 * 1024 * 1024);
+        defer workspace.deinit();
+        const project = try createProject(workspace);
+        defer c.vizg_project_destroy(project);
+
+        var root = projectSource(index + 1, "summary.ts", fixture.source, true);
+        try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+        const result = try finishProject(project);
+        var summary: c.Vizg_ProjectResultSummary = undefined;
+        try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
+        try std.testing.expectEqual(fixture.syntax, summary.has_syntax_errors);
+        try std.testing.expectEqual(fixture.semantic, summary.has_semantic_errors);
+        try std.testing.expectEqual(@as(u8, 0), summary.has_project_errors);
+        try std.testing.expectEqual(@as(u8, 0), summary.has_module_failures);
+        try std.testing.expectEqual(@as(u8, 1), summary.is_partial);
+    }
+}
+
+test "official ABI v1 project linking error sets only the project summary group" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(3, "root.ts", "import { requested } from 'external'; export { requested };", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(project, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STEP_REQUEST), step.kind);
+    var external: c.Vizg_ExternalModule = .{
+        .external_module_id = 81,
+        .logical_name_ptr = "external".ptr,
+        .logical_name_len = "external".len,
+        .exports_ptr = null,
+        .export_count = 0,
+    };
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_respond_external(project, step.request_id, &external));
+
+    const result = try finishProject(project);
+    var summary: c.Vizg_ProjectResultSummary = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
+    try std.testing.expectEqual(@as(u8, 0), summary.has_syntax_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_semantic_errors);
+    try std.testing.expectEqual(@as(u8, 1), summary.has_project_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_module_failures);
     try std.testing.expectEqual(@as(u8, 1), summary.is_partial);
 }
 
@@ -455,6 +525,9 @@ test "official ABI v1 reports distinct canonical host and project diagnostics on
     var summary: c.Vizg_ProjectResultSummary = undefined;
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
     try std.testing.expectEqual(@as(usize, 8), summary.diagnostic_count);
+    try std.testing.expectEqual(@as(u8, 1), summary.has_project_errors);
+    try std.testing.expectEqual(@as(u8, 1), summary.has_module_failures);
+    try std.testing.expectEqual(@as(u8, 1), summary.is_partial);
 
     var host_codes = [_]u32{ 0, 0, 0 };
     var project_count: usize = 0;
@@ -491,6 +564,58 @@ test "official ABI v1 rejects malformed arguments and workspace aliases" {
     malformed.reserved[1] = 1;
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), c.vizg_project_add_source(project, &malformed));
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), c.vizg_project_respond_failure(project, 1, 99));
+}
+
+test "official ABI v1 enforces the uint32 source representation boundary before access" {
+    const max_source_length: usize = c.VIZG_MAX_SOURCE_LENGTH;
+    try std.testing.expectEqual(std.math.maxInt(u32), max_source_length);
+
+    var boundary_workspace = try Workspace.init(8 * 1024 * 1024);
+    defer boundary_workspace.deinit();
+    var boundary_config = boundary_workspace.config();
+    boundary_config.max_source_bytes = max_source_length;
+    var boundary_project: ?*c.Vizg_Project = null;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_create(&boundary_config, &boundary_project),
+    );
+    c.vizg_project_destroy(boundary_project);
+
+    if (std.math.maxInt(usize) > max_source_length) {
+        var over_project: ?*c.Vizg_Project = null;
+        boundary_config.max_source_bytes = max_source_length + 1;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED),
+            c.vizg_project_create(&boundary_config, &over_project),
+        );
+        try std.testing.expect(over_project != null);
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_LIMIT_SOURCE_BYTES),
+            c.vizg_project_limit_kind(over_project),
+        );
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+            c.vizg_project_add_source(over_project, null),
+        );
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_LIMIT_SOURCE_BYTES),
+            c.vizg_project_limit_kind(over_project),
+        );
+        c.vizg_project_destroy(over_project);
+
+        var source_workspace = try Workspace.init(8 * 1024 * 1024);
+        defer source_workspace.deinit();
+        const source_project = try createProject(source_workspace);
+        defer c.vizg_project_destroy(source_project);
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED),
+            vizg_test_add_oversized_source(source_project),
+        );
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_LIMIT_SOURCE_BYTES),
+            c.vizg_project_limit_kind(source_project),
+        );
+    }
 }
 
 test "official ABI v1 validates create ranges alignment and aliases before writing" {
@@ -721,10 +846,67 @@ test "official ABI v1 enforces request edge and root graph-depth limits" {
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_respond_source(depth_handle, step.request_id, &dep));
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(depth_handle, &step));
     var deep = projectSource(3, "deep.ts", "export {};", false);
-    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_respond_source(depth_handle, step.request_id, &deep));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED), c.vizg_project_respond_source(depth_handle, step.request_id, &deep));
+    try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_GRAPH_DEPTH), c.vizg_project_limit_kind(depth_handle));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), c.vizg_project_respond_source(depth_handle, step.request_id, null));
+    try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_NONE), c.vizg_project_limit_kind(depth_handle));
+    root.is_root = 0;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_respond_source(depth_handle, step.request_id, &root));
+    try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_NONE), c.vizg_project_limit_kind(depth_handle));
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(depth_handle, &step));
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STEP_COMPLETE), step.kind);
     var result: ?*c.Vizg_ProjectResult = null;
-    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED), c.vizg_project_finish(depth_handle, &result));
-    try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_GRAPH_DEPTH), c.vizg_project_limit_kind(depth_handle));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_finish(depth_handle, &result));
+}
+
+test "official ABI v1 reports first-module diagnostic and semantic-growth limits exactly" {
+    var semantic_workspace = try Workspace.init(8 * 1024 * 1024);
+    defer semantic_workspace.deinit();
+    var config = semantic_workspace.config();
+    config.max_semantic_types = 1;
+    var project: ?*c.Vizg_Project = null;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_create(&config, &project));
+    const semantic_handle = project orelse return error.MissingProject;
+    defer c.vizg_project_destroy(semantic_handle);
+    var root = projectSource(1, "types.ts", "type Box = { value: number }; const box: Box = { value: 1 };", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(semantic_handle, &root));
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED), c.vizg_project_step(semantic_handle, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_SEMANTIC_GROWTH), c.vizg_project_limit_kind(semantic_handle));
+
+    var diagnostic_workspace = try Workspace.init(8 * 1024 * 1024);
+    defer diagnostic_workspace.deinit();
+    config = diagnostic_workspace.config();
+    config.max_diagnostics = 1;
+    project = null;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_create(&config, &project));
+    const diagnostic_handle = project orelse return error.MissingProject;
+    defer c.vizg_project_destroy(diagnostic_handle);
+    root = projectSource(2, "diagnostics.ts", "const first: number = 'wrong'; const second: number = 'wrong';", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(diagnostic_handle, &root));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED), c.vizg_project_step(diagnostic_handle, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_DIAGNOSTICS), c.vizg_project_limit_kind(diagnostic_handle));
+}
+
+test "official ABI v1 reports parse-depth limit exactly and clears stale kinds" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    const nesting = 1025;
+    const source = try std.testing.allocator.alloc(u8, "const value = ".len + nesting + "value;".len);
+    defer std.testing.allocator.free(source);
+    @memcpy(source[0.."const value = ".len], "const value = ");
+    @memset(source["const value = ".len .. "const value = ".len + nesting], '!');
+    @memcpy(source["const value = ".len + nesting ..], "value;");
+
+    var root = projectSource(1, "deep.ts", source, true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED), c.vizg_project_step(project, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_PARSE_DEPTH), c.vizg_project_limit_kind(project));
+
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), c.vizg_project_add_source(project, null));
+    try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_NONE), c.vizg_project_limit_kind(project));
 }

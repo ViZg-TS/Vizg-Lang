@@ -76,7 +76,8 @@ size_t vizg_c_fields_Vizg_ProjectResultSummary(void) {
         F(Vizg_ProjectResultSummary, edge_count, 3) + F(Vizg_ProjectResultSummary, import_count, 4) +
         F(Vizg_ProjectResultSummary, export_count, 5) + F(Vizg_ProjectResultSummary, is_partial, 6) +
         F(Vizg_ProjectResultSummary, has_syntax_errors, 7) + F(Vizg_ProjectResultSummary, has_semantic_errors, 8) +
-        F(Vizg_ProjectResultSummary, has_module_failures, 9) + F(Vizg_ProjectResultSummary, reserved, 10);
+        F(Vizg_ProjectResultSummary, has_project_errors, 9) + F(Vizg_ProjectResultSummary, has_module_failures, 10) +
+        F(Vizg_ProjectResultSummary, reserved, 11);
 }
 size_t vizg_c_fields_Vizg_ProjectDiagnostic(void) {
     return F(Vizg_ProjectDiagnostic, module_id, 1) + F(Vizg_ProjectDiagnostic, has_module_id, 2) +
@@ -120,6 +121,7 @@ size_t vizg_c_fields_Vizg_ProjectExportInfo(void) {
 
 uint32_t vizg_c_value_project_status_internal_error(void) { return VIZG_PROJECT_STATUS_INTERNAL_ERROR; }
 uint32_t vizg_c_value_limit_semantic_growth(void) { return VIZG_LIMIT_SEMANTIC_GROWTH; }
+uint32_t vizg_c_value_limit_parse_depth(void) { return VIZG_LIMIT_PARSE_DEPTH; }
 uint32_t vizg_c_value_project_request_re_export(void) { return VIZG_PROJECT_REQUEST_RE_EXPORT; }
 uint32_t vizg_c_value_external_type_object(void) { return VIZG_EXTERNAL_TYPE_OBJECT; }
 uint8_t vizg_c_value_external_namespace_value(void) { return VIZG_EXTERNAL_NAMESPACE_VALUE; }
