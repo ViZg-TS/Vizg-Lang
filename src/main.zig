@@ -9,7 +9,7 @@ const ast_mod = core.ast;
 const binder = core.binder;
 const cfg = core.cfg;
 const diagnostics = core.diagnostics;
-const fs_adapter = @import("adapters/fs_module_host.zig");
+const fs_adapter = @import("fs-validation-host");
 const resolver_mod = core.resolver;
 const tokens_mod = core.tokens;
 const semantics = core.semantics;
@@ -19,7 +19,7 @@ const types_pkg = core.types;
 const frontend = front;
 const resolver = resolver_mod;
 const tokens = tokens_mod;
-const FsModuleHost = fs_adapter.FsModuleHost;
+const FsValidationHost = fs_adapter.FsValidationHost;
 const ExternalBinding = fs_adapter.ExternalBinding;
 
 const max_source_bytes = 64 * 1024 * 1024;
@@ -185,8 +185,8 @@ fn buildProjectHost(
     io: Io,
     root_path: []const u8,
     externals: []const ExternalBinding,
-) !FsModuleHost {
-    var host = try FsModuleHost.init(allocator, io, .{
+) !FsValidationHost {
+    var host = try FsValidationHost.init(allocator, io, .{
         .max_source_bytes = max_source_bytes,
         .externals = externals,
     });
@@ -771,7 +771,7 @@ fn printModules(writer: *Io.Writer, project: *const core.Project) !void {
                 try writer.print("{s}", .{@tagName(edge.state)});
             try writer.print(
                 " specifier=\"{s}\" kind={s} import_kind={s} status={s} span={}..{}\n",
-                .{ edge.raw_specifier, @tagName(edge.kind), @tagName(edge.import_kind), @tagName(edge.state), edge.span.start, edge.span.end },
+                .{ edge.raw_specifier, @tagName(edge.operation), @tagName(edge.import_kind), @tagName(edge.state), edge.span.start, edge.span.end },
             );
         }
     }
