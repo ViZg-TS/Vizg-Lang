@@ -20,6 +20,8 @@ pub const Vizg_ProjectConfig = extern struct {
     workspace_len: usize,
     max_source_bytes: usize,
     max_modules: usize,
+    max_requests: usize,
+    max_edges: usize,
     max_diagnostics: usize,
     max_graph_depth: usize,
     max_semantic_types: usize,
@@ -34,7 +36,6 @@ pub const Vizg_ProjectSource = extern struct {
     kind: u32,
     is_root: u8,
     reserved: [3]u8,
-    revision: u64,
 };
 
 pub const Vizg_ProjectSpan = extern struct {
@@ -58,7 +59,9 @@ pub const Vizg_ProjectStep = extern struct {
     importer_module_id: u64,
     specifier_ptr: [*c]const u8,
     specifier_len: usize,
-    request_kind: u32,
+    request_operation: u32,
+    type_only: u8,
+    reserved: [3]u8,
     attributes_ptr: [*c]const Vizg_ProjectRequestAttribute,
     attribute_count: usize,
     span: Vizg_ProjectSpan,
@@ -84,8 +87,80 @@ pub const Vizg_ExternalModule = extern struct {
 
 pub const Vizg_ProjectResultSummary = extern struct {
     module_count: usize,
-    has_failures: u8,
-    reserved: [7]u8,
+    diagnostic_count: usize,
+    edge_count: usize,
+    import_count: usize,
+    export_count: usize,
+    is_partial: u8,
+    has_syntax_errors: u8,
+    has_semantic_errors: u8,
+    has_module_failures: u8,
+    reserved: [4]u8,
+};
+
+pub const Vizg_ProjectModuleInfo = extern struct {
+    module_id: u64,
+    logical_name_ptr: [*c]const u8,
+    logical_name_len: usize,
+    state: u32,
+    is_root: u8,
+    has_source: u8,
+    reserved: [2]u8,
+};
+
+pub const Vizg_ProjectDiagnostic = extern struct {
+    module_id: u64,
+    severity: u32,
+    code: u32,
+    phase: u32,
+    message_ptr: [*c]const u8,
+    message_len: usize,
+    logical_name_ptr: [*c]const u8,
+    logical_name_len: usize,
+    span: Vizg_ProjectSpan,
+};
+
+pub const Vizg_ProjectEdgeInfo = extern struct {
+    request_id: u64,
+    importer_module_id: u64,
+    target_module_id: u64,
+    external_module_id: u64,
+    specifier_ptr: [*c]const u8,
+    specifier_len: usize,
+    request_operation: u32,
+    state: u32,
+    type_only: u8,
+    has_target: u8,
+    has_external_target: u8,
+    reserved: u8,
+    span: Vizg_ProjectSpan,
+};
+
+pub const Vizg_ProjectImportInfo = extern struct {
+    module_id: u64,
+    target_module_id: u64,
+    target_type_id: u32,
+    link_state: u32,
+    local_name_ptr: [*c]const u8,
+    local_name_len: usize,
+    imported_name_ptr: [*c]const u8,
+    imported_name_len: usize,
+    type_only: u8,
+    runtime_binding: u8,
+    has_target: u8,
+    reserved: u8,
+    span: Vizg_ProjectSpan,
+};
+
+pub const Vizg_ProjectExportInfo = extern struct {
+    module_id: u64,
+    target_type_id: u32,
+    name_ptr: [*c]const u8,
+    name_len: usize,
+    type_only: u8,
+    re_export: u8,
+    reserved: [2]u8,
+    span: Vizg_ProjectSpan,
 };
 
 pub const Vizg_Project = opaque {};
@@ -100,6 +175,8 @@ const OwnedProject = struct {
     limits: Limits,
     workspace_len: usize,
     source_bytes: usize = 0,
+    result_view: OwnedProjectResult = undefined,
+    result_ready: bool = false,
     destroyed: bool = false,
 
     fn deinit(self: *OwnedProject) void {
@@ -108,6 +185,8 @@ const OwnedProject = struct {
         self.step_attributes.deinit(allocator);
         self.module_depths.deinit(allocator);
         self.project.deinit();
+        if (self.result_ready) self.result_view.magic = 0;
+        self.result_ready = false;
         self.destroyed = true;
     }
 };
@@ -116,7 +195,6 @@ const OwnedProjectResult = struct {
     magic: u64 = result_magic,
     summary: Vizg_ProjectResultSummary,
     owner: *OwnedProject,
-    destroyed: bool = false,
 };
 
 const ModuleDepth = struct {
@@ -127,6 +205,8 @@ const ModuleDepth = struct {
 const Limits = struct {
     source_bytes: usize,
     modules: usize,
+    requests: usize,
+    edges: usize,
     diagnostics: usize,
     graph_depth: usize,
     semantic_types: usize,
@@ -170,24 +250,20 @@ fn ownedResult(result: ?*const Vizg_ProjectResult) ?*const OwnedProjectResult {
     const address = @intFromPtr(handle);
     if (address % @alignOf(OwnedProjectResult) != 0 or !validHostRange(handle, @sizeOf(OwnedProjectResult))) return null;
     const owned: *const OwnedProjectResult = @ptrCast(@alignCast(handle));
-    if (owned.magic != result_magic or owned.destroyed) return null;
-    return owned;
-}
-
-fn ownedResultForDestroy(result: ?*Vizg_ProjectResult) ?*OwnedProjectResult {
-    const handle = result orelse return null;
-    const address = @intFromPtr(handle);
-    if (address % @alignOf(OwnedProjectResult) != 0 or !validHostRange(handle, @sizeOf(OwnedProjectResult))) return null;
-    const owned: *OwnedProjectResult = @ptrCast(@alignCast(handle));
     if (owned.magic != result_magic) return null;
+    const owner_handle: *Vizg_Project = @ptrCast(owned.owner);
+    const owner = ownedProject(owner_handle) orelse return null;
+    if (owner != owned.owner or !rangeInsideWorkspace(owner, handle, @sizeOf(OwnedProjectResult))) return null;
     return owned;
 }
 
 fn workspace(config: *const Vizg_ProjectConfig) ?[]u8 {
     if (config.workspace_ptr == null or config.workspace_len < projectWorkspaceOverhead()) return null;
+    if (!validHostRange(config.workspace_ptr, config.workspace_len)) return null;
     if (@intFromPtr(config.workspace_ptr) % projectWorkspaceAlignment() != 0) return null;
     if (config.max_source_bytes == 0 or config.max_modules == 0 or config.max_diagnostics == 0 or
-        config.max_graph_depth == 0 or config.max_semantic_types == 0) return null;
+        config.max_requests == 0 or config.max_edges == 0 or config.max_graph_depth == 0 or
+        config.max_semantic_types == 0) return null;
     return config.workspace_ptr[0..config.workspace_len];
 }
 
@@ -201,14 +277,29 @@ fn inputOutsideWorkspace(owned: *const OwnedProject, ptr: anytype, len: usize) b
     return input_end <= workspace_start or input_start >= workspace_end;
 }
 
+fn rangeInsideWorkspace(owned: *const OwnedProject, ptr: anytype, len: usize) bool {
+    if (!validHostRange(ptr, len)) return false;
+    const start = @intFromPtr(ptr);
+    const end = std.math.add(usize, start, len) catch return false;
+    const workspace_start = @intFromPtr(owned);
+    const workspace_end = std.math.add(usize, workspace_start, owned.workspace_len) catch return false;
+    return start >= workspace_start and end <= workspace_end;
+}
+
+fn validTypedRange(comptime T: type, ptr: [*c]const T, count: usize) bool {
+    if (count == 0) return true;
+    const byte_len = std.math.mul(usize, count, @sizeOf(T)) catch return false;
+    return validHostRange(ptr, byte_len);
+}
+
 fn sourceInputsOutsideWorkspace(owned: *const OwnedProject, input: *const Vizg_ProjectSource) bool {
     return inputOutsideWorkspace(owned, input.logical_name_ptr, input.logical_name_len) and
         inputOutsideWorkspace(owned, input.source_ptr, input.source_len);
 }
 
-fn depthOf(owned: *const OwnedProject, id: vizg.project.ModuleId) usize {
+fn depthOf(owned: *const OwnedProject, id: vizg.project.ModuleId) ?usize {
     for (owned.module_depths.items) |item| if (item.id.value() == id.value()) return item.depth;
-    return 0;
+    return null;
 }
 
 fn recordDepth(owned: *OwnedProject, id: vizg.project.ModuleId, depth: usize) !void {
@@ -221,20 +312,104 @@ fn recordDepth(owned: *OwnedProject, id: vizg.project.ModuleId, depth: usize) !v
     try owned.module_depths.append(owned.fba.allocator(), .{ .id = id, .depth = depth });
 }
 
+fn diagnosticSeverity(value: vizg.diagnostics.Severity) u32 {
+    return switch (value) {
+        .@"error" => 0,
+        .warning => 1,
+        .info => 2,
+        .hint => 3,
+    };
+}
+
+fn diagnosticPhase(value: vizg.diagnostics.DiagnosticPhase) u32 {
+    return switch (value) {
+        .scanner => 0,
+        .parser => 1,
+        .binder => 2,
+        .resolver => 3,
+        .cfg => 4,
+        .module_graph => 5,
+        .type_checker => 6,
+        .lowering => 7,
+        .runtime => 8,
+        .internal => 9,
+    };
+}
+
+fn diagnosticCode(value: vizg.diagnostics.DiagnosticCode) u32 {
+    return switch (value) {
+        .invalid_character => 1001,
+        .unterminated_string => 1002,
+        .unterminated_block_comment => 1003,
+        .invalid_number => 1004,
+        .invalid_escape_sequence => 1005,
+        .unterminated_regexp => 1006,
+        .invalid_regexp => 1007,
+        .invalid_utf8 => 1008,
+        .unexpected_token => 2001,
+        .expected_token => 2002,
+        .parse_recursion_limit_reached => 2003,
+        .unsupported_syntax => 2004,
+        .unsupported_ts_syntax => 2005,
+        .unsupported_jsx => 2006,
+        .duplicate_declaration => 3001,
+        .duplicate_export => 3002,
+        .cannot_find_name => 4001,
+        .module_not_found => 5001,
+        .missing_export => 5002,
+        .circular_import => 5003,
+        .unknown_type_name => 6004,
+        .type_mismatch => 6005,
+        .unknown_property => 6006,
+        .invalid_index => 6007,
+        .invalid_argument_count => 6008,
+        .invalid_argument_type => 6009,
+    };
+}
+
+fn graphDiagnosticCode(code: vizg.project.graph.DiagnosticCode) vizg.diagnostics.DiagnosticCode {
+    return switch (code) {
+        .module_not_found, .module_denied, .module_failed => .module_not_found,
+        .external_missing_export => .missing_export,
+    };
+}
+
+fn graphDiagnosticDuplicate(
+    semantic: *const vizg.semantics.BorrowedProjectSemanticResult,
+    owner: *const OwnedProject,
+    item: vizg.project.GraphDiagnostic,
+) bool {
+    const expected_code = graphDiagnosticCode(item.code);
+    for (semantic.diagnostics) |diagnostic| {
+        if (diagnostic.code != expected_code or diagnostic.span.start != item.span.start or diagnostic.span.end != item.span.end) continue;
+        if (moduleIdForPath(owner, diagnostic.path) == item.importer.value()) return true;
+    }
+    return false;
+}
+
 fn diagnosticCount(owned: *const OwnedProject) usize {
-    var count = owned.project.graphDiagnostics().len;
-    for (owned.module_depths.items) |item| {
-        const module = owned.project.lookup(item.id) orelse continue;
+    if (owned.project.semanticResult()) |semantic| {
+        var count = semantic.diagnostics.len;
+        for (owned.project.graphDiagnostics()) |item| {
+            if (!graphDiagnosticDuplicate(semantic, owned, item)) {
+                count = std.math.add(usize, count, 1) catch return std.math.maxInt(usize);
+            }
+        }
+        return count;
+    }
+
+    var count: usize = 0;
+    for (owned.project.modulesView()) |module| {
         count = std.math.add(usize, count, module.diagnostics().len) catch return std.math.maxInt(usize);
     }
-    if (owned.project.semanticResult()) |result| {
-        count = std.math.add(usize, count, result.diagnostics.len) catch return std.math.maxInt(usize);
-    }
+    count = std.math.add(usize, count, owned.project.graphDiagnostics().len) catch return std.math.maxInt(usize);
     return count;
 }
 
 fn checkGrowthLimits(owned: *const OwnedProject) Vizg_ProjectStatus {
     if (owned.project.moduleCount() > owned.limits.modules) return .LIMIT_EXCEEDED;
+    if (owned.project.requestCount() > owned.limits.requests) return .LIMIT_EXCEEDED;
+    if (owned.project.edges().len > owned.limits.edges) return .LIMIT_EXCEEDED;
     if (diagnosticCount(owned) > owned.limits.diagnostics) return .LIMIT_EXCEEDED;
     if (owned.project.semanticResult()) |result| {
         if (result.type_store.count() > owned.limits.semantic_types) return .LIMIT_EXCEEDED;
@@ -258,7 +433,7 @@ fn sourceKind(value: u32) ?vizg.project.SourceKind {
     };
 }
 
-fn requestKind(value: vizg.project.RequestKind) u32 {
+fn requestOperation(value: vizg.project.RequestOperation) u32 {
     return @intFromEnum(value);
 }
 
@@ -283,7 +458,6 @@ fn moduleSource(input: *const Vizg_ProjectSource) ?vizg.ModuleSource {
         .logical_name = bytes(input.logical_name_ptr, input.logical_name_len),
         .bytes = bytes(input.source_ptr, input.source_len),
         .kind = sourceKind(input.kind) orelse return null,
-        .revision = input.revision,
     };
 }
 
@@ -299,14 +473,12 @@ fn statusFromError(err: anyerror) Vizg_ProjectStatus {
         error.ForeignRequest,
         error.InvalidResponseOrder,
         error.DuplicateResponse,
-        error.StaleRequest,
         error.DuplicateModule,
-        error.RevisionConflict,
-        error.StaleRevision,
         error.UnknownImporter,
         error.UnknownModule,
         error.SourceNotSupplied,
         error.ModuleNotAnalyzed,
+        error.ProjectFinished,
         => .INVALID_STATE,
         error.InvalidExternalExport,
         error.DuplicateExternalExport,
@@ -314,6 +486,44 @@ fn statusFromError(err: anyerror) Vizg_ProjectStatus {
         => .INVALID_ARGUMENT,
         else => .INTERNAL_ERROR,
     };
+}
+
+pub fn abiVersion() callconv(.c) u32 {
+    return VIZG_ABI_VERSION;
+}
+
+fn projectSemantic(owned: *const OwnedProjectResult) ?*const vizg.semantics.BorrowedProjectSemanticResult {
+    return owned.owner.project.semanticResult();
+}
+
+fn resultHasPhase(owned: *const OwnedProjectResult, phase: vizg.diagnostics.DiagnosticPhase) bool {
+    const result = projectSemantic(owned) orelse return false;
+    for (result.diagnostics) |item| {
+        if (item.severity == .@"error" and item.phase == phase) return true;
+    }
+    return false;
+}
+
+fn moduleIdForPath(owner: *const OwnedProject, path: ?[]const u8) u64 {
+    const wanted = path orelse return 0;
+    for (owner.project.modulesView()) |module| {
+        const source = module.source orelse continue;
+        if (std.mem.eql(u8, source.logical_name, wanted)) return module.id.value();
+    }
+    return 0;
+}
+
+fn graphDiagnosticMessage(code: vizg.project.graph.DiagnosticCode) []const u8 {
+    return switch (code) {
+        .module_not_found => "module not found",
+        .module_denied => "module access denied",
+        .module_failed => "module host failed",
+        .external_missing_export => "external module is missing the requested export",
+    };
+}
+
+fn outputOutsideWorkspace(owned: *const OwnedProjectResult, ptr: anytype, len: usize) bool {
+    return validHostRange(ptr, len) and inputOutsideWorkspace(owned.owner, ptr, len);
 }
 
 pub fn projectWorkspaceAlignment() callconv(.c) usize {
@@ -341,6 +551,8 @@ pub fn projectCreate(config: ?*const Vizg_ProjectConfig, out_project: [*c]?*Vizg
     const limits: Limits = .{
         .source_bytes = args.max_source_bytes,
         .modules = args.max_modules,
+        .requests = args.max_requests,
+        .edges = args.max_edges,
         .diagnostics = args.max_diagnostics,
         .graph_depth = args.max_graph_depth,
         .semantic_types = args.max_semantic_types,
@@ -353,8 +565,14 @@ pub fn projectCreate(config: ?*const Vizg_ProjectConfig, out_project: [*c]?*Vizg
     owned.limits = limits;
     owned.workspace_len = storage.len;
     owned.source_bytes = 0;
+    owned.result_ready = false;
     owned.destroyed = false;
     owned.project = .init(owned.fba.allocator());
+    owned.module_depths.ensureTotalCapacity(owned.fba.allocator(), limits.modules) catch {
+        owned.project.deinit();
+        owned.magic = 0;
+        return .OUT_OF_MEMORY;
+    };
     out_project[0] = @ptrCast(owned);
     return .OK;
 }
@@ -380,7 +598,7 @@ pub fn projectAddSource(project: ?*Vizg_Project, input: ?*const Vizg_ProjectSour
         owned.project.supplySource(source) catch |err| return statusFromError(err);
     }
     owned.source_bytes = next_source_bytes;
-    recordDepth(owned, source.id, 0) catch return .OUT_OF_MEMORY;
+    if (args.is_root == 1) recordDepth(owned, source.id, 0) catch return .OUT_OF_MEMORY;
     return .OK;
 }
 
@@ -411,7 +629,9 @@ pub fn projectStep(project: ?*Vizg_Project, out_step: ?*Vizg_ProjectStep) callco
                 .importer_module_id = request.importer.value(),
                 .specifier_ptr = if (request.raw_specifier.len == 0) null else request.raw_specifier.ptr,
                 .specifier_len = request.raw_specifier.len,
-                .request_kind = requestKind(request.kind),
+                .request_operation = requestOperation(request.operation),
+                .type_only = @intFromBool(request.type_only),
+                .reserved = .{ 0, 0, 0 },
                 .attributes_ptr = if (owned.step_attributes.items.len == 0) null else owned.step_attributes.items.ptr,
                 .attribute_count = owned.step_attributes.items.len,
                 .span = span(request.span),
@@ -429,14 +649,20 @@ pub fn projectRespondSource(project: ?*Vizg_Project, request_id: u64, input: ?*c
     if (args.is_root != 0) return .INVALID_ARGUMENT;
     const source = moduleSource(args) orelse return .INVALID_ARGUMENT;
     if (!sourceInputsOutsideWorkspace(owned, args)) return .INVALID_ARGUMENT;
-    const next_source_bytes = std.math.add(usize, owned.source_bytes, args.source_len) catch return .LIMIT_EXCEEDED;
+    const existing = owned.project.lookup(source.id);
+    const retains_new_source = existing == null or existing.?.source == null;
+    const next_source_bytes = if (retains_new_source)
+        std.math.add(usize, owned.source_bytes, args.source_len) catch return .LIMIT_EXCEEDED
+    else
+        owned.source_bytes;
     if (next_source_bytes > owned.limits.source_bytes) return .LIMIT_EXCEEDED;
     const request = owned.project.lookupRequest(.init(request_id)) orelse return .INVALID_STATE;
-    const depth = std.math.add(usize, depthOf(owned, request.request.importer), 1) catch return .LIMIT_EXCEEDED;
+    const importer_depth = depthOf(owned, request.request.importer) orelse return .INVALID_STATE;
+    const depth = std.math.add(usize, importer_depth, 1) catch return .LIMIT_EXCEEDED;
     if (depth > owned.limits.graph_depth) return .LIMIT_EXCEEDED;
-    if (owned.project.lookup(source.id) == null and owned.project.moduleCount() >= owned.limits.modules) return .LIMIT_EXCEEDED;
+    if (retains_new_source and owned.project.moduleCount() >= owned.limits.modules) return .LIMIT_EXCEEDED;
     owned.project.respondSource(.init(request_id), source) catch |err| return statusFromError(err);
-    owned.source_bytes = next_source_bytes;
+    if (retains_new_source) owned.source_bytes = next_source_bytes;
     recordDepth(owned, source.id, depth) catch return .OUT_OF_MEMORY;
     return .OK;
 }
@@ -473,7 +699,8 @@ pub fn projectRespondExternal(project: ?*Vizg_Project, request_id: u64, input: ?
     const args = input orelse return .INVALID_ARGUMENT;
     if (!validHostRange(args, @sizeOf(Vizg_ExternalModule)) or
         !inputOutsideWorkspace(owned, args, @sizeOf(Vizg_ExternalModule))) return .INVALID_ARGUMENT;
-    if (!validPair(args.logical_name_ptr, args.logical_name_len) or !validPair(args.exports_ptr, args.export_count)) return .INVALID_ARGUMENT;
+    if (!validPair(args.logical_name_ptr, args.logical_name_len) or
+        !validTypedRange(Vizg_ExternalExport, args.exports_ptr, args.export_count)) return .INVALID_ARGUMENT;
 
     const exports_bytes = std.math.mul(usize, args.export_count, @sizeOf(Vizg_ExternalExport)) catch return .INVALID_ARGUMENT;
     if (!inputOutsideWorkspace(owned, args.logical_name_ptr, args.logical_name_len) or
@@ -537,12 +764,33 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
     const finished = owned.project.finish() catch |err| return statusFromError(err);
     const growth_status = checkGrowthLimits(owned);
     if (growth_status != .OK) return growth_status;
-    const result = owned.fba.allocator().create(OwnedProjectResult) catch return .OUT_OF_MEMORY;
+    if (owned.result_ready) {
+        out_result[0] = @ptrCast(&owned.result_view);
+        return .OK;
+    }
+    const result = &owned.result_view;
+    const semantic_result = owned.project.semanticResult();
+    const canonical_diagnostic_count = diagnosticCount(owned);
     result.* = .{ .magic = result_magic, .summary = .{
         .module_count = finished.module_count,
-        .has_failures = @intFromBool(finished.has_failures),
-        .reserved = .{ 0, 0, 0, 0, 0, 0, 0 },
+        .diagnostic_count = canonical_diagnostic_count,
+        .edge_count = owned.project.edges().len,
+        .import_count = if (semantic_result) |value| value.imports.len else 0,
+        .export_count = if (semantic_result) |value| value.exports.len else 0,
+        .is_partial = @intFromBool(if (semantic_result) |value| value.is_partial else finished.has_failures),
+        .has_syntax_errors = @intFromBool(false),
+        .has_semantic_errors = @intFromBool(false),
+        .has_module_failures = @intFromBool(finished.has_failures),
+        .reserved = .{ 0, 0, 0, 0 },
     }, .owner = owned };
+    result.summary.has_syntax_errors = @intFromBool(
+        resultHasPhase(result, .scanner) or resultHasPhase(result, .parser),
+    );
+    result.summary.has_semantic_errors = @intFromBool(
+        resultHasPhase(result, .binder) or resultHasPhase(result, .resolver) or
+        resultHasPhase(result, .cfg) or resultHasPhase(result, .type_checker),
+    );
+    owned.result_ready = true;
     out_result[0] = @ptrCast(result);
     return .OK;
 }
@@ -556,43 +804,150 @@ pub fn projectResultSummary(result: ?*const Vizg_ProjectResult, out_summary: ?*V
     return .OK;
 }
 
-pub fn projectResultDestroy(result: ?*Vizg_ProjectResult) callconv(.c) void {
-    const owned = ownedResultForDestroy(result) orelse return;
-    owned.destroyed = true;
+pub fn projectResultModule(result: ?*const Vizg_ProjectResult, index: usize, out_module: ?*Vizg_ProjectModuleInfo) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedResult(result) orelse return .INVALID_ARGUMENT;
+    const output = out_module orelse return .INVALID_ARGUMENT;
+    if (!outputOutsideWorkspace(owned, output, @sizeOf(Vizg_ProjectModuleInfo))) return .INVALID_ARGUMENT;
+    const modules = owned.owner.project.modulesView();
+    if (index >= modules.len) return .INVALID_ARGUMENT;
+    const module = modules[index];
+    const logical_name = if (module.source) |source| source.logical_name else "";
+    output.* = .{
+        .module_id = module.id.value(),
+        .logical_name_ptr = if (logical_name.len == 0) null else logical_name.ptr,
+        .logical_name_len = logical_name.len,
+        .state = @intFromEnum(module.state),
+        .is_root = @intFromBool(module.is_root),
+        .has_source = @intFromBool(module.source != null),
+        .reserved = .{ 0, 0 },
+    };
+    return .OK;
 }
 
-pub fn projectAnalyzeSource(config: ?*const Vizg_ProjectConfig, input: ?*const Vizg_ProjectSource, out_result: [*c]?*Vizg_ProjectResult) callconv(.c) Vizg_ProjectStatus {
-    if (!validHostRange(out_result, @sizeOf(?*Vizg_ProjectResult))) return .INVALID_ARGUMENT;
-    const config_args = config orelse return .INVALID_ARGUMENT;
-    if (!validHostRange(config_args, @sizeOf(Vizg_ProjectConfig))) return .INVALID_ARGUMENT;
-    const storage = workspace(config_args) orelse return .INVALID_ARGUMENT;
-    const output_start = @intFromPtr(out_result);
-    const output_end = std.math.add(usize, output_start, @sizeOf(?*Vizg_ProjectResult)) catch return .INVALID_ARGUMENT;
-    const storage_start = @intFromPtr(storage.ptr);
-    const storage_end = std.math.add(usize, storage_start, storage.len) catch return .INVALID_ARGUMENT;
-    if (!(output_end <= storage_start or output_start >= storage_end)) return .INVALID_ARGUMENT;
-    out_result[0] = null;
-    const args = input orelse return .INVALID_ARGUMENT;
-    if (args.is_root != 1) return .INVALID_ARGUMENT;
-
-    var handle: ?*Vizg_Project = null;
-    var status = projectCreate(config, &handle);
-    if (status != .OK) return status;
-    defer projectDestroy(handle);
-    status = projectAddSource(handle, args);
-    if (status != .OK) return status;
-    while (true) {
-        var next = std.mem.zeroes(Vizg_ProjectStep);
-        status = projectStep(handle, &next);
-        if (status != .OK) return status;
-        if (next.kind == 0) break;
-        status = projectRespondFailure(handle, next.request_id, 0);
-        if (status != .OK) return status;
+pub fn projectResultDiagnostic(result: ?*const Vizg_ProjectResult, index: usize, out_diagnostic: ?*Vizg_ProjectDiagnostic) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedResult(result) orelse return .INVALID_ARGUMENT;
+    const output = out_diagnostic orelse return .INVALID_ARGUMENT;
+    if (!outputOutsideWorkspace(owned, output, @sizeOf(Vizg_ProjectDiagnostic))) return .INVALID_ARGUMENT;
+    const semantic = projectSemantic(owned);
+    const semantic_count = if (semantic) |value| value.diagnostics.len else 0;
+    if (index < semantic_count) {
+        const item = semantic.?.diagnostics[index];
+        const logical_name = item.path orelse "";
+        output.* = .{
+            .module_id = moduleIdForPath(owned.owner, item.path),
+            .severity = diagnosticSeverity(item.severity),
+            .code = diagnosticCode(item.code),
+            .phase = diagnosticPhase(item.phase),
+            .message_ptr = if (item.message.len == 0) null else item.message.ptr,
+            .message_len = item.message.len,
+            .logical_name_ptr = if (logical_name.len == 0) null else logical_name.ptr,
+            .logical_name_len = logical_name.len,
+            .span = span(item.span),
+        };
+        return .OK;
     }
-    return projectFinish(handle, out_result);
+    var remaining = index - semantic_count;
+    const graph_diagnostics = owned.owner.project.graphDiagnostics();
+    var selected: ?vizg.project.GraphDiagnostic = null;
+    for (graph_diagnostics) |candidate| {
+        if (semantic) |value| if (graphDiagnosticDuplicate(value, owned.owner, candidate)) continue;
+        if (remaining == 0) {
+            selected = candidate;
+            break;
+        }
+        remaining -= 1;
+    }
+    const item = selected orelse return .INVALID_ARGUMENT;
+    const message = graphDiagnosticMessage(item.code);
+    const module = owned.owner.project.lookup(item.importer);
+    const logical_name = if (module) |value| if (value.source) |source| source.logical_name else "" else "";
+    output.* = .{
+        .module_id = item.importer.value(),
+        .severity = diagnosticSeverity(.@"error"),
+        .code = diagnosticCode(graphDiagnosticCode(item.code)),
+        .phase = diagnosticPhase(.module_graph),
+        .message_ptr = message.ptr,
+        .message_len = message.len,
+        .logical_name_ptr = if (logical_name.len == 0) null else logical_name.ptr,
+        .logical_name_len = logical_name.len,
+        .span = span(item.span),
+    };
+    return .OK;
+}
+
+pub fn projectResultEdge(result: ?*const Vizg_ProjectResult, index: usize, out_edge: ?*Vizg_ProjectEdgeInfo) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedResult(result) orelse return .INVALID_ARGUMENT;
+    const output = out_edge orelse return .INVALID_ARGUMENT;
+    if (!outputOutsideWorkspace(owned, output, @sizeOf(Vizg_ProjectEdgeInfo))) return .INVALID_ARGUMENT;
+    const edges = owned.owner.project.edges();
+    if (index >= edges.len) return .INVALID_ARGUMENT;
+    const item = edges[index];
+    output.* = .{
+        .request_id = item.request_id.value(),
+        .importer_module_id = item.importer.value(),
+        .target_module_id = if (item.target) |value| value.value() else 0,
+        .external_module_id = if (item.external_target) |value| value.value() else 0,
+        .specifier_ptr = if (item.raw_specifier.len == 0) null else item.raw_specifier.ptr,
+        .specifier_len = item.raw_specifier.len,
+        .request_operation = @intFromEnum(item.operation),
+        .state = @intFromEnum(item.state),
+        .type_only = @intFromBool(item.type_only),
+        .has_target = @intFromBool(item.target != null),
+        .has_external_target = @intFromBool(item.external_target != null),
+        .reserved = 0,
+        .span = span(item.span),
+    };
+    return .OK;
+}
+
+pub fn projectResultImport(result: ?*const Vizg_ProjectResult, index: usize, out_import: ?*Vizg_ProjectImportInfo) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedResult(result) orelse return .INVALID_ARGUMENT;
+    const output = out_import orelse return .INVALID_ARGUMENT;
+    if (!outputOutsideWorkspace(owned, output, @sizeOf(Vizg_ProjectImportInfo))) return .INVALID_ARGUMENT;
+    const semantic = projectSemantic(owned) orelse return .INVALID_STATE;
+    if (index >= semantic.imports.len) return .INVALID_ARGUMENT;
+    const item = semantic.imports[index];
+    const target_module_id: u64 = if (item.target) |target| target.declaration.module_id else 0;
+    output.* = .{
+        .module_id = item.module_id,
+        .target_module_id = target_module_id,
+        .target_type_id = if (item.target) |target| target.type_id else 0,
+        .link_state = @intFromEnum(item.state),
+        .local_name_ptr = if (item.local_name.len == 0) null else item.local_name.ptr,
+        .local_name_len = item.local_name.len,
+        .imported_name_ptr = if (item.imported_name.len == 0) null else item.imported_name.ptr,
+        .imported_name_len = item.imported_name.len,
+        .type_only = @intFromBool(item.type_only),
+        .runtime_binding = @intFromBool(item.runtime_binding),
+        .has_target = @intFromBool(item.target != null),
+        .reserved = 0,
+        .span = span(item.span),
+    };
+    return .OK;
+}
+
+pub fn projectResultExport(result: ?*const Vizg_ProjectResult, index: usize, out_export: ?*Vizg_ProjectExportInfo) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedResult(result) orelse return .INVALID_ARGUMENT;
+    const output = out_export orelse return .INVALID_ARGUMENT;
+    if (!outputOutsideWorkspace(owned, output, @sizeOf(Vizg_ProjectExportInfo))) return .INVALID_ARGUMENT;
+    const semantic = projectSemantic(owned) orelse return .INVALID_STATE;
+    if (index >= semantic.exports.len) return .INVALID_ARGUMENT;
+    const item = semantic.exports[index];
+    output.* = .{
+        .module_id = item.module_id,
+        .target_type_id = item.identity.type_id,
+        .name_ptr = if (item.name.len == 0) null else item.name.ptr,
+        .name_len = item.name.len,
+        .type_only = @intFromBool(item.type_only),
+        .re_export = @intFromBool(item.re_export),
+        .reserved = .{ 0, 0 },
+        .span = span(item.span),
+    };
+    return .OK;
 }
 
 comptime {
+    @export(&abiVersion, .{ .name = "vizg_abi_version" });
     @export(&projectWorkspaceAlignment, .{ .name = "vizg_project_workspace_alignment" });
     @export(&projectWorkspaceOverhead, .{ .name = "vizg_project_workspace_overhead" });
     @export(&projectCreate, .{ .name = "vizg_project_create" });
@@ -604,8 +959,20 @@ comptime {
     @export(&projectRespondFailure, .{ .name = "vizg_project_respond_failure" });
     @export(&projectFinish, .{ .name = "vizg_project_finish" });
     @export(&projectResultSummary, .{ .name = "vizg_project_result_summary" });
-    @export(&projectResultDestroy, .{ .name = "vizg_project_result_destroy" });
-    @export(&projectAnalyzeSource, .{ .name = "vizg_project_analyze_source" });
+    @export(&projectResultModule, .{ .name = "vizg_project_result_module" });
+    @export(&projectResultDiagnostic, .{ .name = "vizg_project_result_diagnostic" });
+    @export(&projectResultEdge, .{ .name = "vizg_project_result_edge" });
+    @export(&projectResultImport, .{ .name = "vizg_project_result_import" });
+    @export(&projectResultExport, .{ .name = "vizg_project_result_export" });
+}
+
+test "public diagnostic ABI mappings are stable" {
+    try std.testing.expectEqual(@as(u32, 0), diagnosticSeverity(.@"error"));
+    try std.testing.expectEqual(@as(u32, 5), diagnosticPhase(.module_graph));
+    try std.testing.expectEqual(@as(u32, 1001), diagnosticCode(.invalid_character));
+    try std.testing.expectEqual(@as(u32, 2003), diagnosticCode(.parse_recursion_limit_reached));
+    try std.testing.expectEqual(@as(u32, 5001), diagnosticCode(.module_not_found));
+    try std.testing.expectEqual(@as(u32, 6009), diagnosticCode(.invalid_argument_type));
 }
 
 test "external response conversion uses reclaimable workspace scratch" {
@@ -618,6 +985,8 @@ test "external response conversion uses reclaimable workspace scratch" {
     const limits = .{
         .max_source_bytes = 1024 * 1024,
         .max_modules = 32,
+        .max_requests = 128,
+        .max_edges = 128,
         .max_diagnostics = 1024,
         .max_graph_depth = 32,
         .max_semantic_types = 16 * 1024,
@@ -627,6 +996,8 @@ test "external response conversion uses reclaimable workspace scratch" {
         .workspace_len = workspace_bytes,
         .max_source_bytes = limits.max_source_bytes,
         .max_modules = limits.max_modules,
+        .max_requests = limits.max_requests,
+        .max_edges = limits.max_edges,
         .max_diagnostics = limits.max_diagnostics,
         .max_graph_depth = limits.max_graph_depth,
         .max_semantic_types = limits.max_semantic_types,
@@ -651,7 +1022,6 @@ test "external response conversion uses reclaimable workspace scratch" {
         .kind = 1,
         .is_root = 1,
         .reserved = .{ 0, 0, 0 },
-        .revision = 0,
     };
     try std.testing.expectEqual(.OK, projectAddSource(c_handle, &source));
     try std.testing.expectEqual(.OK, projectAddSource(direct_handle, &source));

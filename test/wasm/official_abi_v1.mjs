@@ -12,15 +12,19 @@ if (imports.length !== 0) {
 
 const expectedExports = [
   "memory",
+  "vizg_abi_version",
   "vizg_project_add_source",
-  "vizg_project_analyze_source",
   "vizg_project_create",
   "vizg_project_destroy",
   "vizg_project_finish",
   "vizg_project_respond_external",
   "vizg_project_respond_failure",
   "vizg_project_respond_source",
-  "vizg_project_result_destroy",
+  "vizg_project_result_diagnostic",
+  "vizg_project_result_edge",
+  "vizg_project_result_export",
+  "vizg_project_result_import",
+  "vizg_project_result_module",
   "vizg_project_result_summary",
   "vizg_project_step",
   "vizg_project_workspace_alignment",
@@ -34,6 +38,9 @@ if (JSON.stringify(actualExports) !== JSON.stringify(expectedExports)) {
 }
 
 const { exports: api } = await WebAssembly.instantiate(module);
+if (api.vizg_abi_version() !== 1) {
+  throw new Error(`unexpected ABI version: ${api.vizg_abi_version()}`);
+}
 const PAGE_BYTES = 64 * 1024;
 const WORKSPACE_BYTES = 8 * 1024 * 1024;
 const STATUS_OK = 0;
@@ -74,12 +81,14 @@ function beginFlow() {
   }
 
   function writeConfig() {
-    const pointer = alloc(28, 4);
+    const pointer = alloc(36, 4);
     const values = [
       workspace,
       WORKSPACE_BYTES,
       1024 * 1024,
       256,
+      1024,
+      1024,
       4096,
       128,
       65536,
@@ -91,7 +100,7 @@ function beginFlow() {
   function writeSource(moduleId, logicalName, source, isRoot) {
     const name = writeBytes(logicalName);
     const text = writeBytes(source);
-    const pointer = alloc(40, 8);
+    const pointer = alloc(32, 8);
     view.setBigUint64(pointer, BigInt(moduleId), true);
     view.setUint32(pointer + 8, name.pointer, true);
     view.setUint32(pointer + 12, name.length, true);
@@ -102,7 +111,6 @@ function beginFlow() {
     view.setUint8(pointer + 29, 0);
     view.setUint8(pointer + 30, 0);
     view.setUint8(pointer + 31, 0);
-    view.setBigUint64(pointer + 32, 1n, true);
     return pointer;
   }
 
@@ -132,14 +140,13 @@ function beginFlow() {
     check(api.vizg_project_finish(project, resultOut), "project_finish");
     const result = view.getUint32(resultOut, true);
     if (result === 0) throw new Error("project_finish returned null");
-    const summary = alloc(12, 4);
+    const summary = alloc(28, 4);
     check(api.vizg_project_result_summary(result, summary), "result_summary");
     const modules = view.getUint32(summary, true);
-    const failures = view.getUint8(summary + 4) !== 0;
+    const failures = view.getUint8(summary + 23) !== 0;
     if (modules !== expectedModules || failures !== expectedFailures) {
       throw new Error(`unexpected summary: modules=${modules} failures=${failures}`);
     }
-    api.vizg_project_result_destroy(result);
     api.vizg_project_destroy(project);
   }
 
@@ -150,12 +157,26 @@ function beginFlow() {
     step,
     view: () => view,
     writeBytes,
+    writeConfig,
     writeSource,
   };
 }
 
 function check(status, operation) {
   if (status !== STATUS_OK) throw new Error(`${operation} failed: ${status}`);
+}
+
+// Host-controlled structures and workspaces must be range-checked before the
+// implementation dereferences them. These calls must return INVALID_ARGUMENT
+// rather than trapping the WebAssembly instance.
+{
+  const host = beginFlow();
+  const out = host.alloc(4, 4);
+  host.view().setUint32(out, 0, true);
+  const invalid = 0xffffffff;
+  if (api.vizg_project_create(invalid, out) !== 1) {
+    throw new Error("project_create accepted an invalid config pointer");
+  }
 }
 
 {
