@@ -6,6 +6,7 @@ const binder = @import("../frontend/binder.zig");
 const contracts = @import("contracts.zig");
 const diagnostics = @import("../diagnostics/root.zig");
 const frontend = @import("../frontend/frontend.zig");
+const tokens = @import("../frontend/tokens.zig");
 const modules_mod = @import("../modules/root.zig");
 const semantics = @import("../semantics/root.zig");
 const types = @import("../types/root.zig");
@@ -15,7 +16,7 @@ const state_machine = @import("state_machine.zig");
 const ReachableClosure = std.AutoHashMap(u64, void);
 
 pub const ProjectLimits = struct {
-    max_source_bytes: usize = std.math.maxInt(usize),
+    max_source_bytes: usize = tokens.MAX_SOURCE_LENGTH,
     max_total_source_bytes: usize = std.math.maxInt(usize),
     max_modules: usize = std.math.maxInt(usize),
     max_requests: usize = std.math.maxInt(usize),
@@ -221,18 +222,19 @@ pub const Project = struct {
         defer self.debugAssertInvariants();
         try self.ensureOpen();
         try self.requests.validateResponse(id);
+        var needs_supply = true;
         if (self.find(source.id)) |existing| {
             if (existing.source) |owned| {
                 const identical = source.kind == owned.kind and
                     std.mem.eql(u8, source.logical_name, owned.logical_name) and
                     std.mem.eql(u8, source.bytes, owned.bytes);
                 if (!identical) return error.DuplicateModule;
-            } else {
-                try self.supplySource(source);
+                needs_supply = false;
             }
-        } else {
-            try self.supplySource(source);
         }
+        if (needs_supply) try self.validateSubmission(source);
+        try self.validateGraphDepthWithResolution(id, source.id);
+        if (needs_supply) try self.supplySource(source);
         try self.requests.commitResponse(id, .{ .kind = .source, .module_id = source.id });
         try self.graph.resolve(id, .resolved, source.id);
         self.clearProjectSemantics();
@@ -345,11 +347,19 @@ pub const Project = struct {
     }
 
     fn validateGraphDepth(self: *const Project) !void {
+        try self.validateGraphDepthWithResolution(null, null);
+    }
+
+    fn validateGraphDepthWithResolution(
+        self: *const Project,
+        request_id: ?contracts.RequestId,
+        target: ?contracts.ModuleId,
+    ) !void {
         var roots: std.ArrayList(contracts.ModuleId) = .empty;
         defer roots.deinit(self.allocator);
         for (self.modules.items) |module| if (module.is_root) try roots.append(self.allocator, module.id);
 
-        var depths = try self.graph.shortestDepths(self.allocator, roots.items);
+        var depths = try self.graph.shortestDepthsWithResolution(self.allocator, roots.items, request_id, target);
         defer depths.deinit();
         var iterator = depths.valueIterator();
         while (iterator.next()) |depth| {
@@ -427,14 +437,17 @@ pub const Project = struct {
         }
 
         const source = self.find(id).?.source.?;
-        result_ptr.* = try semantics.analyzeSource(self.allocator, .{
+        result_ptr.* = try semantics.analyzeSourceWithLimits(self.allocator, .{
             .path = source.logical_name,
             .text = source.bytes,
             .kind = switch (source.kind) {
                 .script => .script,
                 .module => .module,
             },
-        }, .{});
+        }, .{}, .{
+            .max_types = self.limits.max_semantic_types,
+            .max_diagnostics = self.limits.max_diagnostics,
+        });
         result_initialized = true;
 
         const request_checkpoint = self.requests.checkpoint();
@@ -477,12 +490,9 @@ pub const Project = struct {
     fn submit(self: *Project, source: contracts.ModuleSource, is_root: bool) !void {
         const existing = self.findMut(source.id);
         if (existing) |module| if (module.source != null) return error.DuplicateModule;
-        if (source.bytes.len > self.limits.max_source_bytes) return error.SourceLimitExceeded;
-        const next_total = std.math.add(usize, self.total_source_bytes, source.bytes.len) catch
-            return error.TotalSourceLimitExceeded;
-        if (next_total > self.limits.max_total_source_bytes) return error.TotalSourceLimitExceeded;
-        if (existing == null and self.modules.items.len >= self.limits.max_modules)
-            return error.ModuleLimitExceeded;
+        try self.validateSubmission(source);
+
+        const next_total = std.math.add(usize, self.total_source_bytes, source.bytes.len) catch unreachable;
 
         const logical_name = try self.allocator.dupe(u8, source.logical_name);
         errdefer self.allocator.free(logical_name);
@@ -513,6 +523,16 @@ pub const Project = struct {
             .metadata_derived = false,
         });
         self.total_source_bytes = next_total;
+    }
+
+    fn validateSubmission(self: *const Project, source: contracts.ModuleSource) !void {
+        if (source.bytes.len > tokens.MAX_SOURCE_LENGTH) return error.SourceLimitExceeded;
+        if (source.bytes.len > self.limits.max_source_bytes) return error.SourceLimitExceeded;
+        const next_total = std.math.add(usize, self.total_source_bytes, source.bytes.len) catch
+            return error.TotalSourceLimitExceeded;
+        if (next_total > self.limits.max_total_source_bytes) return error.TotalSourceLimitExceeded;
+        if (self.find(source.id) == null and self.modules.items.len >= self.limits.max_modules)
+            return error.ModuleLimitExceeded;
     }
 
     fn clearProjectSemantics(self: *Project) void {
@@ -665,12 +685,30 @@ pub const Project = struct {
                 .project_edge_index = project_edge_index,
                 .from = edge.importer.value(),
                 .to = if (edge.target) |target| target.value() else null,
+                .external_to = if (edge.external_target) |target| target.value() else null,
                 .specifier = edge.raw_specifier,
                 .kind = edge.import_kind,
                 .type_only = edge.type_only,
                 .re_export = edge.operation == .re_export,
                 .status = status,
                 .span = edge.span,
+            });
+        }
+
+        var graph_external_modules: std.ArrayList(modules_mod.graph.ExternalModule) = .empty;
+        for (self.external_modules.items) |owned| {
+            const descriptor = owned.descriptor;
+            const graph_exports = try allocator.alloc(modules_mod.graph.ExternalExport, descriptor.exports.len);
+            for (descriptor.exports, 0..) |exported, index| graph_exports[index] = .{
+                .name = exported.name,
+                .kind = @enumFromInt(@intFromEnum(exported.kind)),
+                .namespace = .{ .value = exported.namespace.value, .type = exported.namespace.type },
+                .type_metadata = if (exported.type_metadata) |metadata| @enumFromInt(@intFromEnum(metadata)) else null,
+            };
+            try graph_external_modules.append(allocator, .{
+                .id = descriptor.id.value(),
+                .logical_name = descriptor.logical_name,
+                .exports = graph_exports,
             });
         }
 
@@ -718,18 +756,21 @@ pub const Project = struct {
             .modules = graph_modules.items,
             .imports = graph_edges.items,
             .linked_imports = linked_imports.items,
+            .external_modules = graph_external_modules.items,
             .diagnostics = &.{},
         };
         const result = try self.allocator.create(semantics.BorrowedProjectSemanticResult);
         errdefer self.allocator.destroy(result);
-        result.* = try semantics.analyzeBorrowedModuleGraphWithLimit(
+        result.* = try semantics.analyzeBorrowedModuleGraphWithLimits(
             self.allocator,
             &semantic_graph,
-            self.limits.max_semantic_types,
+            .{
+                .max_types = self.limits.max_semantic_types,
+                .max_diagnostics = self.limits.max_diagnostics,
+            },
         );
         errdefer result.deinit();
-        try self.linkExternalImports(result);
-        try self.linkExternalReExports(result);
+        try self.recordExternalLinkDiagnostics(result);
         try self.buildProjectDiagnostics(result);
         self.project_semantics = result;
     }
@@ -810,67 +851,15 @@ pub const Project = struct {
         try self.project_diagnostics.append(self.allocator, owned);
     }
 
-    fn linkExternalImports(self: *Project, result: *semantics.BorrowedProjectSemanticResult) !void {
-        const allocator = result.arena.allocator();
-        for (result.imports) |*item| {
-            if (item.state != .external) continue;
-            const import_record = self.findImportRecord(item.module_id, item.local_name) orelse continue;
-            if (item.edge_index >= self.graph.edges.items.len) continue;
-            const edge = &self.graph.edges.items[item.edge_index];
-            if (edge.importer.value() != item.module_id or edge.state != .external) continue;
-            const external_id = edge.external_target orelse continue;
-            const external = self.findExternal(external_id) orelse continue;
-
-            if (import_record.kind == .namespace) {
-                var properties: std.ArrayList(types.ObjectProperty) = .empty;
-                for (external.exports) |exported| {
-                    if (!exported.namespace.supports(item.type_only)) continue;
-                    try properties.append(allocator, .{
-                        .name = exported.name,
-                        .type_id = externalTypeId(&result.type_store.builtins, exported.type_metadata),
-                    });
-                }
-                item.state = .namespace;
-                item.runtime_binding = !item.type_only;
-                item.target = .{
-                    .symbol_id = null,
-                    .declaration = types.SemanticDeclId.init(0, ast.invalid_node),
-                    .type_id = if (properties.items.len == 0)
-                        result.type_store.builtins.unknown
-                    else
-                        try result.type_store.intern(.{ .object = properties.items }),
-                    .namespace = if (item.type_only) .type else .value,
-                    .external_module_id = external_id.value(),
-                };
-                continue;
-            }
-
-            const exported = findExternalExport(external.exports, item.imported_name, import_record.kind, item.type_only);
-            if (exported == null) {
-                item.state = .unresolved;
-                item.runtime_binding = false;
-                item.target = null;
+    fn recordExternalLinkDiagnostics(self: *Project, result: *semantics.BorrowedProjectSemanticResult) !void {
+        for (result.imports) |item| {
+            if (item.state != .unresolved or item.edge_index >= self.graph.edges.items.len) continue;
+            const edge = self.graph.edges.items[item.edge_index];
+            if (edge.state == .external) {
+                try self.graph.recordMissingExternalExport(edge);
                 result.is_partial = true;
-                try self.graph.recordMissingExternalExport(edge.*);
-                continue;
             }
-            item.target = .{
-                .symbol_id = null,
-                .declaration = types.SemanticDeclId.init(0, ast.invalid_node),
-                .type_id = externalTypeId(&result.type_store.builtins, exported.?.type_metadata),
-                .namespace = if (item.type_only) .type else .value,
-                .external_module_id = external_id.value(),
-            };
-            item.runtime_binding = !item.type_only;
         }
-    }
-
-    fn linkExternalReExports(self: *Project, result: *semantics.BorrowedProjectSemanticResult) !void {
-        const allocator = result.arena.allocator();
-        var exports: std.ArrayList(semantics.SemanticExport) = .{
-            .items = result.exports,
-            .capacity = result.exports.len,
-        };
 
         for (self.modules.items) |module| {
             const source_result = module.semantic_result orelse continue;
@@ -883,61 +872,12 @@ pub const Project = struct {
                 const external_id = edge.external_target orelse continue;
                 const external = self.findExternal(external_id) orelse continue;
                 const import_kind: ast.ImportSpecifierKind = if (std.mem.eql(u8, record.local_name, "default")) .default else .named;
-                const exported = findExternalExport(external.exports, record.local_name, import_kind, record.type_only) orelse {
-                    result.is_partial = true;
+                if (findExternalExport(external.exports, record.local_name, import_kind, record.type_only) == null) {
                     try self.graph.recordMissingExternalExport(edge);
-                    continue;
-                };
-                try upsertExternalReExport(
-                    allocator,
-                    &exports,
-                    module.id.value(),
-                    record.name,
-                    edge_index,
-                    record.type_only,
-                    node.span,
-                    external_id,
-                    exported,
-                    &result.type_store.builtins,
-                );
+                    result.is_partial = true;
+                }
             }
-
-            for (source_result.frontend.ast.nodes) |node| switch (node.data) {
-                .ExportDeclaration => |declaration| {
-                    if (declaration.kind != .export_all or declaration.source.len == 0) continue;
-                    const source_span = declaration.source_span orelse continue;
-                    const edge_index = self.findExternalReExportEdge(module.id, source_span) orelse continue;
-                    const edge = self.graph.edges.items[edge_index];
-                    const external_id = edge.external_target orelse continue;
-                    const external = self.findExternal(external_id) orelse continue;
-                    for (external.exports) |exported| {
-                        if (exported.kind == .default) continue;
-                        const type_only = if (declaration.type_only)
-                            if (exported.namespace.type) true else continue
-                        else if (exported.namespace.value)
-                            false
-                        else if (exported.namespace.type)
-                            true
-                        else
-                            continue;
-                        try upsertExternalReExport(
-                            allocator,
-                            &exports,
-                            module.id.value(),
-                            exported.name,
-                            edge_index,
-                            type_only,
-                            node.span,
-                            external_id,
-                            exported,
-                            &result.type_store.builtins,
-                        );
-                    }
-                },
-                else => {},
-            };
         }
-        result.exports = try exports.toOwnedSlice(allocator);
     }
 
     fn findExternalReExportEdge(self: *const Project, importer: contracts.ModuleId, source_span: contracts.SourceSpan) ?usize {
@@ -946,15 +886,6 @@ pub const Project = struct {
                 edge.operation == .re_export and
                 edge.state == .external and
                 std.meta.eql(edge.span, source_span)) return index;
-        }
-        return null;
-    }
-
-    fn findImportRecord(self: *const Project, module_id: semantics.ModuleId, local_name: []const u8) ?binder.ImportRecord {
-        const module = self.find(contracts.ModuleId.init(module_id)) orelse return null;
-        const result = module.semantic_result orelse return null;
-        for (result.frontend.bind.module.imports) |record| {
-            if (std.mem.eql(u8, record.local_name, local_name)) return record;
         }
         return null;
     }
@@ -1166,66 +1097,6 @@ fn findExternalExport(
     return null;
 }
 
-fn externalTypeId(builtins: *const types.Builtins, metadata: ?contracts.ExternalType) types.TypeId {
-    return switch (metadata orelse .unknown) {
-        .unknown => builtins.unknown,
-        .any => builtins.any,
-        .never => builtins.never,
-        .void => builtins.void,
-        .undefined => builtins.undefined,
-        .null_ => builtins.null_,
-        .boolean => builtins.boolean,
-        .number => builtins.number,
-        .bigint => builtins.bigint,
-        .string => builtins.string,
-        .symbol => builtins.symbol,
-        .object => builtins.object,
-    };
-}
-
-fn upsertExternalReExport(
-    allocator: std.mem.Allocator,
-    exports: *std.ArrayList(semantics.SemanticExport),
-    module_id: semantics.ModuleId,
-    name: []const u8,
-    edge_index: usize,
-    type_only: bool,
-    span: contracts.SourceSpan,
-    external_id: contracts.ExternalModuleId,
-    exported: contracts.ExternalExportDescriptor,
-    builtins: *const types.Builtins,
-) !void {
-    const candidate: semantics.SemanticExport = .{
-        .module_id = module_id,
-        .name = name,
-        .identity = .{
-            .symbol_id = null,
-            .declaration = types.SemanticDeclId.init(0, ast.invalid_node),
-            .type_id = externalTypeId(builtins, exported.type_metadata),
-            .namespace = if (type_only) .type else .value,
-            .external_module_id = external_id.value(),
-        },
-        .edge_index = edge_index,
-        .type_only = type_only,
-        .re_export = true,
-        .span = span,
-    };
-    var fallback: ?usize = null;
-    for (exports.items, 0..) |item, index| {
-        if (item.module_id != module_id or !std.mem.eql(u8, item.name, name)) continue;
-        if (item.type_only == type_only) {
-            exports.items[index] = candidate;
-            return;
-        }
-        fallback = index;
-    }
-    if (fallback) |index| {
-        exports.items[index] = candidate;
-        return;
-    }
-    try exports.append(allocator, candidate);
-}
-
 test "project copies host buffers and analyzes one in-memory root" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
@@ -1240,6 +1111,40 @@ test "project copies host buffers and analyzes one in-memory root" {
     try std.testing.expectEqual(ModuleState.complete, project.state(.init(1)));
     try std.testing.expectEqualStrings("memory:root", result.module.path);
     try std.testing.expectEqual(@as(usize, 0), result.syntax_diagnostics.len);
+}
+
+test "first project module enforces exact semantic type and diagnostic boundaries" {
+    const typed_source = "type Box = { value: number }; const box: Box = { value: 1 };";
+    var typed_baseline = try semantics.analyze(std.testing.allocator, typed_source);
+    const exact_type_count = typed_baseline.type_store.count();
+    typed_baseline.deinit();
+    try std.testing.expect(exact_type_count > 0);
+
+    var exact_types = Project.initWithLimits(std.testing.allocator, .{ .max_semantic_types = exact_type_count });
+    defer exact_types.deinit();
+    try exact_types.addRoot(.{ .id = .init(1), .logical_name = "types.ts", .bytes = typed_source });
+    _ = try exact_types.analyzeModule(.init(1));
+
+    var excess_types = Project.initWithLimits(std.testing.allocator, .{ .max_semantic_types = exact_type_count - 1 });
+    defer excess_types.deinit();
+    try excess_types.addRoot(.{ .id = .init(1), .logical_name = "types.ts", .bytes = typed_source });
+    try std.testing.expectError(error.SemanticTypeLimitExceeded, excess_types.analyzeModule(.init(1)));
+
+    const diagnostic_source = "const first: number = 'wrong'; const second: number = 'wrong';";
+    var diagnostic_baseline = try semantics.analyze(std.testing.allocator, diagnostic_source);
+    const exact_diagnostic_count = diagnostic_baseline.diagnostics.len;
+    diagnostic_baseline.deinit();
+    try std.testing.expect(exact_diagnostic_count > 0);
+
+    var exact_diagnostics = Project.initWithLimits(std.testing.allocator, .{ .max_diagnostics = exact_diagnostic_count });
+    defer exact_diagnostics.deinit();
+    try exact_diagnostics.addRoot(.{ .id = .init(2), .logical_name = "diagnostics.ts", .bytes = diagnostic_source });
+    _ = try exact_diagnostics.analyzeModule(.init(2));
+
+    var excess_diagnostics = Project.initWithLimits(std.testing.allocator, .{ .max_diagnostics = exact_diagnostic_count - 1 });
+    defer excess_diagnostics.deinit();
+    try excess_diagnostics.addRoot(.{ .id = .init(2), .logical_name = "diagnostics.ts", .bytes = diagnostic_source });
+    try std.testing.expectError(error.DiagnosticLimitExceeded, excess_diagnostics.analyzeModule(.init(2)));
 }
 
 test "multiple roots share one requested dependency identity" {
@@ -1380,6 +1285,39 @@ test "source responses close cycles without recursive callbacks" {
     try project.respondSource(a_to_b, source_b);
     try std.testing.expectEqual(b_to_a, (try project.step()).request.id);
     try project.respondSource(b_to_a, source_a);
+    try std.testing.expect((try project.step()) == .complete);
+    try std.testing.expect(!(try project.finish()).has_failures);
+}
+
+test "source response rejects prospective graph depth without mutation" {
+    var project = Project.initWithLimits(std.testing.allocator, .{ .max_graph_depth = 1 });
+    defer project.deinit();
+    const root: contracts.ModuleSource = .{ .id = .init(1), .logical_name = "root", .bytes = "import './dep';" };
+    try project.addRoot(root);
+
+    const root_request = (try project.step()).request;
+    try project.respondSource(root_request.id, .{
+        .id = .init(2),
+        .logical_name = "dep",
+        .bytes = "import './deep';",
+    });
+    const deep_request = (try project.step()).request;
+    const module_count = project.moduleCount();
+    const total_source_bytes = project.total_source_bytes;
+    const edge_index = project.graph.edges.items.len - 1;
+
+    try std.testing.expectError(error.GraphDepthLimitExceeded, project.respondSource(deep_request.id, .{
+        .id = .init(3),
+        .logical_name = "deep",
+        .bytes = "export {};",
+    }));
+    try std.testing.expectEqual(module_count, project.moduleCount());
+    try std.testing.expectEqual(total_source_bytes, project.total_source_bytes);
+    try std.testing.expect(project.lookup(.init(3)) == null);
+    try std.testing.expect(project.lookupRequest(deep_request.id).?.resolution == null);
+    try std.testing.expectEqual(project_graph.EdgeState.unresolved, project.graph.edges.items[edge_index].state);
+
+    try project.respondSource(deep_request.id, root);
     try std.testing.expect((try project.step()) == .complete);
     try std.testing.expect(!(try project.finish()).has_failures);
 }
@@ -1636,55 +1574,99 @@ test "external descriptors report missing members and preserve type-only imports
     try std.testing.expectEqual(project_graph.DiagnosticCode.external_missing_export, project.graphDiagnostics()[0].code);
 }
 
-test "external linking rejects exports outside the requested namespace" {
+test "external value type reaches checker and final node and symbol tables" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(408),
+        .logical_name = "root",
+        .bytes =
+        \\import { numberValue } from 'native:numbers';
+        \\const invalid: string = numberValue;
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, .{
+            .id = .init(9008),
+            .logical_name = "native:numbers",
+            .exports = &.{.{
+                .name = "numberValue",
+                .namespace = .{ .value = true },
+                .type_metadata = .number,
+            }},
+        }),
+    };
+    _ = try project.finish();
+
+    const result = project.semanticResult().?;
+    const root = result.lookupModule(408).?;
+    var saw_mismatch = false;
+    for (root.type_info.diagnostics) |diagnostic| {
+        if (diagnostic.code == .type_mismatch and diagnostic.label != null and
+            std.mem.eql(u8, diagnostic.label.?, "incompatible initializer")) saw_mismatch = true;
+    }
+    try std.testing.expect(saw_mismatch);
+
+    var imported_type: ?types.TypeId = null;
+    for (result.imports) |item| {
+        if (!std.mem.eql(u8, item.local_name, "numberValue")) continue;
+        imported_type = item.target.?.type_id;
+        try std.testing.expectEqual(result.type_store.builtins.number, imported_type.?);
+        try std.testing.expectEqual(imported_type, root.type_info.lookupSymbol(item.import_symbol.?).?.effective());
+    }
+    try std.testing.expect(imported_type != null);
+
+    const frontend_result = project.lookup(.init(408)).?.semantic_result.?.frontend;
+    var initializer_type: ?types.TypeId = null;
+    for (frontend_result.ast.nodes) |node| switch (node.data) {
+        .VariableDeclarator => |declaration| if (std.mem.eql(u8, declaration.name, "invalid")) {
+            initializer_type = root.type_info.lookupNode(declaration.init.?);
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(imported_type, initializer_type);
+}
+
+test "value-only external import is rejected in the type namespace" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
     try project.addRoot(.{
         .id = .init(405),
         .logical_name = "root",
         .bytes =
-        \\import { TypeOnly } from 'native:type-only';
-        \\import type { ValueOnly } from 'native:value-only';
+        \\import { ValueOnly } from 'native:value-only';
+        \\let invalid: ValueOnly;
         ,
     });
     while (true) switch (try project.step()) {
         .complete => break,
-        .request => |request| if (std.mem.eql(u8, request.raw_specifier, "native:type-only")) {
-            try project.respondExternalModule(request.id, .{
-                .id = .init(9005),
-                .logical_name = "native:type-only",
-                .exports = &.{.{
-                    .name = "TypeOnly",
-                    .namespace = .{ .type = true },
-                    .type_metadata = .object,
-                }},
-            });
-        } else {
-            try project.respondExternalModule(request.id, .{
-                .id = .init(9006),
-                .logical_name = "native:value-only",
-                .exports = &.{.{
-                    .name = "ValueOnly",
-                    .namespace = .{ .value = true },
-                    .type_metadata = .object,
-                }},
-            });
-        },
+        .request => |request| try project.respondExternalModule(request.id, .{
+            .id = .init(9006),
+            .logical_name = "native:value-only",
+            .exports = &.{.{
+                .name = "ValueOnly",
+                .namespace = .{ .value = true },
+                .type_metadata = .object,
+            }},
+        }),
     };
     _ = try project.finish();
 
     const result = project.semanticResult().?;
-    var saw_type_as_value = false;
-    var saw_value_as_type = false;
+    const root = result.lookupModule(405).?;
+    var saw_value_import = false;
     for (result.imports) |item| {
-        if (std.mem.eql(u8, item.local_name, "TypeOnly")) {
-            saw_type_as_value = !item.type_only and item.state == .unresolved and item.target == null;
-        } else if (std.mem.eql(u8, item.local_name, "ValueOnly")) {
-            saw_value_as_type = item.type_only and item.state == .unresolved and item.target == null;
-        }
+        if (!std.mem.eql(u8, item.local_name, "ValueOnly")) continue;
+        saw_value_import = !item.type_only and item.state == .resolved and item.target != null and item.type_target == null;
     }
-    try std.testing.expect(saw_type_as_value and saw_value_as_type);
-    try std.testing.expectEqual(@as(usize, 2), project.graphDiagnostics().len);
+    try std.testing.expect(saw_value_import);
+    var saw_value_only_type_error = false;
+    for (root.type_info.diagnostics) |diagnostic| {
+        if (diagnostic.code == .unknown_type_name) saw_value_only_type_error = true;
+    }
+    try std.testing.expect(saw_value_only_type_error);
+    try std.testing.expectEqual(@as(usize, 0), project.graphDiagnostics().len);
 }
 
 test "external class exists in value and type namespaces" {
@@ -1718,28 +1700,58 @@ test "external class exists in value and type namespaces" {
     const root = result.lookupModule(404).?;
     try std.testing.expectEqual(@as(usize, 0), root.type_info.diagnostics.len);
     var saw_external = false;
+    var constructor_type: ?types.TypeId = null;
+    var instance_type: ?types.TypeId = null;
     for (result.imports) |item| {
         if (!std.mem.eql(u8, item.local_name, "ExternalClass")) continue;
+        constructor_type = item.target.?.type_id;
+        instance_type = item.type_target.?.type_id;
         saw_external = item.runtime_binding and !item.type_only and item.target != null and
             item.target.?.namespace == .value and
-            item.target.?.type_id == result.type_store.builtins.object and
+            result.type_store.lookup(item.target.?.type_id).?.kind == .class_constructor and
+            result.type_store.lookup(item.type_target.?.type_id).?.kind == .class and
+            item.target.?.declaration.eql(item.type_target.?.declaration) and
             item.target.?.external_module_id.? == descriptor.id.value();
+        try std.testing.expectEqual(constructor_type, root.type_info.lookupSymbol(item.import_symbol.?).?.effective());
     }
     try std.testing.expect(saw_external);
+    try std.testing.expect(constructor_type.? != instance_type.?);
+
+    const frontend_result = project.lookup(.init(404)).?.semantic_result.?.frontend;
+    var saw_instance = false;
+    var saw_typed = false;
+    for (frontend_result.bind.symbols) |symbol| {
+        if (std.mem.eql(u8, symbol.name, "instance")) {
+            try std.testing.expectEqual(instance_type, root.type_info.lookupSymbol(symbol.id).?.effective());
+            saw_instance = true;
+        } else if (std.mem.eql(u8, symbol.name, "typed")) {
+            try std.testing.expectEqual(instance_type, root.type_info.lookupSymbol(symbol.id).?.declared_type);
+            saw_typed = true;
+        }
+    }
+    try std.testing.expect(saw_instance and saw_typed);
 }
 
-test "external re-exports preserve named and star provenance across namespaces" {
+test "external re-export reaches a downstream consumer before checking" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
     try project.addRoot(.{
         .id = .init(406),
         .logical_name = "root",
         .bytes =
+        \\import { ForwardedValue } from './bridge';
+        \\const invalid: string = ForwardedValue;
+        ,
+    });
+    const bridge: contracts.ModuleSource = .{
+        .id = .init(407),
+        .logical_name = "bridge",
+        .bytes =
         \\export { ValueOnly as ForwardedValue } from 'native:exports';
         \\export type { TypeOnly as ForwardedType, Both as ForwardedBothType } from 'native:exports';
         \\export * from 'native:exports';
         ,
-    });
+    };
     const descriptor: contracts.ExternalModuleDescriptor = .{
         .id = .init(9007),
         .logical_name = "native:exports",
@@ -1752,26 +1764,52 @@ test "external re-exports preserve named and star provenance across namespaces" 
     };
     while (true) switch (try project.step()) {
         .complete => break,
-        .request => |request| try project.respondExternalModule(request.id, descriptor),
+        .request => |request| if (std.mem.eql(u8, request.raw_specifier, "./bridge"))
+            try project.respondSource(request.id, bridge)
+        else
+            try project.respondExternalModule(request.id, descriptor),
     };
-    try std.testing.expect(!(try project.finish()).has_failures);
+    _ = try project.finish();
 
     const result = project.semanticResult().?;
-    const expected = [_]struct { name: []const u8, type_only: bool, type_id: types.TypeId }{
+    const root = result.lookupModule(406).?;
+    var saw_mismatch = false;
+    for (root.type_info.diagnostics) |diagnostic| {
+        if (diagnostic.code == .type_mismatch) saw_mismatch = true;
+    }
+    try std.testing.expect(saw_mismatch);
+
+    var downstream_type: ?types.TypeId = null;
+    for (result.imports) |item| {
+        if (item.module_id != 406 or !std.mem.eql(u8, item.local_name, "ForwardedValue")) continue;
+        downstream_type = item.target.?.type_id;
+        try std.testing.expectEqual(result.type_store.builtins.number, downstream_type.?);
+        try std.testing.expectEqual(downstream_type, root.type_info.lookupSymbol(item.import_symbol.?).?.effective());
+    }
+    try std.testing.expect(downstream_type != null);
+
+    const expected = [_]struct { name: []const u8, type_only: bool, type_id: ?types.TypeId }{
         .{ .name = "ForwardedValue", .type_only = false, .type_id = result.type_store.builtins.number },
         .{ .name = "ForwardedType", .type_only = true, .type_id = result.type_store.builtins.string },
-        .{ .name = "ForwardedBothType", .type_only = true, .type_id = result.type_store.builtins.object },
+        .{ .name = "ForwardedBothType", .type_only = true, .type_id = null },
         .{ .name = "ValueOnly", .type_only = false, .type_id = result.type_store.builtins.number },
         .{ .name = "TypeOnly", .type_only = true, .type_id = result.type_store.builtins.string },
-        .{ .name = "Both", .type_only = false, .type_id = result.type_store.builtins.object },
+        .{ .name = "Both", .type_only = false, .type_id = null },
     };
     for (expected) |wanted| {
         var found = false;
         for (result.exports) |item| {
-            if (item.module_id != 406 or !std.mem.eql(u8, item.name, wanted.name)) continue;
+            if (item.module_id != 407 or !std.mem.eql(u8, item.name, wanted.name)) continue;
             try std.testing.expect(item.re_export);
             try std.testing.expectEqual(wanted.type_only, item.type_only);
-            try std.testing.expectEqual(wanted.type_id, item.identity.type_id);
+            if (wanted.type_id) |type_id| {
+                try std.testing.expectEqual(type_id, item.identity.type_id);
+            } else if (wanted.type_only) {
+                try std.testing.expect(result.type_store.lookup(item.identity.type_id).?.kind == .class);
+            } else {
+                try std.testing.expect(result.type_store.lookup(item.identity.type_id).?.kind == .class_constructor);
+                try std.testing.expect(result.type_store.lookup(item.type_identity.?.type_id).?.kind == .class);
+            }
             try std.testing.expectEqual(@as(?u64, descriptor.id.value()), item.identity.external_module_id);
             try std.testing.expect(item.edge_index != null);
             found = true;
@@ -1779,7 +1817,7 @@ test "external re-exports preserve named and star provenance across namespaces" 
         }
         try std.testing.expect(found);
     }
-    try std.testing.expect(result.lookupExport(406, "default") == null);
+    try std.testing.expect(result.lookupExport(407, "default") == null);
 }
 
 test "external descriptor validation rejects malformed duplicate and conflicting tables" {
@@ -1872,6 +1910,23 @@ test "source aggregate and module limits hold their N boundaries" {
         .bytes = "",
     }));
     try std.testing.expectEqual(@as(usize, 2), modules.moduleCount());
+}
+
+test "aggregate source-byte addition rejects usize overflow before mutation" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    project.total_source_bytes = std.math.maxInt(usize);
+
+    try std.testing.expectError(error.TotalSourceLimitExceeded, project.validateSubmission(.{
+        .id = .init(1),
+        .logical_name = "overflow",
+        .bytes = "x",
+    }));
+    try std.testing.expectEqual(std.math.maxInt(usize), project.total_source_bytes);
+
+    // Restore the synthetic counter so deinitialization invariants describe the
+    // actually retained (empty) project.
+    project.total_source_bytes = 0;
 }
 
 test "project diagnostic limit is checked before copying messages" {

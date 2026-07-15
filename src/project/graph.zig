@@ -175,6 +175,19 @@ pub const Graph = struct {
     /// Canonical shortest resolved-edge distance from any root. Relaxation is
     /// explicit so the result remains correct for cycles and any edge order.
     pub fn shortestDepths(self: *const Graph, allocator: std.mem.Allocator, roots: []const contracts.ModuleId) !DepthMap {
+        return self.shortestDepthsWithResolution(allocator, roots, null, null);
+    }
+
+    /// Compute shortest depths while treating every edge for `request_id` as
+    /// resolved to `target`. This permits a response to be rejected before it
+    /// mutates either the source set, request state, or graph.
+    pub fn shortestDepthsWithResolution(
+        self: *const Graph,
+        allocator: std.mem.Allocator,
+        roots: []const contracts.ModuleId,
+        request_id: ?contracts.RequestId,
+        target: ?contracts.ModuleId,
+    ) !DepthMap {
         var depths = DepthMap.init(allocator);
         errdefer depths.deinit();
         var pending: std.ArrayList(contracts.ModuleId) = .empty;
@@ -194,12 +207,18 @@ pub const Graph = struct {
             const importer_depth = depths.get(importer.value()).?;
             const candidate = std.math.add(usize, importer_depth, 1) catch return error.GraphDepthLimitExceeded;
             for (self.edges.items) |edge| {
-                if (edge.importer != importer or edge.state != .resolved) continue;
-                const target = edge.target orelse continue;
-                const result = try depths.getOrPut(target.value());
+                if (edge.importer != importer) continue;
+                const edge_target = if (request_id != null and edge.request_id == request_id.?)
+                    target
+                else if (edge.state == .resolved)
+                    edge.target
+                else
+                    null;
+                const resolved_target = edge_target orelse continue;
+                const result = try depths.getOrPut(resolved_target.value());
                 if (result.found_existing and result.value_ptr.* <= candidate) continue;
                 result.value_ptr.* = candidate;
-                try pending.append(allocator, target);
+                try pending.append(allocator, resolved_target);
             }
         }
         return depths;
