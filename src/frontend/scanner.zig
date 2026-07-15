@@ -52,6 +52,7 @@ pub const Scanner = struct {
     last_token_start: ?TokenStart = null,
 
     pub fn init(source: []const u8, config: ScannerConfig) Scanner {
+        std.debug.assert(source.len <= tokens.MAX_SOURCE_LENGTH);
         return .{
             .source = source,
             .config = config,
@@ -174,18 +175,18 @@ pub const Scanner = struct {
                 self.index += 1;
             }
 
-            self.line += 1;
+            self.line +|= 1;
             self.column = 1;
             return c;
         }
 
         if (c == '\n') {
-            self.line += 1;
+            self.line +|= 1;
             self.column = 1;
             return c;
         }
 
-        self.column += 1;
+        self.column +|= 1;
         return c;
     }
 
@@ -206,6 +207,8 @@ pub const Scanner = struct {
     }
 
     fn makeSpan(self: *const Scanner, start: TokenStart) Span {
+        std.debug.assert(start.index <= self.index);
+        std.debug.assert(self.index <= tokens.MAX_SOURCE_LENGTH);
         return .{
             .start = @intCast(start.index),
             .end = @intCast(self.index),
@@ -866,6 +869,10 @@ fn allowsRegExpAfter(kind: TokenType) bool {
 }
 
 pub fn scanAll(allocator: std.mem.Allocator, source: []const u8, collect_comments: bool) !ScanResult {
+    return scanAllWithLimit(allocator, source, collect_comments, std.math.maxInt(usize));
+}
+
+pub fn scanAllWithLimit(allocator: std.mem.Allocator, source: []const u8, collect_comments: bool, max_diagnostics: usize) !ScanResult {
     var scanner = Scanner.init(source, .{
         .trivia_policy = if (collect_comments) .emit_comments else .skip,
     });
@@ -876,7 +883,7 @@ pub fn scanAll(allocator: std.mem.Allocator, source: []const u8, collect_comment
     var comment_list: std.ArrayList(Comment) = .empty;
     errdefer comment_list.deinit(allocator);
 
-    var diagnostic_list: std.ArrayList(diagnostics.Diagnostic) = .empty;
+    var diagnostic_list = diagnostics.LimitedList.init(max_diagnostics);
     errdefer diagnostic_list.deinit(allocator);
 
     if (!std.unicode.utf8ValidateSlice(source)) {

@@ -24,6 +24,7 @@ pub const FrontendOptions = struct {
     recover_errors: bool = true,
     // Maximum recursive depth during parse descent. Exceeded parses are rejected with a diagnostic (H4).
     max_parse_depth: usize = 1024,
+    max_diagnostics: usize = std.math.maxInt(usize),
 };
 
 pub const FrontendResult = struct {
@@ -38,17 +39,34 @@ pub const FrontendResult = struct {
 };
 
 pub fn analyze(allocator: std.mem.Allocator, source: SourceFile, options: FrontendOptions) !FrontendResult {
-    const scanned = try scanner.scanAll(allocator, source.text, options.collect_comments);
-    const parsed = try parser.parse(allocator, scanned.tokens, .{ .recover_errors = options.recover_errors, .max_parse_depth = options.max_parse_depth });
-    const bound = try binder.bind(allocator, parsed.ast);
-    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+    const scanned = try scanner.scanAllWithLimit(allocator, source.text, options.collect_comments, options.max_diagnostics);
+    const parsed = try parser.parse(allocator, scanned.tokens, .{
+        .recover_errors = options.recover_errors,
+        .max_parse_depth = options.max_parse_depth,
+        .max_diagnostics = try remainingDiagnostics(options.max_diagnostics, scanned.diagnostics.len),
+    });
+    const scanner_parser_count = try diagnosticCount(&.{ scanned.diagnostics, parsed.diagnostics }, options.max_diagnostics);
+    const bound = try binder.bindWithLimit(
+        allocator,
+        parsed.ast,
+        try remainingDiagnostics(options.max_diagnostics, scanner_parser_count),
+    );
+    const resolved = try resolver.resolveWithLimit(
+        allocator,
+        parsed.ast,
+        bound,
+        try remainingDiagnostics(
+            options.max_diagnostics,
+            try diagnosticCount(&.{ scanned.diagnostics, parsed.diagnostics, bound.diagnostics }, options.max_diagnostics),
+        ),
+    );
     const cfgs = try cfg.build(allocator, parsed.ast);
-    const all_diagnostics = try combineDiagnostics(allocator, &.{
+    const all_diagnostics = try combineDiagnosticsWithLimit(allocator, &.{
         scanned.diagnostics,
         parsed.diagnostics,
         bound.diagnostics,
         resolved.diagnostics,
-    });
+    }, options.max_diagnostics);
 
     return .{
         .source = source,
@@ -62,9 +80,34 @@ pub fn analyze(allocator: std.mem.Allocator, source: SourceFile, options: Fronte
     };
 }
 
-fn combineDiagnostics(allocator: std.mem.Allocator, lists: []const []const diagnostics.Diagnostic) ![]const diagnostics.Diagnostic {
+fn remainingDiagnostics(max_diagnostics: usize, used: usize) !usize {
+    if (used > max_diagnostics) return error.DiagnosticLimitExceeded;
+    return max_diagnostics - used;
+}
+
+fn diagnosticCount(lists: []const []const diagnostics.Diagnostic, max_diagnostics: usize) !usize {
     var total: usize = 0;
-    for (lists) |list| total += list.len;
+    for (lists) |list| {
+        total = std.math.add(usize, total, list.len) catch return error.DiagnosticLimitExceeded;
+        if (total > max_diagnostics) return error.DiagnosticLimitExceeded;
+    }
+    return total;
+}
+
+fn combineDiagnostics(allocator: std.mem.Allocator, lists: []const []const diagnostics.Diagnostic) ![]const diagnostics.Diagnostic {
+    return combineDiagnosticsWithLimit(allocator, lists, std.math.maxInt(usize));
+}
+
+fn combineDiagnosticsWithLimit(
+    allocator: std.mem.Allocator,
+    lists: []const []const diagnostics.Diagnostic,
+    max_diagnostics: usize,
+) ![]const diagnostics.Diagnostic {
+    var total: usize = 0;
+    for (lists) |list| {
+        total = std.math.add(usize, total, list.len) catch return error.DiagnosticLimitExceeded;
+        if (total > max_diagnostics) return error.DiagnosticLimitExceeded;
+    }
 
     if (total == 0) return &[_]diagnostics.Diagnostic{};
 
@@ -104,7 +147,7 @@ fn combineDiagnostics(allocator: std.mem.Allocator, lists: []const []const diagn
         }
     }
 
-    return try allocator.dupe(diagnostics.Diagnostic, combined[0..write]);
+    return combined[0..write];
 }
 
 test "frontend analyze runs scanner parser binder and cfg" {

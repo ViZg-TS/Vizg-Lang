@@ -20,7 +20,7 @@ const Parser = struct {
     index: usize = 0,
     nodes: std.ArrayList(ast_mod.Node) = .empty,
     type_nodes: std.ArrayList(ast_mod.TypeNode) = .empty,
-    diagnostics: std.ArrayList(diagnostics.Diagnostic) = .empty,
+    diagnostics: diagnostics.LimitedList = .{},
     parenthesized_nodes: std.ArrayList(NodeId) = .empty,
     function_contexts: std.ArrayList(ast_mod.FunctionFlags) = .empty,
     labels: std.ArrayList(LabelContext) = .empty,
@@ -2836,6 +2836,7 @@ pub const ParseOptions = struct {
     // Maximum recursive descent depth before rejecting with diagnostic; protects against pathological
     // nesting DoS (H4). Defaults to 1024 which is plenty for real code but stops runaway builds.
     max_parse_depth: usize = 1024,
+    max_diagnostics: usize = std.math.maxInt(usize),
 };
 
 pub fn parse(allocator: std.mem.Allocator, token_list: []const Token, options: ParseOptions) anyerror!ParseResult {
@@ -2848,6 +2849,7 @@ pub fn parse(allocator: std.mem.Allocator, token_list: []const Token, options: P
         .tokens = token_list,
         .recover_errors = options.recover_errors,
         .max_parse_depth = options.max_parse_depth,
+        .diagnostics = diagnostics.LimitedList.init(options.max_diagnostics),
     };
     return parser.parse();
 }
