@@ -72,7 +72,7 @@ pub const TypeResolutionContext = struct {
     semantic_symbol_types: *std.ArrayList(DeclaredSymbolType),
     value_symbol_types: []const type_info_mod.SymbolTypeInfo,
     resolved_type_nodes: *std.ArrayList(type_info_mod.ResolvedTypeNode),
-    diagnostics: *std.ArrayList(diagnostics_mod.Diagnostic),
+    diagnostics: *diagnostics_mod.LimitedList,
     source_path: ?[]const u8,
     tree: ast_mod.Ast,
     type_store: *types.TypeStore,
@@ -113,7 +113,15 @@ pub fn collectDeclaredTypesInModuleWithImports(
     complete_nominals: bool,
 ) !TypeInfoCollectResult {
     return collectDeclaredTypesInModuleWithImportsAndValues(
-        allocator, source, tree, bind, module_id, type_store, imported_types, &.{}, complete_nominals,
+        allocator,
+        source,
+        tree,
+        bind,
+        module_id,
+        type_store,
+        imported_types,
+        &.{},
+        complete_nominals,
     );
 }
 
@@ -128,7 +136,33 @@ pub fn collectDeclaredTypesInModuleWithImportsAndValues(
     value_symbol_types: []const type_info_mod.SymbolTypeInfo,
     complete_nominals: bool,
 ) !TypeInfoCollectResult {
-    var diagnostics: std.ArrayList(diagnostics_mod.Diagnostic) = .empty;
+    return collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
+        allocator,
+        source,
+        tree,
+        bind,
+        module_id,
+        type_store,
+        imported_types,
+        value_symbol_types,
+        complete_nominals,
+        std.math.maxInt(usize),
+    );
+}
+
+pub fn collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
+    allocator: std.mem.Allocator,
+    source: frontend.SourceFile,
+    tree: ast_mod.Ast,
+    bind: binder.BindResult,
+    module_id: u64,
+    type_store: *types.TypeStore,
+    imported_types: []const ImportedTypeBinding,
+    value_symbol_types: []const type_info_mod.SymbolTypeInfo,
+    complete_nominals: bool,
+    max_diagnostics: usize,
+) !TypeInfoCollectResult {
+    var diagnostics = diagnostics_mod.LimitedList.init(max_diagnostics);
     errdefer diagnostics.deinit(allocator);
     var signatures: std.ArrayList(FunctionSignatureEntry) = .empty;
     errdefer signatures.deinit(allocator);
@@ -1215,7 +1249,7 @@ fn findVisibleSymbol(context: *const TypeResolutionContext, name: []const u8, na
 }
 
 fn emitUnknownOnce(context: *TypeResolutionContext, name: []const u8, span: ast_mod.tokens.Span) !void {
-    for (context.diagnostics.items) |diagnostic| {
+    for (context.diagnostics.items()) |diagnostic| {
         if (diagnostic.code == .unknown_type_name and diagnostic.span.start == span.start and diagnostic.span.end == span.end and
             std.mem.eql(u8, diagnostic.label orelse "", name)) return;
     }
@@ -1236,7 +1270,7 @@ fn emitTypeOperationOnce(
     label: []const u8,
     span: ast_mod.tokens.Span,
 ) !void {
-    for (context.diagnostics.items) |diagnostic| {
+    for (context.diagnostics.items()) |diagnostic| {
         if (diagnostic.code == .type_mismatch and diagnostic.span.start == span.start and
             diagnostic.span.end == span.end and std.mem.eql(u8, diagnostic.label orelse "", label)) return;
     }
