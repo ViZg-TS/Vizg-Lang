@@ -130,13 +130,29 @@ pub const ExternalType = enum(u32) {
     object,
 };
 
+/// Namespaces in which a source-less export may be referenced. The zero value
+/// is deliberately invalid at descriptor-validation boundaries.
+pub const ExternalNamespace = packed struct(u8) {
+    value: bool = false,
+    type: bool = false,
+    _reserved: u6 = 0,
+
+    pub fn supports(self: ExternalNamespace, type_only: bool) bool {
+        return if (type_only) self.type else self.value;
+    }
+
+    pub fn isValid(self: ExternalNamespace) bool {
+        return self._reserved == 0 and (self.value or self.type);
+    }
+};
+
 /// One external export. Default exports must use name `default`. Namespace
 /// exports are named namespace-valued members; `import *` is synthesized from
-/// every non-type-only member in the module descriptor.
+/// every member available in the namespace requested by the import.
 pub const ExternalExportDescriptor = struct {
     name: []const u8,
     kind: ExternalExportKind = .named,
-    type_only: bool = false,
+    namespace: ExternalNamespace = .{ .value = true },
     type_metadata: ?ExternalType = null,
 };
 
@@ -155,6 +171,7 @@ comptime {
     if (@sizeOf(RequestOperation) != @sizeOf(u32)) @compileError("RequestOperation must remain C-representable as u32");
     if (@sizeOf(ExternalExportKind) != @sizeOf(u32)) @compileError("ExternalExportKind must remain C-representable as u32");
     if (@sizeOf(ExternalType) != @sizeOf(u32)) @compileError("ExternalType must remain C-representable as u32");
+    if (@sizeOf(ExternalNamespace) != @sizeOf(u8)) @compileError("ExternalNamespace must remain C-representable as u8");
 }
 
 test "module identity is host assigned and independent of logical names" {
@@ -198,6 +215,24 @@ test "request contract keeps operation and type-only orthogonal" {
         try std.testing.expectEqual(operation == .re_export, request.type_only);
         try std.testing.expectEqualStrings("./data.json", request.raw_specifier);
     }
+}
+
+test "external namespace flags distinguish value type and both" {
+    const value: ExternalNamespace = .{ .value = true };
+    const type_only: ExternalNamespace = .{ .type = true };
+    const both: ExternalNamespace = .{ .value = true, .type = true };
+    const invalid: ExternalNamespace = .{};
+
+    try std.testing.expect(value.isValid());
+    try std.testing.expect(value.supports(false));
+    try std.testing.expect(!value.supports(true));
+    try std.testing.expect(type_only.isValid());
+    try std.testing.expect(!type_only.supports(false));
+    try std.testing.expect(type_only.supports(true));
+    try std.testing.expect(both.isValid());
+    try std.testing.expect(both.supports(false));
+    try std.testing.expect(both.supports(true));
+    try std.testing.expect(!invalid.isValid());
 }
 
 test "source and external identities are distinct types with stable widths" {

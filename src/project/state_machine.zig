@@ -34,9 +34,14 @@ pub const StateMachine = struct {
     allocator: std.mem.Allocator,
     records: std.ArrayList(RequestRecord) = .empty,
     next_id: u64 = 1,
+    max_requests: usize,
 
     pub fn init(allocator: std.mem.Allocator) StateMachine {
-        return .{ .allocator = allocator };
+        return initWithLimit(allocator, std.math.maxInt(usize));
+    }
+
+    pub fn initWithLimit(allocator: std.mem.Allocator, max_requests: usize) StateMachine {
+        return .{ .allocator = allocator, .max_requests = max_requests };
     }
 
     pub fn deinit(self: *StateMachine) void {
@@ -50,6 +55,7 @@ pub const StateMachine = struct {
     }
 
     pub fn rollback(self: *StateMachine, checkpoint_value: Checkpoint) void {
+        defer self.assertInvariants();
         while (self.records.items.len > checkpoint_value.record_count) {
             const index = self.records.items.len - 1;
             const record = self.records.items[index];
@@ -60,16 +66,19 @@ pub const StateMachine = struct {
     }
 
     pub fn enqueue(self: *StateMachine, input: contracts.ModuleRequestInput) !contracts.RequestId {
+        defer self.assertInvariants();
         for (self.records.items) |record| {
             if (equivalent(record.request, input)) return record.request.id;
         }
+
+        if (self.records.items.len >= self.max_requests) return error.RequestLimitExceeded;
+        if (self.next_id == 0) return error.RequestIdExhausted;
 
         const specifier = try self.allocator.dupe(u8, input.raw_specifier);
         errdefer self.allocator.free(specifier);
         const attributes = try self.copyAttributes(input.attributes);
         errdefer self.freeAttributes(attributes);
 
-        if (self.next_id == 0) return error.RequestIdExhausted;
         const id = contracts.RequestId.init(self.next_id);
         try self.records.append(self.allocator, .{
             .request = .{
@@ -88,6 +97,7 @@ pub const StateMachine = struct {
     }
 
     pub fn step(self: *StateMachine) Step {
+        defer self.assertInvariants();
         for (self.records.items) |*record| {
             if (record.status == .waiting) return .{ .request = record.request };
         }
@@ -110,6 +120,7 @@ pub const StateMachine = struct {
     }
 
     pub fn commitResponse(self: *StateMachine, id: contracts.RequestId, resolution: Resolution) !void {
+        defer self.assertInvariants();
         try self.validateResponse(id);
         const record = self.findMut(id).?;
         record.resolution = resolution;
@@ -123,6 +134,10 @@ pub const StateMachine = struct {
 
     pub fn count(self: *const StateMachine) usize {
         return self.records.items.len;
+    }
+
+    pub fn recordsView(self: *const StateMachine) []const RequestRecord {
+        return self.records.items;
     }
 
     pub fn hasUnresolved(self: *const StateMachine) bool {
@@ -140,6 +155,19 @@ pub const StateMachine = struct {
             };
         }
         return false;
+    }
+
+    /// Debug/test ownership assertions for every scheduler mutation boundary.
+    pub fn assertInvariants(self: *const StateMachine) void {
+        std.debug.assert(self.next_id != 0);
+        std.debug.assert(self.records.items.len <= self.max_requests);
+        for (self.records.items, 0..) |record, index| {
+            std.debug.assert(record.request.id.value() != 0);
+            std.debug.assert((record.status == .responded) == (record.resolution != null));
+            for (self.records.items[0..index]) |previous| {
+                std.debug.assert(previous.request.id != record.request.id);
+            }
+        }
     }
 
     fn findMut(self: *StateMachine, id: contracts.RequestId) ?*RequestRecord {
@@ -235,4 +263,35 @@ test "mutated request inputs and response order cannot alter retained state" {
     }
     try std.testing.expect(machine.step() == .complete);
     try std.testing.expectError(error.ForeignRequest, machine.commitResponse(.init(999_999), .{ .kind = .failed }));
+}
+
+test "request limit is checked before copying and holds the N boundary" {
+    const span: contracts.SourceSpan = .{ .start = 0, .end = 1, .line = 1, .column = 0 };
+    const attributes = [_]contracts.RequestAttribute{.{
+        .key = "type",
+        .value = "json",
+        .span = span,
+    }};
+    const input: contracts.ModuleRequestInput = .{
+        .importer = .init(1),
+        .raw_specifier = "./dependency",
+        .operation = .static_import,
+        .attributes = &attributes,
+        .span = span,
+    };
+
+    var no_storage: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_storage);
+    var zero_limit = StateMachine.initWithLimit(fixed.allocator(), 0);
+    defer zero_limit.deinit();
+    try std.testing.expectError(error.RequestLimitExceeded, zero_limit.enqueue(input));
+    try std.testing.expectEqual(@as(usize, 0), zero_limit.count());
+
+    var bounded = StateMachine.initWithLimit(std.testing.allocator, 1);
+    defer bounded.deinit();
+    _ = try bounded.enqueue(input);
+    var second = input;
+    second.raw_specifier = "./other";
+    try std.testing.expectError(error.RequestLimitExceeded, bounded.enqueue(second));
+    try std.testing.expectEqual(@as(usize, 1), bounded.count());
 }

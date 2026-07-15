@@ -27,6 +27,7 @@ pub const Module = struct {
 
 pub const ImportEdge = struct {
     id: ImportEdgeId,
+    project_edge_index: usize,
     from: ModuleId,
     to: ?ModuleId,
     specifier: []const u8,

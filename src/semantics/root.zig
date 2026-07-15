@@ -47,6 +47,7 @@ pub const SemanticExport = struct {
     module_id: ModuleId,
     name: []const u8,
     identity: SemanticIdentity,
+    edge_index: ?usize,
     type_only: bool,
     re_export: bool,
     span: @import("../frontend/tokens.zig").Span,
@@ -54,6 +55,7 @@ pub const SemanticExport = struct {
 
 pub const SemanticImport = struct {
     module_id: ModuleId,
+    edge_index: usize,
     import_symbol: ?binder.SymbolId,
     local_name: []const u8,
     imported_name: []const u8,
@@ -300,7 +302,7 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
     var graph = input_graph;
     errdefer graph.deinit();
 
-    const data = try analyzeModuleGraphData(backing_allocator, &graph);
+    const data = try analyzeModuleGraphData(backing_allocator, &graph, std.math.maxInt(usize));
     return .{
         .arena = data.arena,
         .graph = graph,
@@ -315,7 +317,15 @@ pub fn analyzeModuleGraph(backing_allocator: std.mem.Allocator, input_graph: mod
 
 /// Analyze already-owned frontend results without taking graph ownership.
 pub fn analyzeBorrowedModuleGraph(backing_allocator: std.mem.Allocator, graph: *const modules_mod.ModuleGraph) !BorrowedProjectSemanticResult {
-    const data = try analyzeModuleGraphData(backing_allocator, graph);
+    return analyzeBorrowedModuleGraphWithLimit(backing_allocator, graph, std.math.maxInt(usize));
+}
+
+pub fn analyzeBorrowedModuleGraphWithLimit(
+    backing_allocator: std.mem.Allocator,
+    graph: *const modules_mod.ModuleGraph,
+    max_types: usize,
+) !BorrowedProjectSemanticResult {
+    const data = try analyzeModuleGraphData(backing_allocator, graph, max_types);
     return .{
         .arena = data.arena,
         .type_store = data.type_store,
@@ -327,11 +337,15 @@ pub fn analyzeBorrowedModuleGraph(backing_allocator: std.mem.Allocator, graph: *
     };
 }
 
-fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const modules_mod.ModuleGraph) !ProjectSemanticData {
+fn analyzeModuleGraphData(
+    backing_allocator: std.mem.Allocator,
+    graph: *const modules_mod.ModuleGraph,
+    max_types: usize,
+) !ProjectSemanticData {
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer arena.deinit();
     const allocator = arena.allocator();
-    var type_store = types.TypeStore.init(allocator);
+    var type_store = types.TypeStore.initWithLimit(allocator, max_types);
 
     var project_modules: std.ArrayList(ProjectSemanticModule) = .empty;
     for (graph.modules) |module| {
@@ -477,6 +491,7 @@ fn collectDirectExports(
                     .type_id = type_id,
                     .namespace = namespace,
                 },
+                .edge_index = null,
                 .type_only = record.type_only or namespace == .type,
                 .re_export = false,
                 .span = module.result.ast.node(record.node).span,
@@ -485,9 +500,9 @@ fn collectDirectExports(
     }
 }
 
-fn edgeForSource(graph: *const modules_mod.ModuleGraph, from: ModuleId, source: []const u8, re_export: bool) ?modules_mod.ImportEdge {
+fn edgeForSpan(graph: *const modules_mod.ModuleGraph, from: ModuleId, span: @import("../frontend/tokens.zig").Span, re_export: bool) ?modules_mod.ImportEdge {
     for (graph.imports) |edge| {
-        if (edge.from == from and edge.re_export == re_export and std.mem.eql(u8, edge.specifier, source)) return edge;
+        if (edge.from == from and edge.re_export == re_export and std.meta.eql(edge.span, span)) return edge;
     }
     return null;
 }
@@ -502,10 +517,11 @@ fn exportIndex(exports: []const SemanticExport, module_id: ModuleId, name: []con
     return fallback;
 }
 
-fn appendReExport(allocator: std.mem.Allocator, exports: *std.ArrayList(SemanticExport), module_id: ModuleId, name: []const u8, target: SemanticExport, type_only: bool, span: @import("../frontend/tokens.zig").Span) !bool {
+fn appendReExport(allocator: std.mem.Allocator, exports: *std.ArrayList(SemanticExport), module_id: ModuleId, name: []const u8, target: SemanticExport, edge_index: usize, type_only: bool, span: @import("../frontend/tokens.zig").Span) !bool {
     if (exportIndex(exports.items, module_id, name, type_only)) |index| {
-        const changed = exports.items[index].identity.type_id != target.identity.type_id or !exports.items[index].identity.declaration.eql(target.identity.declaration);
+        const changed = exports.items[index].identity.type_id != target.identity.type_id or !exports.items[index].identity.declaration.eql(target.identity.declaration) or exports.items[index].edge_index != edge_index;
         exports.items[index].identity = target.identity;
+        exports.items[index].edge_index = edge_index;
         exports.items[index].type_only = type_only or target.type_only;
         exports.items[index].re_export = true;
         return changed;
@@ -514,6 +530,7 @@ fn appendReExport(allocator: std.mem.Allocator, exports: *std.ArrayList(Semantic
         .module_id = module_id,
         .name = name,
         .identity = target.identity,
+        .edge_index = edge_index,
         .type_only = type_only or target.type_only,
         .re_export = true,
         .span = span,
@@ -536,21 +553,22 @@ fn resolveReExports(
         for (graph.modules) |module| {
             for (module.result.bind.module.exports) |record| {
                 if (record.source.len == 0 or record.kind == .export_all) continue;
-                const edge = edgeForSource(graph, module.id, record.source, true) orelse continue;
+                const source_span = module.result.ast.node(record.node).data.ExportDeclaration.source_span orelse continue;
+                const edge = edgeForSpan(graph, module.id, source_span, true) orelse continue;
                 const target_module = edge.to orelse continue;
                 const target_index = exportIndex(exports.items, target_module, record.local_name, record.type_only) orelse continue;
-                changed = (try appendReExport(allocator, exports, module.id, record.name, exports.items[target_index], record.type_only, module.result.ast.node(record.node).span)) or changed;
+                changed = (try appendReExport(allocator, exports, module.id, record.name, exports.items[target_index], edge.project_edge_index, record.type_only, module.result.ast.node(record.node).span)) or changed;
             }
             for (module.result.ast.nodes) |node| switch (node.data) {
                 .ExportDeclaration => |decl| if (decl.kind == .export_all and decl.source.len != 0) {
-                    const edge = edgeForSource(graph, module.id, decl.source, true) orelse continue;
+                    const edge = edgeForSpan(graph, module.id, decl.source_span orelse continue, true) orelse continue;
                     const target_module = edge.to orelse continue;
                     const snapshot_len = exports.items.len;
                     var index: usize = 0;
                     while (index < snapshot_len) : (index += 1) {
                         const target = exports.items[index];
                         if (target.module_id != target_module or std.mem.eql(u8, target.name, "default")) continue;
-                        changed = (try appendReExport(allocator, exports, module.id, target.name, target, decl.type_only, node.span)) or changed;
+                        changed = (try appendReExport(allocator, exports, module.id, target.name, target, edge.project_edge_index, decl.type_only, node.span)) or changed;
                     }
                 },
                 else => {},
@@ -608,6 +626,7 @@ fn collectSemanticImports(
         }
         try imports.append(allocator, .{
             .module_id = link.from_module,
+            .edge_index = edge.project_edge_index,
             .import_symbol = link.import_symbol,
             .local_name = link.local_name,
             .imported_name = link.imported_name,
@@ -739,7 +758,7 @@ fn importedTypeBindings(
 ) ![]const type_collector.ImportedTypeBinding {
     var bindings: std.ArrayList(type_collector.ImportedTypeBinding) = .empty;
     for (imports) |item| {
-        if (item.module_id != module_id or item.state == .namespace or item.state == .external) continue;
+        if (item.module_id != module_id or item.state == .namespace) continue;
         try bindings.append(allocator, .{
             .local_name = item.local_name,
             .symbol_id = item.import_symbol,

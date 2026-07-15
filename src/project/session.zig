@@ -4,12 +4,26 @@ const std = @import("std");
 const ast = @import("../frontend/ast.zig");
 const binder = @import("../frontend/binder.zig");
 const contracts = @import("contracts.zig");
+const diagnostics = @import("../diagnostics/root.zig");
 const frontend = @import("../frontend/frontend.zig");
 const modules_mod = @import("../modules/root.zig");
 const semantics = @import("../semantics/root.zig");
 const types = @import("../types/root.zig");
 const project_graph = @import("graph.zig");
 const state_machine = @import("state_machine.zig");
+
+const ReachableClosure = std.AutoHashMap(u64, void);
+
+pub const ProjectLimits = struct {
+    max_source_bytes: usize = std.math.maxInt(usize),
+    max_total_source_bytes: usize = std.math.maxInt(usize),
+    max_modules: usize = std.math.maxInt(usize),
+    max_requests: usize = std.math.maxInt(usize),
+    max_edges: usize = std.math.maxInt(usize),
+    max_diagnostics: usize = std.math.maxInt(usize),
+    max_graph_depth: usize = std.math.maxInt(usize),
+    max_semantic_types: usize = std.math.maxInt(usize),
+};
 
 pub const ModuleState = enum(u32) {
     unseen,
@@ -20,6 +34,31 @@ pub const ModuleState = enum(u32) {
     external,
     failed,
     complete,
+};
+
+/// Stable project-result diagnostic phases. These deliberately describe the
+/// public project pipeline rather than every internal implementation pass.
+pub const ProjectDiagnosticPhase = enum(u8) {
+    scanner,
+    parser,
+    binder,
+    resolver,
+    types,
+    checker,
+    module_host,
+    project,
+};
+
+/// One project-owned canonical diagnostic. `logical_name` is descriptive
+/// only; `module_id` is the sole module identity carried by this record.
+pub const ProjectDiagnostic = struct {
+    module_id: ?contracts.ModuleId,
+    phase: ProjectDiagnosticPhase,
+    severity: diagnostics.Severity,
+    code: diagnostics.DiagnosticCode,
+    message: []const u8,
+    logical_name: []const u8,
+    span: contracts.SourceSpan,
 };
 
 /// One project-owned module record. Source slices and the semantic result stay
@@ -57,16 +96,33 @@ pub const Project = struct {
     requests: state_machine.StateMachine,
     graph: project_graph.Graph,
     project_semantics: ?*semantics.BorrowedProjectSemanticResult = null,
+    project_diagnostics: std.ArrayList(ProjectDiagnostic) = .empty,
     external_modules: std.ArrayList(OwnedExternalModule) = .empty,
+    limits: ProjectLimits,
+    total_source_bytes: usize = 0,
     finished: bool = false,
     finish_result: ?FinishResult = null,
 
     pub fn init(allocator: std.mem.Allocator) Project {
-        return .{ .allocator = allocator, .requests = .init(allocator), .graph = .init(allocator) };
+        return initWithLimits(allocator, .{});
+    }
+
+    pub fn initWithLimits(allocator: std.mem.Allocator, limits: ProjectLimits) Project {
+        return .{
+            .allocator = allocator,
+            .requests = .initWithLimit(allocator, limits.max_requests),
+            .graph = .initWithLimits(allocator, .{
+                .max_modules = limits.max_modules,
+                .max_edges = limits.max_edges,
+                .max_diagnostics = limits.max_diagnostics,
+            }),
+            .limits = limits,
+        };
     }
 
     pub fn deinit(self: *Project) void {
         self.clearProjectSemantics();
+        self.project_diagnostics.deinit(self.allocator);
         for (self.modules.items) |*module| self.deinitModule(module);
         self.modules.deinit(self.allocator);
         for (self.external_modules.items) |module| self.freeExternalDescriptor(module.descriptor);
@@ -95,7 +151,9 @@ pub const Project = struct {
 
     /// Register an unresolved identity. Repeated requests are idempotent.
     fn requestModule(self: *Project, id: contracts.ModuleId) !void {
+        defer self.debugAssertInvariants();
         if (self.findMut(id) != null) return;
+        if (self.modules.items.len >= self.limits.max_modules) return error.ModuleLimitExceeded;
         try self.modules.append(self.allocator, .{
             .id = id,
             .state = .requested,
@@ -111,21 +169,25 @@ pub const Project = struct {
     }
 
     pub fn addRoot(self: *Project, source: contracts.ModuleSource) !void {
+        defer self.debugAssertInvariants();
         try self.ensureOpen();
         try self.submit(source, true);
     }
 
     pub fn supplySource(self: *Project, source: contracts.ModuleSource) !void {
+        defer self.debugAssertInvariants();
         try self.ensureOpen();
         try self.submit(source, false);
     }
 
     fn queueRequest(self: *Project, input: contracts.ModuleRequestInput) !contracts.RequestId {
+        defer self.debugAssertInvariants();
         if (self.find(input.importer) == null) return error.UnknownImporter;
         return self.requests.enqueue(input);
     }
 
     pub fn step(self: *Project) !state_machine.Step {
+        defer self.debugAssertInvariants();
         try self.ensureOpen();
         try self.analyze();
         return self.requests.step();
@@ -147,11 +209,16 @@ pub const Project = struct {
         return self.project_semantics;
     }
 
+    pub fn diagnostics(self: *const Project) []const ProjectDiagnostic {
+        return self.project_diagnostics.items;
+    }
+
     pub fn lookupRequest(self: *const Project, id: contracts.RequestId) ?state_machine.RequestRecord {
         return self.requests.lookup(id);
     }
 
     pub fn respondSource(self: *Project, id: contracts.RequestId, source: contracts.ModuleSource) !void {
+        defer self.debugAssertInvariants();
         try self.ensureOpen();
         try self.requests.validateResponse(id);
         if (self.find(source.id)) |existing| {
@@ -173,6 +240,7 @@ pub const Project = struct {
 
     /// Satisfy one request with copied source-less module metadata.
     pub fn respondExternalModule(self: *Project, id: contracts.RequestId, descriptor: contracts.ExternalModuleDescriptor) !void {
+        defer self.debugAssertInvariants();
         try self.ensureOpen();
         try self.requests.validateResponse(id);
         try validateExternalDescriptor(descriptor);
@@ -200,6 +268,7 @@ pub const Project = struct {
         response_kind: state_machine.ResponseKind,
         edge_state: project_graph.EdgeState,
     ) !void {
+        defer self.debugAssertInvariants();
         try self.ensureOpen();
         try self.requests.validateResponse(id);
         const graph_checkpoint = self.graph.checkpoint();
@@ -212,14 +281,30 @@ pub const Project = struct {
     /// Finish is legal only after every request has a response and every source
     /// has reached complete or failed. It never performs hidden analysis.
     pub fn finish(self: *Project) !FinishResult {
+        defer self.debugAssertInvariants();
         if (self.finish_result) |result| return result;
-        if (self.requests.hasUnresolved()) return error.PendingRequests;
-        var has_failures = self.requests.hasFailures();
-        for (self.modules.items) |module| switch (module.state) {
-            .complete => {},
-            .failed => has_failures = true,
-            .unseen, .requested, .supplied, .parsing, .analyzed, .external => return error.IncompleteModules,
-        };
+        var reachable = try self.computeReachableClosure();
+        defer reachable.deinit();
+
+        var has_failures = false;
+        for (self.requests.recordsView()) |record| {
+            if (!reachable.contains(record.request.importer.value())) continue;
+            if (record.status == .queued or record.status == .waiting) return error.PendingRequests;
+            if (record.resolution) |resolution| switch (resolution.kind) {
+                .not_found, .denied, .failed => has_failures = true,
+                .source, .external => {},
+            };
+        }
+        for (self.modules.items) |module| {
+            if (!reachable.contains(module.id.value())) continue;
+            switch (module.state) {
+                .complete => {},
+                .failed => has_failures = true,
+                .unseen, .requested, .supplied, .parsing, .analyzed, .external => return error.IncompleteModules,
+            }
+        }
+        try self.validateGraphDepth();
+        self.retainReachableClosure(&reachable);
         if (self.project_semantics == null) try self.buildProjectSemantics();
         const result: FinishResult = .{ .module_count = self.modules.items.len, .has_failures = has_failures };
         self.finish_result = result;
@@ -227,13 +312,101 @@ pub const Project = struct {
         return result;
     }
 
+    fn computeReachableClosure(self: *const Project) !ReachableClosure {
+        var reachable = ReachableClosure.init(self.allocator);
+        errdefer reachable.deinit();
+        var pending: std.ArrayList(contracts.ModuleId) = .empty;
+        defer pending.deinit(self.allocator);
+
+        for (self.modules.items) |module| {
+            if (!module.is_root) continue;
+            const result = try reachable.getOrPut(module.id.value());
+            if (!result.found_existing) try pending.append(self.allocator, module.id);
+        }
+
+        var index: usize = 0;
+        while (index < pending.items.len) : (index += 1) {
+            const importer = pending.items[index];
+            for (self.graph.edges.items) |edge| {
+                if (edge.importer != importer or edge.state != .resolved) continue;
+                const target = edge.target orelse continue;
+                const result = try reachable.getOrPut(target.value());
+                if (!result.found_existing) try pending.append(self.allocator, target);
+            }
+            for (self.requests.recordsView()) |record| {
+                if (record.request.importer != importer) continue;
+                const resolution = record.resolution orelse continue;
+                const target = resolution.module_id orelse continue;
+                const result = try reachable.getOrPut(target.value());
+                if (!result.found_existing) try pending.append(self.allocator, target);
+            }
+        }
+        return reachable;
+    }
+
+    fn validateGraphDepth(self: *const Project) !void {
+        var roots: std.ArrayList(contracts.ModuleId) = .empty;
+        defer roots.deinit(self.allocator);
+        for (self.modules.items) |module| if (module.is_root) try roots.append(self.allocator, module.id);
+
+        var depths = try self.graph.shortestDepths(self.allocator, roots.items);
+        defer depths.deinit();
+        var iterator = depths.valueIterator();
+        while (iterator.next()) |depth| {
+            if (depth.* > self.limits.max_graph_depth) return error.GraphDepthLimitExceeded;
+        }
+    }
+
+    fn retainReachableClosure(self: *Project, reachable: *const ReachableClosure) void {
+        var write_index: usize = 0;
+        for (self.modules.items, 0..) |*module, read_index| {
+            if (!reachable.contains(module.id.value())) {
+                self.deinitModule(module);
+                continue;
+            }
+            if (write_index != read_index) {
+                self.modules.items[write_index] = module.*;
+            }
+            write_index += 1;
+        }
+        self.modules.items.len = write_index;
+
+        write_index = 0;
+        for (self.graph.modules.items) |item| {
+            if (!reachable.contains(item.id.value())) continue;
+            self.graph.modules.items[write_index] = item;
+            write_index += 1;
+        }
+        self.graph.modules.items.len = write_index;
+
+        write_index = 0;
+        for (self.graph.edges.items) |item| {
+            if (!reachable.contains(item.importer.value())) continue;
+            self.graph.edges.items[write_index] = item;
+            write_index += 1;
+        }
+        self.graph.edges.items.len = write_index;
+
+        write_index = 0;
+        for (self.graph.diagnostics.items) |item| {
+            if (!reachable.contains(item.importer.value())) continue;
+            self.graph.diagnostics.items[write_index] = item;
+            write_index += 1;
+        }
+        self.graph.diagnostics.items.len = write_index;
+    }
+
     /// Analyze a supplied module. A completed module is returned without
     /// re-analysis. Allocation or internal analysis failures leave this
     /// module inspectably failed and do not modify other completed modules.
     fn analyzeModule(self: *Project, id: contracts.ModuleId) !*const semantics.SemanticResult {
+        defer self.debugAssertInvariants();
         const initial = self.find(id) orelse return error.UnknownModule;
         if (initial.state == .complete) {
-            if (!initial.metadata_derived) try self.deriveModuleMetadata(id);
+            if (!initial.metadata_derived) {
+                try self.deriveModuleMetadata(id, initial.semantic_result.?);
+                self.findMut(id).?.metadata_derived = true;
+            }
             return self.find(id).?.semantic_result.?;
         }
         if (initial.source == null) return error.SourceNotSupplied;
@@ -271,10 +444,10 @@ pub const Project = struct {
             self.graph.rollback(graph_checkpoint);
         }
 
+        try self.deriveModuleMetadata(id, result_ptr);
         const module = self.findMut(id).?;
         module.semantic_result = result_ptr;
-        module.state = .analyzed;
-        try self.deriveModuleMetadata(id);
+        module.metadata_derived = true;
         module.state = .complete;
         self.clearProjectSemantics();
         return result_ptr;
@@ -302,6 +475,15 @@ pub const Project = struct {
     }
 
     fn submit(self: *Project, source: contracts.ModuleSource, is_root: bool) !void {
+        const existing = self.findMut(source.id);
+        if (existing) |module| if (module.source != null) return error.DuplicateModule;
+        if (source.bytes.len > self.limits.max_source_bytes) return error.SourceLimitExceeded;
+        const next_total = std.math.add(usize, self.total_source_bytes, source.bytes.len) catch
+            return error.TotalSourceLimitExceeded;
+        if (next_total > self.limits.max_total_source_bytes) return error.TotalSourceLimitExceeded;
+        if (existing == null and self.modules.items.len >= self.limits.max_modules)
+            return error.ModuleLimitExceeded;
+
         const logical_name = try self.allocator.dupe(u8, source.logical_name);
         errdefer self.allocator.free(logical_name);
         const bytes = try self.allocator.dupe(u8, source.bytes);
@@ -313,12 +495,12 @@ pub const Project = struct {
             .kind = source.kind,
         };
 
-        if (self.findMut(source.id)) |module| {
-            if (module.source != null) return error.DuplicateModule;
+        if (existing) |module| {
             module.source = owned;
             module.state = .supplied;
             module.metadata_derived = false;
             module.is_root = module.is_root or is_root;
+            self.total_source_bytes = next_total;
             return;
         }
 
@@ -330,9 +512,11 @@ pub const Project = struct {
             .semantic_result = null,
             .metadata_derived = false,
         });
+        self.total_source_bytes = next_total;
     }
 
     fn clearProjectSemantics(self: *Project) void {
+        self.clearProjectDiagnostics();
         if (self.project_semantics) |result| {
             result.deinit();
             self.allocator.destroy(result);
@@ -340,10 +524,17 @@ pub const Project = struct {
         }
     }
 
-    fn deriveModuleMetadata(self: *Project, id: contracts.ModuleId) !void {
+    fn clearProjectDiagnostics(self: *Project) void {
+        for (self.project_diagnostics.items) |item| {
+            self.allocator.free(item.message);
+            self.allocator.free(item.logical_name);
+        }
+        self.project_diagnostics.clearRetainingCapacity();
+    }
+
+    fn deriveModuleMetadata(self: *Project, id: contracts.ModuleId, result: *const semantics.SemanticResult) !void {
         const module = self.find(id) orelse return error.UnknownModule;
         if (module.metadata_derived) return;
-        const result = module.semantic_result orelse return error.ModuleNotAnalyzed;
         const edge_start = self.graph.edges.items.len;
         errdefer self.graph.edges.shrinkRetainingCapacity(edge_start);
 
@@ -356,6 +547,7 @@ pub const Project = struct {
                 decl.kind,
                 decl.attributes,
                 decl.source_span,
+                result,
             ),
             .ExportDeclaration => |decl| if (decl.source.len != 0) try self.appendDerivedEdge(
                 id,
@@ -365,6 +557,7 @@ pub const Project = struct {
                 .named,
                 null,
                 decl.source_span orelse node.span,
+                result,
             ),
             .ImportExpression => |expr| switch (result.frontend.ast.node(expr.source).data) {
                 .Literal => |literal| try self.appendDerivedEdge(
@@ -375,6 +568,7 @@ pub const Project = struct {
                     .side_effect,
                     expr.attributes,
                     result.frontend.ast.node(expr.source).span,
+                    result,
                 ),
                 else => {},
             },
@@ -386,7 +580,6 @@ pub const Project = struct {
             .imports = result.frontend.bind.module.imports,
             .exports = result.frontend.bind.module.exports,
         });
-        self.findMut(id).?.metadata_derived = true;
     }
 
     fn appendDerivedEdge(
@@ -398,11 +591,13 @@ pub const Project = struct {
         import_kind: ast.ImportKind,
         source_attributes: ?ast.ImportAttributes,
         span: contracts.SourceSpan,
+        semantic_result: *const semantics.SemanticResult,
     ) !void {
+        try self.graph.ensureEdgeAvailable();
         var attributes: std.ArrayList(contracts.RequestAttribute) = .empty;
         defer attributes.deinit(self.allocator);
         if (source_attributes) |source| for (source.entries) |attribute| {
-            const value = switch (self.find(importer).?.semantic_result.?.frontend.ast.node(attribute.value).data) {
+            const value = switch (semantic_result.frontend.ast.node(attribute.value).data) {
                 .Literal => |literal| literal.value,
                 else => "",
             };
@@ -430,6 +625,8 @@ pub const Project = struct {
 
     fn buildProjectSemantics(self: *Project) !void {
         self.clearProjectSemantics();
+        const graph_checkpoint = self.graph.checkpoint();
+        errdefer self.graph.rollback(graph_checkpoint);
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
         const allocator = scratch.allocator();
@@ -456,7 +653,7 @@ pub const Project = struct {
         }
 
         var graph_edges: std.ArrayList(modules_mod.ImportEdge) = .empty;
-        for (self.graph.edges.items) |edge| {
+        for (self.graph.edges.items, 0..) |edge, project_edge_index| {
             if (edge.operation == .dynamic_import) continue;
             const status: modules_mod.ImportStatus = switch (edge.state) {
                 .resolved => .local,
@@ -465,6 +662,7 @@ pub const Project = struct {
             };
             try graph_edges.append(allocator, .{
                 .id = @intCast(graph_edges.items.len),
+                .project_edge_index = project_edge_index,
                 .from = edge.importer.value(),
                 .to = if (edge.target) |target| target.value() else null,
                 .specifier = edge.raw_specifier,
@@ -481,7 +679,7 @@ pub const Project = struct {
             for (module.result.ast.nodes) |node| {
                 if (node.data != .ImportDeclaration) continue;
                 const decl = node.data.ImportDeclaration;
-                const edge = findSemanticEdge(graph_edges.items, module.id, decl.source, false) orelse continue;
+                const edge = findSemanticEdge(graph_edges.items, module.id, decl.source_span, false) orelse continue;
                 for (decl.specifiers) |specifier| {
                     const target_module = if (edge.to) |target_id| findSemanticModule(graph_modules.items, target_id) else null;
                     const target_symbol = if (target_module) |target|
@@ -524,10 +722,92 @@ pub const Project = struct {
         };
         const result = try self.allocator.create(semantics.BorrowedProjectSemanticResult);
         errdefer self.allocator.destroy(result);
-        result.* = try semantics.analyzeBorrowedModuleGraph(self.allocator, &semantic_graph);
+        result.* = try semantics.analyzeBorrowedModuleGraphWithLimit(
+            self.allocator,
+            &semantic_graph,
+            self.limits.max_semantic_types,
+        );
         errdefer result.deinit();
         try self.linkExternalImports(result);
+        try self.linkExternalReExports(result);
+        try self.buildProjectDiagnostics(result);
         self.project_semantics = result;
+    }
+
+    fn buildProjectDiagnostics(self: *Project, result: *const semantics.BorrowedProjectSemanticResult) !void {
+        std.debug.assert(self.project_diagnostics.items.len == 0);
+        errdefer self.clearProjectDiagnostics();
+
+        // Preserve every diagnostic produced by each reachable single-file
+        // analysis while attaching its already-known host identity directly.
+        for (self.modules.items) |module| {
+            const semantic = module.semantic_result orelse continue;
+            const source = module.source orelse continue;
+            for (semantic.diagnostics) |item| try self.appendProjectDiagnostic(.{
+                .module_id = module.id,
+                .phase = canonicalPhase(item),
+                .severity = item.severity,
+                .code = item.code,
+                .message = item.message,
+                .logical_name = source.logical_name,
+                .span = item.span,
+            });
+        }
+
+        // Project semantic passes may add diagnostics beyond the single-file
+        // result. Iterate modules, not the flattened diagnostic slice, so the
+        // identity remains explicit even when logical names are duplicated.
+        for (result.modules) |module| {
+            const module_id = contracts.ModuleId.init(module.id);
+            const source_module = self.find(module_id);
+            const logical_name = if (source_module) |value|
+                if (value.source) |source| source.logical_name else module.path
+            else
+                module.path;
+            for (module.type_info.diagnostics) |item| try self.appendProjectDiagnostic(.{
+                .module_id = module_id,
+                .phase = canonicalPhase(item),
+                .severity = item.severity,
+                .code = item.code,
+                .message = item.message,
+                .logical_name = logical_name,
+                .span = item.span,
+            });
+        }
+
+        for (self.graph.diagnostics.items) |item| {
+            const module = self.find(item.importer);
+            const logical_name = if (module) |value|
+                if (value.source) |source| source.logical_name else ""
+            else
+                "";
+            const mapped = graphProjectDiagnostic(item.code);
+            try self.appendProjectDiagnostic(.{
+                .module_id = item.importer,
+                .phase = mapped.phase,
+                .severity = .@"error",
+                .code = mapped.code,
+                .message = mapped.message,
+                .logical_name = logical_name,
+                .span = item.span,
+            });
+        }
+    }
+
+    fn appendProjectDiagnostic(self: *Project, candidate: ProjectDiagnostic) !void {
+        for (self.project_diagnostics.items) |existing| {
+            if (projectDiagnosticsEqual(existing, candidate)) return;
+        }
+        if (self.project_diagnostics.items.len >= self.limits.max_diagnostics)
+            return error.DiagnosticLimitExceeded;
+        const message = try self.allocator.dupe(u8, candidate.message);
+        errdefer self.allocator.free(message);
+        const logical_name = try self.allocator.dupe(u8, candidate.logical_name);
+        errdefer self.allocator.free(logical_name);
+        var owned = candidate;
+        owned.message = message;
+        owned.logical_name = logical_name;
+        try self.project_diagnostics.append(self.allocator, owned);
     }
 
     fn linkExternalImports(self: *Project, result: *semantics.BorrowedProjectSemanticResult) !void {
@@ -535,14 +815,16 @@ pub const Project = struct {
         for (result.imports) |*item| {
             if (item.state != .external) continue;
             const import_record = self.findImportRecord(item.module_id, item.local_name) orelse continue;
-            const edge = self.findExternalEdge(item.module_id, import_record.source) orelse continue;
+            if (item.edge_index >= self.graph.edges.items.len) continue;
+            const edge = &self.graph.edges.items[item.edge_index];
+            if (edge.importer.value() != item.module_id or edge.state != .external) continue;
             const external_id = edge.external_target orelse continue;
             const external = self.findExternal(external_id) orelse continue;
 
             if (import_record.kind == .namespace) {
                 var properties: std.ArrayList(types.ObjectProperty) = .empty;
                 for (external.exports) |exported| {
-                    if (exported.type_only) continue;
+                    if (!exported.namespace.supports(item.type_only)) continue;
                     try properties.append(allocator, .{
                         .name = exported.name,
                         .type_id = externalTypeId(&result.type_store.builtins, exported.type_metadata),
@@ -583,18 +865,96 @@ pub const Project = struct {
         }
     }
 
+    fn linkExternalReExports(self: *Project, result: *semantics.BorrowedProjectSemanticResult) !void {
+        const allocator = result.arena.allocator();
+        var exports: std.ArrayList(semantics.SemanticExport) = .{
+            .items = result.exports,
+            .capacity = result.exports.len,
+        };
+
+        for (self.modules.items) |module| {
+            const source_result = module.semantic_result orelse continue;
+            for (source_result.frontend.bind.module.exports) |record| {
+                if (record.source.len == 0 or record.kind == .export_all) continue;
+                const node = source_result.frontend.ast.node(record.node);
+                const source_span = node.data.ExportDeclaration.source_span orelse continue;
+                const edge_index = self.findExternalReExportEdge(module.id, source_span) orelse continue;
+                const edge = self.graph.edges.items[edge_index];
+                const external_id = edge.external_target orelse continue;
+                const external = self.findExternal(external_id) orelse continue;
+                const import_kind: ast.ImportSpecifierKind = if (std.mem.eql(u8, record.local_name, "default")) .default else .named;
+                const exported = findExternalExport(external.exports, record.local_name, import_kind, record.type_only) orelse {
+                    result.is_partial = true;
+                    try self.graph.recordMissingExternalExport(edge);
+                    continue;
+                };
+                try upsertExternalReExport(
+                    allocator,
+                    &exports,
+                    module.id.value(),
+                    record.name,
+                    edge_index,
+                    record.type_only,
+                    node.span,
+                    external_id,
+                    exported,
+                    &result.type_store.builtins,
+                );
+            }
+
+            for (source_result.frontend.ast.nodes) |node| switch (node.data) {
+                .ExportDeclaration => |declaration| {
+                    if (declaration.kind != .export_all or declaration.source.len == 0) continue;
+                    const source_span = declaration.source_span orelse continue;
+                    const edge_index = self.findExternalReExportEdge(module.id, source_span) orelse continue;
+                    const edge = self.graph.edges.items[edge_index];
+                    const external_id = edge.external_target orelse continue;
+                    const external = self.findExternal(external_id) orelse continue;
+                    for (external.exports) |exported| {
+                        if (exported.kind == .default) continue;
+                        const type_only = if (declaration.type_only)
+                            if (exported.namespace.type) true else continue
+                        else if (exported.namespace.value)
+                            false
+                        else if (exported.namespace.type)
+                            true
+                        else
+                            continue;
+                        try upsertExternalReExport(
+                            allocator,
+                            &exports,
+                            module.id.value(),
+                            exported.name,
+                            edge_index,
+                            type_only,
+                            node.span,
+                            external_id,
+                            exported,
+                            &result.type_store.builtins,
+                        );
+                    }
+                },
+                else => {},
+            };
+        }
+        result.exports = try exports.toOwnedSlice(allocator);
+    }
+
+    fn findExternalReExportEdge(self: *const Project, importer: contracts.ModuleId, source_span: contracts.SourceSpan) ?usize {
+        for (self.graph.edges.items, 0..) |edge, index| {
+            if (edge.importer == importer and
+                edge.operation == .re_export and
+                edge.state == .external and
+                std.meta.eql(edge.span, source_span)) return index;
+        }
+        return null;
+    }
+
     fn findImportRecord(self: *const Project, module_id: semantics.ModuleId, local_name: []const u8) ?binder.ImportRecord {
         const module = self.find(contracts.ModuleId.init(module_id)) orelse return null;
         const result = module.semantic_result orelse return null;
         for (result.frontend.bind.module.imports) |record| {
             if (std.mem.eql(u8, record.local_name, local_name)) return record;
-        }
-        return null;
-    }
-
-    fn findExternalEdge(self: *const Project, importer: semantics.ModuleId, source: []const u8) ?*const project_graph.Edge {
-        for (self.graph.edges.items) |*edge| {
-            if (edge.importer.value() == importer and edge.state == .external and std.mem.eql(u8, edge.raw_specifier, source)) return edge;
         }
         return null;
     }
@@ -642,9 +1002,9 @@ pub const Project = struct {
         return null;
     }
 
-    fn findSemanticEdge(items: []const modules_mod.ImportEdge, from: modules_mod.ModuleId, specifier: []const u8, re_export: bool) ?modules_mod.ImportEdge {
+    fn findSemanticEdge(items: []const modules_mod.ImportEdge, from: modules_mod.ModuleId, span_value: contracts.SourceSpan, re_export: bool) ?modules_mod.ImportEdge {
         for (items) |edge| {
-            if (edge.from == from and edge.re_export == re_export and std.mem.eql(u8, edge.specifier, specifier)) return edge;
+            if (edge.from == from and edge.re_export == re_export and std.meta.eql(edge.span, span_value)) return edge;
         }
         return null;
     }
@@ -681,11 +1041,95 @@ pub const Project = struct {
         self.clearResult(module);
         if (module.source) |source| self.freeSource(source);
     }
+
+    /// Assert ownership and publication invariants at debug/test mutation boundaries.
+    fn debugAssertInvariants(self: *const Project) void {
+        self.requests.assertInvariants();
+        std.debug.assert(self.modules.items.len <= self.limits.max_modules);
+        std.debug.assert(self.graph.edges.items.len <= self.limits.max_edges);
+        std.debug.assert(self.project_diagnostics.items.len <= self.limits.max_diagnostics);
+
+        var source_bytes: usize = 0;
+        for (self.modules.items, 0..) |module, index| {
+            for (self.modules.items[0..index]) |previous| std.debug.assert(previous.id != module.id);
+            if (module.source) |source| source_bytes += source.bytes.len;
+            if (module.semantic_result == null) std.debug.assert(!module.metadata_derived);
+            if (module.metadata_derived) {
+                std.debug.assert(module.semantic_result != null);
+                std.debug.assert(module.state == .complete);
+            }
+            switch (module.state) {
+                .requested => std.debug.assert(module.source == null and module.semantic_result == null),
+                .supplied, .parsing, .failed => std.debug.assert(module.semantic_result == null),
+                .analyzed, .complete => std.debug.assert(module.semantic_result != null),
+                .unseen, .external => {},
+            }
+        }
+        std.debug.assert(source_bytes <= self.total_source_bytes);
+        std.debug.assert(self.total_source_bytes <= self.limits.max_total_source_bytes);
+
+        for (self.graph.edges.items) |edge| {
+            const record = self.requests.lookup(edge.request_id) orelse unreachable;
+            std.debug.assert(record.request.importer == edge.importer);
+            std.debug.assert(std.mem.eql(u8, record.request.raw_specifier, edge.raw_specifier));
+        }
+        for (self.external_modules.items) |module| {
+            for (module.descriptor.exports) |item| std.debug.assert(item.name.len != 0 and item.namespace.isValid());
+        }
+        if (self.project_semantics != null) {
+            for (self.modules.items) |module| std.debug.assert(module.state == .complete or module.state == .failed);
+        }
+        std.debug.assert((self.finish_result != null) == self.finished);
+    }
 };
+
+fn canonicalPhase(item: diagnostics.Diagnostic) ProjectDiagnosticPhase {
+    return switch (item.phase) {
+        .scanner => .scanner,
+        .parser => .parser,
+        .binder => .binder,
+        .resolver => .resolver,
+        .type_checker => if (item.code == .unknown_type_name) .types else .checker,
+        .cfg => .checker,
+        .module_graph, .lowering, .runtime, .internal => .project,
+    };
+}
+
+const MappedGraphDiagnostic = struct {
+    phase: ProjectDiagnosticPhase,
+    code: diagnostics.DiagnosticCode,
+    message: []const u8,
+};
+
+fn graphProjectDiagnostic(code: project_graph.DiagnosticCode) MappedGraphDiagnostic {
+    return switch (code) {
+        .module_not_found => .{ .phase = .module_host, .code = .module_not_found, .message = "module not found" },
+        .module_denied => .{ .phase = .module_host, .code = .module_access_denied, .message = "module access denied" },
+        .module_failed => .{ .phase = .module_host, .code = .module_host_failed, .message = "module host failed" },
+        .external_missing_export => .{ .phase = .project, .code = .missing_export, .message = "external module is missing the requested export" },
+    };
+}
+
+fn projectDiagnosticsEqual(left: ProjectDiagnostic, right: ProjectDiagnostic) bool {
+    const module_equal = if (left.module_id) |left_id|
+        if (right.module_id) |right_id| left_id == right_id else false
+    else
+        right.module_id == null;
+    return module_equal and
+        left.phase == right.phase and
+        left.severity == right.severity and
+        left.code == right.code and
+        std.mem.eql(u8, left.message, right.message) and
+        std.mem.eql(u8, left.logical_name, right.logical_name) and
+        left.span.start == right.span.start and
+        left.span.end == right.span.end and
+        left.span.line == right.span.line and
+        left.span.column == right.span.column;
+}
 
 fn validateExternalDescriptor(descriptor: contracts.ExternalModuleDescriptor) !void {
     for (descriptor.exports, 0..) |item, index| {
-        if (item.name.len == 0) return error.InvalidExternalExport;
+        if (item.name.len == 0 or !item.namespace.isValid()) return error.InvalidExternalExport;
         switch (item.kind) {
             .default => if (!std.mem.eql(u8, item.name, "default")) return error.InvalidExternalExport,
             .named, .namespace => if (std.mem.eql(u8, item.name, "default")) return error.InvalidExternalExport,
@@ -699,7 +1143,7 @@ fn validateExternalDescriptor(descriptor: contracts.ExternalModuleDescriptor) !v
 fn externalDescriptorsEqual(left: contracts.ExternalModuleDescriptor, right: contracts.ExternalModuleDescriptor) bool {
     if (left.id != right.id or !std.mem.eql(u8, left.logical_name, right.logical_name) or left.exports.len != right.exports.len) return false;
     for (left.exports, right.exports) |a, b| {
-        if (!std.mem.eql(u8, a.name, b.name) or a.kind != b.kind or a.type_only != b.type_only or a.type_metadata != b.type_metadata) return false;
+        if (!std.mem.eql(u8, a.name, b.name) or a.kind != b.kind or !std.meta.eql(a.namespace, b.namespace) or a.type_metadata != b.type_metadata) return false;
     }
     return true;
 }
@@ -716,7 +1160,7 @@ fn findExternalExport(
             .named => item.kind == .named or item.kind == .namespace,
             .namespace => unreachable,
         };
-        if (!kind_matches or item.type_only != type_only or !std.mem.eql(u8, item.name, name)) continue;
+        if (!kind_matches or !item.namespace.supports(type_only) or !std.mem.eql(u8, item.name, name)) continue;
         return item;
     }
     return null;
@@ -737,6 +1181,49 @@ fn externalTypeId(builtins: *const types.Builtins, metadata: ?contracts.External
         .symbol => builtins.symbol,
         .object => builtins.object,
     };
+}
+
+fn upsertExternalReExport(
+    allocator: std.mem.Allocator,
+    exports: *std.ArrayList(semantics.SemanticExport),
+    module_id: semantics.ModuleId,
+    name: []const u8,
+    edge_index: usize,
+    type_only: bool,
+    span: contracts.SourceSpan,
+    external_id: contracts.ExternalModuleId,
+    exported: contracts.ExternalExportDescriptor,
+    builtins: *const types.Builtins,
+) !void {
+    const candidate: semantics.SemanticExport = .{
+        .module_id = module_id,
+        .name = name,
+        .identity = .{
+            .symbol_id = null,
+            .declaration = types.SemanticDeclId.init(0, ast.invalid_node),
+            .type_id = externalTypeId(builtins, exported.type_metadata),
+            .namespace = if (type_only) .type else .value,
+            .external_module_id = external_id.value(),
+        },
+        .edge_index = edge_index,
+        .type_only = type_only,
+        .re_export = true,
+        .span = span,
+    };
+    var fallback: ?usize = null;
+    for (exports.items, 0..) |item, index| {
+        if (item.module_id != module_id or !std.mem.eql(u8, item.name, name)) continue;
+        if (item.type_only == type_only) {
+            exports.items[index] = candidate;
+            return;
+        }
+        fallback = index;
+    }
+    if (fallback) |index| {
+        exports.items[index] = candidate;
+        return;
+    }
+    try exports.append(allocator, candidate);
 }
 
 test "project copies host buffers and analyzes one in-memory root" {
@@ -800,6 +1287,21 @@ test "unreachable pre-supplied modules are not analyzed" {
     const step_value = try project.step();
     try std.testing.expect(step_value == .complete);
     try std.testing.expectEqual(ModuleState.supplied, project.state(.init(2)));
+
+    const finished = try project.finish();
+    try std.testing.expectEqual(@as(usize, 1), finished.module_count);
+    try std.testing.expect(!finished.has_failures);
+    try std.testing.expectEqual(@as(usize, 1), project.moduleCount());
+    try std.testing.expect(project.lookup(.init(1)) != null);
+    try std.testing.expect(project.lookup(.init(2)) == null);
+    try std.testing.expectEqual(@as(usize, 0), project.edges().len);
+    try std.testing.expectEqual(@as(usize, 0), project.graphDiagnostics().len);
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+
+    const semantic = project.semanticResult().?;
+    try std.testing.expect(semantic.lookupModule(1) != null);
+    try std.testing.expect(semantic.lookupModule(2) == null);
+    for (semantic.imports) |item| try std.testing.expectEqual(@as(u64, 1), item.module_id);
 }
 
 test "failed module preserves completed module and teardown remains complete" {
@@ -1107,7 +1609,7 @@ test "external descriptors report missing members and preserve type-only imports
         .logical_name = "native:types",
         .exports = &.{
             .{ .name = "present", .type_metadata = .boolean },
-            .{ .name = "NativeShape", .type_only = true, .type_metadata = .object },
+            .{ .name = "NativeShape", .namespace = .{ .type = true }, .type_metadata = .object },
         },
     };
     while (true) switch (try project.step()) {
@@ -1134,6 +1636,152 @@ test "external descriptors report missing members and preserve type-only imports
     try std.testing.expectEqual(project_graph.DiagnosticCode.external_missing_export, project.graphDiagnostics()[0].code);
 }
 
+test "external linking rejects exports outside the requested namespace" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(405),
+        .logical_name = "root",
+        .bytes =
+        \\import { TypeOnly } from 'native:type-only';
+        \\import type { ValueOnly } from 'native:value-only';
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| if (std.mem.eql(u8, request.raw_specifier, "native:type-only")) {
+            try project.respondExternalModule(request.id, .{
+                .id = .init(9005),
+                .logical_name = "native:type-only",
+                .exports = &.{.{
+                    .name = "TypeOnly",
+                    .namespace = .{ .type = true },
+                    .type_metadata = .object,
+                }},
+            });
+        } else {
+            try project.respondExternalModule(request.id, .{
+                .id = .init(9006),
+                .logical_name = "native:value-only",
+                .exports = &.{.{
+                    .name = "ValueOnly",
+                    .namespace = .{ .value = true },
+                    .type_metadata = .object,
+                }},
+            });
+        },
+    };
+    _ = try project.finish();
+
+    const result = project.semanticResult().?;
+    var saw_type_as_value = false;
+    var saw_value_as_type = false;
+    for (result.imports) |item| {
+        if (std.mem.eql(u8, item.local_name, "TypeOnly")) {
+            saw_type_as_value = !item.type_only and item.state == .unresolved and item.target == null;
+        } else if (std.mem.eql(u8, item.local_name, "ValueOnly")) {
+            saw_value_as_type = item.type_only and item.state == .unresolved and item.target == null;
+        }
+    }
+    try std.testing.expect(saw_type_as_value and saw_value_as_type);
+    try std.testing.expectEqual(@as(usize, 2), project.graphDiagnostics().len);
+}
+
+test "external class exists in value and type namespaces" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(404),
+        .logical_name = "root",
+        .bytes =
+        \\import { ExternalClass } from 'native:classes';
+        \\const instance = new ExternalClass();
+        \\let typed: ExternalClass;
+        ,
+    });
+    const descriptor: contracts.ExternalModuleDescriptor = .{
+        .id = .init(9004),
+        .logical_name = "native:classes",
+        .exports = &.{.{
+            .name = "ExternalClass",
+            .namespace = .{ .value = true, .type = true },
+            .type_metadata = .object,
+        }},
+    };
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, descriptor),
+    };
+    try std.testing.expect(!(try project.finish()).has_failures);
+
+    const result = project.semanticResult().?;
+    const root = result.lookupModule(404).?;
+    try std.testing.expectEqual(@as(usize, 0), root.type_info.diagnostics.len);
+    var saw_external = false;
+    for (result.imports) |item| {
+        if (!std.mem.eql(u8, item.local_name, "ExternalClass")) continue;
+        saw_external = item.runtime_binding and !item.type_only and item.target != null and
+            item.target.?.namespace == .value and
+            item.target.?.type_id == result.type_store.builtins.object and
+            item.target.?.external_module_id.? == descriptor.id.value();
+    }
+    try std.testing.expect(saw_external);
+}
+
+test "external re-exports preserve named and star provenance across namespaces" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(406),
+        .logical_name = "root",
+        .bytes =
+        \\export { ValueOnly as ForwardedValue } from 'native:exports';
+        \\export type { TypeOnly as ForwardedType, Both as ForwardedBothType } from 'native:exports';
+        \\export * from 'native:exports';
+        ,
+    });
+    const descriptor: contracts.ExternalModuleDescriptor = .{
+        .id = .init(9007),
+        .logical_name = "native:exports",
+        .exports = &.{
+            .{ .name = "default", .kind = .default, .type_metadata = .object },
+            .{ .name = "ValueOnly", .namespace = .{ .value = true }, .type_metadata = .number },
+            .{ .name = "TypeOnly", .namespace = .{ .type = true }, .type_metadata = .string },
+            .{ .name = "Both", .namespace = .{ .value = true, .type = true }, .type_metadata = .object },
+        },
+    };
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, descriptor),
+    };
+    try std.testing.expect(!(try project.finish()).has_failures);
+
+    const result = project.semanticResult().?;
+    const expected = [_]struct { name: []const u8, type_only: bool, type_id: types.TypeId }{
+        .{ .name = "ForwardedValue", .type_only = false, .type_id = result.type_store.builtins.number },
+        .{ .name = "ForwardedType", .type_only = true, .type_id = result.type_store.builtins.string },
+        .{ .name = "ForwardedBothType", .type_only = true, .type_id = result.type_store.builtins.object },
+        .{ .name = "ValueOnly", .type_only = false, .type_id = result.type_store.builtins.number },
+        .{ .name = "TypeOnly", .type_only = true, .type_id = result.type_store.builtins.string },
+        .{ .name = "Both", .type_only = false, .type_id = result.type_store.builtins.object },
+    };
+    for (expected) |wanted| {
+        var found = false;
+        for (result.exports) |item| {
+            if (item.module_id != 406 or !std.mem.eql(u8, item.name, wanted.name)) continue;
+            try std.testing.expect(item.re_export);
+            try std.testing.expectEqual(wanted.type_only, item.type_only);
+            try std.testing.expectEqual(wanted.type_id, item.identity.type_id);
+            try std.testing.expectEqual(@as(?u64, descriptor.id.value()), item.identity.external_module_id);
+            try std.testing.expect(item.edge_index != null);
+            found = true;
+            break;
+        }
+        try std.testing.expect(found);
+    }
+    try std.testing.expect(result.lookupExport(406, "default") == null);
+}
+
 test "external descriptor validation rejects malformed duplicate and conflicting tables" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
@@ -1150,6 +1798,11 @@ test "external descriptor validation rejects malformed duplicate and conflicting
         .id = .init(1),
         .logical_name = "bad",
         .exports = &.{.{ .name = "wrong", .kind = .default }},
+    }));
+    try std.testing.expectError(error.InvalidExternalExport, project.respondExternalModule(first.id, .{
+        .id = .init(1),
+        .logical_name = "bad",
+        .exports = &.{.{ .name = "one", .namespace = .{} }},
     }));
     try std.testing.expectError(error.DuplicateExternalExport, project.respondExternalModule(first.id, .{
         .id = .init(1),
@@ -1179,4 +1832,196 @@ test "external descriptor validation rejects malformed duplicate and conflicting
     });
     while (try project.step() != .complete) {}
     try std.testing.expect(!(try project.finish()).has_failures);
+}
+
+test "source aggregate and module limits hold their N boundaries" {
+    var per_source = Project.initWithLimits(std.testing.allocator, .{
+        .max_source_bytes = 3,
+        .max_total_source_bytes = 32,
+    });
+    defer per_source.deinit();
+    try per_source.addRoot(.{ .id = .init(1), .logical_name = "root", .bytes = "abc" });
+    try std.testing.expectError(error.SourceLimitExceeded, per_source.supplySource(.{
+        .id = .init(2),
+        .logical_name = "large",
+        .bytes = "abcd",
+    }));
+    try std.testing.expectEqual(@as(usize, 1), per_source.moduleCount());
+
+    var aggregate = Project.initWithLimits(std.testing.allocator, .{
+        .max_source_bytes = 32,
+        .max_total_source_bytes = 3,
+    });
+    defer aggregate.deinit();
+    try aggregate.addRoot(.{ .id = .init(1), .logical_name = "root", .bytes = "ab" });
+    try aggregate.supplySource(.{ .id = .init(2), .logical_name = "dep", .bytes = "c" });
+    try std.testing.expectError(error.TotalSourceLimitExceeded, aggregate.supplySource(.{
+        .id = .init(3),
+        .logical_name = "extra",
+        .bytes = "d",
+    }));
+    try std.testing.expectEqual(@as(usize, 2), aggregate.moduleCount());
+
+    var modules = Project.initWithLimits(std.testing.allocator, .{ .max_modules = 2 });
+    defer modules.deinit();
+    try modules.addRoot(.{ .id = .init(1), .logical_name = "root", .bytes = "" });
+    try modules.supplySource(.{ .id = .init(2), .logical_name = "dep", .bytes = "" });
+    try std.testing.expectError(error.ModuleLimitExceeded, modules.supplySource(.{
+        .id = .init(3),
+        .logical_name = "extra",
+        .bytes = "",
+    }));
+    try std.testing.expectEqual(@as(usize, 2), modules.moduleCount());
+}
+
+test "project diagnostic limit is checked before copying messages" {
+    var no_storage: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_storage);
+    var project = Project.initWithLimits(fixed.allocator(), .{ .max_diagnostics = 0 });
+    defer project.deinit();
+
+    try std.testing.expectError(error.DiagnosticLimitExceeded, project.appendProjectDiagnostic(.{
+        .module_id = .init(1),
+        .phase = .scanner,
+        .severity = .@"error",
+        .code = .invalid_character,
+        .message = "must not be copied",
+        .logical_name = "must not be copied either",
+        .span = .{ .start = 0, .end = 1, .line = 1, .column = 0 },
+    }));
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+}
+
+fn allocationFailureProject(allocator: std.mem.Allocator) !*Project {
+    const project = try allocator.create(Project);
+    project.* = Project.init(allocator);
+    return project;
+}
+
+fn destroyAllocationFailureProject(allocator: std.mem.Allocator, project: *Project) void {
+    project.deinit();
+    allocator.destroy(project);
+}
+
+fn allocationFailureSourceAcquisition(allocator: std.mem.Allocator) !void {
+    const project = try allocationFailureProject(allocator);
+    defer destroyAllocationFailureProject(allocator, project);
+    project.addRoot(.{
+        .id = .init(701),
+        .logical_name = "fault:root",
+        .bytes = "export const answer = 42;",
+    }) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), project.moduleCount());
+        try std.testing.expectEqual(@as(usize, 0), project.total_source_bytes);
+        return err;
+    };
+    try std.testing.expectEqualStrings("fault:root", project.lookup(.init(701)).?.source.?.logical_name);
+    try std.testing.expectEqualStrings("export const answer = 42;", project.lookup(.init(701)).?.source.?.bytes);
+}
+
+fn allocationFailureModulePipeline(allocator: std.mem.Allocator) !void {
+    const project = try allocationFailureProject(allocator);
+    defer destroyAllocationFailureProject(allocator, project);
+    try project.addRoot(.{
+        .id = .init(702),
+        .logical_name = "fault:pipeline",
+        .bytes = "import { item } from './dependency' with { mode: 'strict' }; export const value = item;",
+    });
+    const next = project.step() catch |err| {
+        try std.testing.expect(project.semanticResult() == null);
+        try std.testing.expect(project.lookup(.init(702)).?.semantic_result == null);
+        try std.testing.expect(!project.lookup(.init(702)).?.metadata_derived);
+        try std.testing.expectEqual(@as(usize, 0), project.requestCount());
+        try std.testing.expectEqual(@as(usize, 0), project.edges().len);
+        return err;
+    };
+    const request = next.request;
+    try std.testing.expectEqualStrings("./dependency", request.raw_specifier);
+    try std.testing.expectEqual(@as(usize, 1), request.attributes.len);
+    try std.testing.expectEqual(@as(usize, 1), project.requestCount());
+    try std.testing.expectEqual(@as(usize, 1), project.edges().len);
+    try std.testing.expect(project.lookup(.init(702)).?.semantic_result != null);
+    try std.testing.expect(project.lookup(.init(702)).?.metadata_derived);
+}
+
+fn allocationFailureExternalCopy(allocator: std.mem.Allocator) !void {
+    const project = try allocationFailureProject(allocator);
+    defer destroyAllocationFailureProject(allocator, project);
+    try project.addRoot(.{
+        .id = .init(703),
+        .logical_name = "fault:external",
+        .bytes = "import { ExternalClass } from 'native:classes';",
+    });
+    const request = (try project.step()).request;
+    project.respondExternalModule(request.id, .{
+        .id = .init(9703),
+        .logical_name = "native:classes",
+        .exports = &.{.{
+            .name = "ExternalClass",
+            .namespace = .{ .value = true, .type = true },
+            .type_metadata = .object,
+        }},
+    }) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), project.external_modules.items.len);
+        try std.testing.expect(project.lookupRequest(request.id).?.resolution == null);
+        try std.testing.expectEqual(project_graph.EdgeState.unresolved, project.edges()[0].state);
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 1), project.external_modules.items.len);
+    try std.testing.expectEqual(project_graph.EdgeState.external, project.edges()[0].state);
+}
+
+fn allocationFailureProjectResult(allocator: std.mem.Allocator) !void {
+    const project = try allocationFailureProject(allocator);
+    defer destroyAllocationFailureProject(allocator, project);
+    try project.addRoot(.{
+        .id = .init(704),
+        .logical_name = "fault:finish",
+        .bytes =
+        \\import { Missing, ExternalClass } from 'native:classes';
+        \\export { ExternalClass as ForwardedClass } from 'native:classes';
+        \\const instance = new ExternalClass();
+        \\let typed: ExternalClass;
+        ,
+    });
+    const descriptor: contracts.ExternalModuleDescriptor = .{
+        .id = .init(9704),
+        .logical_name = "native:classes",
+        .exports = &.{.{
+            .name = "ExternalClass",
+            .namespace = .{ .value = true, .type = true },
+            .type_metadata = .object,
+        }},
+    };
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, descriptor),
+    };
+    const finished = project.finish() catch |err| {
+        try std.testing.expect(project.semanticResult() == null);
+        try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+        try std.testing.expect(project.finish_result == null);
+        try std.testing.expect(!project.finished);
+        return err;
+    };
+    try std.testing.expect(!finished.has_failures);
+    try std.testing.expect(project.semanticResult() != null);
+    try std.testing.expect(project.semanticResult().?.is_partial);
+    try std.testing.expect(project.diagnostics().len != 0);
+}
+
+test "allocation failure matrix covers project creation and source acquisition" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureSourceAcquisition, .{});
+}
+
+test "allocation failure matrix covers frontend semantic metadata request and graph phases" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureModulePipeline, .{});
+}
+
+test "allocation failure matrix covers external descriptor copying" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureExternalCopy, .{});
+}
+
+test "allocation failure matrix covers external linking project result and canonical diagnostics" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureProjectResult, .{});
 }
