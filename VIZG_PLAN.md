@@ -2,14 +2,12 @@
 
 *Created: 2026-07-10 — Informed by V8 engine architecture, JavaScriptCore Inspector protocol, TypeScript compiler design.*
 
-> **Superseded and non-executable.** This historical plan does not authorize
-> implementation work. Goals 174–188 replace the former portability sequence
-> and freeze the active architecture as a portable core with host-driven
-> modules and the official memory-first ABI v1. The earlier unpublished ABI was
-> removed. No shim, deprecated alias, compatibility library, or parallel ABI is
-> retained. Goal 188 closed on 2026-07-14, so HIR planning is authorized. This
-> historical document remains non-executable and does not authorize HIR
-> implementation.
+> **Historical and non-executable.** This document is retained only as design
+> context. Goals 189–196 are the active completion sequence for the portable
+> project API and candidate official ABI v1. The unpublished prototype ABI was
+> removed and receives no compatibility support. HIR remains blocked until Goal
+> 196 is validated locally with the complete gate matrix and its final audit has
+> no unresolved in-scope finding.
 
 ## Architecture Reference
 
@@ -64,10 +62,12 @@ Vizg maps this to its existing analysis layers since vizg is **analysis-only** (
 | `src/semantics/checker.zig` | Checker v2 | Validates the supported semantic model through the canonical compatibility relation | ✅ Complete for supported syntax |
 | `src/semantics/type_inference.zig` | Canonical Expression Inference | Infers expressions, calls, access, operators, aggregates, and function returns into the owned semantic result | ✅ Complete for supported syntax |
 | `src/semantics/dataflow.zig` | CFG Dataflow | Computes deterministic block facts and narrowing program points | ✅ Complete for supported syntax |
-| `src/modules/graph.zig` | Module Graph | Recursive analysis of local imports with cache | ✅ Partial — no package.json or node_modules lookup |
-| `src/modules/resolver.zig` | Import Resolution | Relative path resolution + extension list | ⚠️ ~50% — relative imports work; external/package resolution stubbed |
-| `src/modules/linker.zig` | Cross-file Linking | Named/default/namespace import linking to exports | ✅ Complete for local imports |
-| `src/modules/externals.zig` | External Registry | Manual externals list (e.g., "node:fs", "lodash") | ⚠️ ~30% — manual registry only, no auto-detection from package.json |
+| `src/project/contracts.zig` | Host Contract | Opaque module/request identities and source/external response descriptors | ✅ Implemented |
+| `src/project/session.zig` | Project Session | One-shot host-driven module ingestion, graph construction, and semantic completion | ✅ Implemented; final audit pending |
+| `src/project/state_machine.zig` | Request State Machine | Deterministic pull-based module requests and host responses | ✅ Implemented; final audit pending |
+| `src/project/graph.zig` | Project Graph | Host-resolved source/external edges and discovered module metadata | ✅ Implemented; final audit pending |
+| `src/modules/linker.zig` | Cross-file Linking | Named/default/namespace import linking to host-supplied module identities | ✅ Implemented for supported syntax |
+| `test/support/fs_validation_host.zig` | Validation Fixture | Test/reference filesystem provider used only to exercise the host API | 🧪 Test-only; not ViZG module resolution |
 
 ### Diagnostic Code Ranges Currently Allocated
 
@@ -236,113 +236,58 @@ In `src/main.zig`: add new subcommand handler that calls into a new `print_hir` 
 
 ---
 
-## Phase 3: Module Graph Expansion — Package Lookup & package.json Resolution
+## Runtime Module Resolution — Outside ViZG
 
-### Purpose
-Add proper external module semantics following Node.js resolution: `package.json` lookup, `node_modules` traversal, and subpath exports — so vizg can analyze projects with real dependency trees.
+### Boundary
 
-### Architecture — Direct V8/Node Mapping
-
-V8 executes modules loaded through Node's resolver algorithm (inherited by JSC when running JS). Vizg mirrors this *resolution* phase only — it never executes the code:
+ViZG does not resolve module specifiers. It discovers import/export syntax,
+emits an environment-neutral request, accepts a host-provided response, and
+links the supplied `ModuleId` into the project graph.
 
 ```txt
-V8/Node: Module._resolveFilename() → vizg: src/modules/resolver.zig extended
-    ├── 1. relative specifier ("./foo")         → existing resolveRelative() ✅ already works
-    ├── 2. package.json "main"/"module"/exports → NEW: read JSON from node_modules/<pkg>/package.json
-    ├── 3. built-in node: protocol             → NEW: track as external, mark known
-    └── 4. fallback to .ts/.js extension list → existing with extensions config ✅
+ViZG:
+    importer ModuleId
+    raw specifier
+    operation: import | re-export | dynamic import
+    type_only flag
+    import attributes
+    source span
 
-Node resolution algorithm (simplified):
-1. If specifier starts with "./" or "../": resolve relative path ✅ already implemented
-2. Otherwise it's a package name:
-   a. Walk up from source file dir looking for node_modules/<pkg>/package.json
-   b. Read "main" field → entry point; if missing, use index.js/.ts
-   c. If "exports" map present: match subpath (e.g., "./*": "./src/*.ts")
-   d. If still not found after 3 levels up, mark as unresolved external
+Runtime / consumer:
+    resolve filesystem, URL, package, memory, or virtual-module policy
+    assign the canonical ModuleId
+    provide source bytes, external metadata, or a controlled failure
 ```
 
-### Tasks
+The following are explicitly outside the ViZG core and official ABI:
 
-#### 3.1 Create `src/modules/package_json.zig` — Minimal JSON Parsing
+- relative or absolute path normalization;
+- extension probing and `index.*` lookup;
+- `package.json`, `node_modules`, import maps, or package exports;
+- URL fetching, network policy, caches, credentials, or redirects;
+- symlink, filesystem sandbox, or path-traversal policy;
+- runtime-specific builtin-module detection.
 
-Vizg only needs three fields: `"main"`, `"module"`, `"type"`. No full JSON parser required:
+A filesystem provider may exist under `test/support/` or inside the CLI only as
+a validation fixture proving that an external consumer can drive the API. It
+must not be exported from `src/root.zig`, the C ABI, or public documentation as
+a ViZG resolver. Core module-system tests should use an in-memory provider.
 
-```zig
-const PackageJson = struct {
-    main: ?[]const u8,       // entry point filename (e.g., "index.ts")
-    module: ?[]const u8,     // ESM entry point override
-    @"type": []const u8,      // "commonjs" or "module" — affects import vs require semantics
+### Active module work
 
-    pub fn init(allocator: std.mem.Allocator, contents: []const u8) !PackageJson?
-    //   - scan for known keys by substring search (avoid full parser)
-    //   - return null if file doesn't exist or has no relevant fields
-};
-```
+The active module work is limited to the provider-independent contract:
 
-Cache parsed results per directory path to avoid repeated reads on module-graph traversal.
+1. discover imports, exports, and re-exports from source;
+2. preserve raw specifier, operation, `type_only`, attributes, and spans;
+3. emit deterministic `RequestId` values;
+4. accept host-supplied `ModuleId` and source/external responses;
+5. reject stale, duplicate, foreign, or invalid responses;
+6. construct the graph and propagate semantic identities;
+7. expose diagnostics and graph metadata through the official ABI;
+8. enforce resource limits independent of resolver policy.
 
-#### 3.2 Extend `src/modules/resolver.zig` — Package Lookup
-
-Add a new resolution path after relative resolution fails:
-
-```zig
-// New method (returns resolved file path or marks as external)
-pub fn resolveSpecifier(
-    self: Resolver,
-    from_path: []const u8,
-    specifier: []const u8,
-) !ResolvedImport {
-    return if (isRelativeSpecifier(specifier)) .{
-        // existing relative resolution path — already works
-    } else {
-        try lookupPackage(allocator, io, from_dir, specifier);
-    };
-}
-
-fn lookupPackage(...) !?[]const u8
-//   - walk up from `from_dir` looking for node_modules/<specifier>
-//   - read package.json (max 5 levels deep — prevents DoS)
-//   - apply "main" / "module" → "<dir>/<file>" or use "exports" map if present
-```
-
-#### 3.3 Extend `src/modules/loader.zig` — Package Integration
-
-- After loading entry file, scan all imports for non-relative specifiers
-- For each one, attempt package resolution via new resolver method
-- Add resolved packages to the module graph with a new import edge status `.resolved_package` (distinguish from `.external` which means "not found")
-- Existing `externals.zig` Registry handles manual externals; keep for backward compat
-
-#### 3.4 Update Linker — External Handling
-
-Distinguish three external states in `ImportEdge.status`:
-```zig
-pub const ImportStatus = enum {
-    local,                    // resolved to a source file ✅ already exists
-    @"package",               // NEW: resolved to npm package entry point (from package.json)
-    external_known_builtin,   // e.g., "node:path" — known Node.js built-in
-    external_unknown,         // truly unresolved import ❌ existing .external splits here
-};
-```
-
-#### 3.5 CLI Flags — BuildOptions Extension
-
-Add options to `loader.BuildOptions`:
-- `--externals-dir <path>` — override where to look for node_modules (default: CWD + traverse up)
-- `--modules-root <path>` — override modules search root
-- These are stored in the loader but don't change resolver's core relative-path logic
-
-### V8 Reference Mapping
-- Node's `Module._resolveFilename()` algorithm → vizg's package resolver (direct mapping per step above)
-- JSC's internal module loader uses similar resolution but with Webpack-style bundling awareness — useful if vizg ever needs to support bundle-aware analysis; out of scope for Phase 3
-
-### Files Changed (Phase 3)
-| File | Action | Notes |
-|------|--------|-------|
-| `src/modules/package_json.zig` | New | Parse package.json fields via substring search |
-| `src/modules/resolver.zig` | Edit | Add resolveSpecifier() with package lookup fallback |
-| `src/modules/loader.zig` | Edit | Scan imports, route through package resolution |
-| `src/modules/graph.zig` | Edit | Handle new `.package` and `.external_known_builtin` import statuses |
-| `src/main.zig` | Edit | Add --externals-dir / --modules-root CLI flags |
+No package-resolution phase exists in ViZG. A future runtime may implement one
+without changing the core module contract.
 
 ---
 
@@ -456,64 +401,86 @@ Document in `docs/protocol.md`:
 
 ## Implementation Order & Dependencies
 
-```
-Phase 1 (type checker v2) — no phase dependencies; start here
-├── Prereqs: existing types model, semantics type_info, diagnostics VZG6xxx codes
-└── Parallelizable with Phase 3 (module graph expansion); both touch frontend but independently
-│
-Phase 3 (module graph expansion) — depends only on current module layer
-├── Required: existing module graph, resolver, linker
-└── Can run alongside Phase 1; no upstream dependencies on other phases
-│
-Phase 2 (HIR / lowering) — requires typed AST from Phase 1 to be meaningful
-└── Deps on Phase 1 completed: HIR lowerer needs type info to annotate nodes properly
-│
-Phase 4 (inspector protocol) — depends on all three above; interfaces all layers via public APIs
-├── Required: all phases above for anything useful to expose
-└── Run last; exposes frontend results, type-checking output, and module graph as CDP-like messages
+```txt
+Goals 189–196
+├── complete result ABI and runtime version query
+├── harden host/WASM memory validation
+├── make project updates transactional
+├── enforce the one-shot bounded-memory lifecycle
+├── preserve orthogonal module request metadata
+├── close resource-limit and diagnostic accounting
+├── isolate concrete host fixtures outside the product API
+└── repeat the complete local audit and freeze ABI v1
+
+HIR
+└── may be planned only after Goal 196 passes every local gate
+
+Runtime module resolution
+└── belongs to a separate runtime/consumer layer and is not a ViZG phase
 ```
 
-### Recommended Order (with rationale)
+### Required order
 
-1. **Phase 3 first** (package lookup) — smallest work, unblocks Phase 4 protocol with real data
-2. **Phase 1 second** (type checker v2) — critical layer; enables any backend to make type-aware decisions
-3. **Phase 2 third** (HIR/lowering) — bridge to runtime or emission backends
-4. **Phase 4 last** (inspector protocol) — requires stable public APIs from all previous phases
+1. Complete and validate Goals 189–196 in strict sequence.
+2. Freeze official ABI v1 only after the clean Goal 196 audit.
+3. Begin HIR planning only after that freeze.
+4. Build filesystem/package/URL resolution in the runtime or consumer that
+   implements the module-provider contract.
 
 ---
 
 ## Diagnostic Code Allocation Summary
 
-| Range | Purpose | Allocated In Phase | Notes |
-|-------|---------|-------------------|-------|
-| `VZG6004` | unknown_type_name (type checker) | Phase 1 | Already exists as diagnostic code enum variant, unused |
-| `VZG6005` | type_mismatch (type checker) | Phase 1 | Already emitted by v1 for literal mismatches; extended in v2 |
-| `VZG7xxx` | HIR/lowering errors | Phase 2 | Reserved per roadmap |
-| New VZG5xxx | package.json resolution failures | Phase 3 | Add: e.g., `VZG5004 module_not_found_package`, `VZG5005 invalid_package_json` |
-| `VZG8xxx` | Protocol-level errors | Phase 4 | Reserved per roadmap; follow CDP negative-integer convention |
+| Range | Purpose | Notes |
+|-------|---------|-------|
+| `VZG1xxx` | Scanner/lexer errors | Existing frontend diagnostics |
+| `VZG2xxx` | Parser errors | Existing frontend diagnostics |
+| `VZG3xxx` | Binder errors | Existing frontend diagnostics |
+| `VZG4xxx` | Resolver errors | Identifier/type-name resolution, not module-specifier policy |
+| `VZG5xxx` | Module-provider/graph errors | Missing, denied, failed, duplicate, invalid-response, or limit outcomes |
+| `VZG6xxx` | Type checker semantic errors | Existing semantic diagnostics |
+| `VZG7xxx` | HIR/lowering errors | Reserved; HIR not started |
+| `VZG8xxx` | Future protocol errors | Reserved |
+
+Module diagnostics describe the result of a host response or graph invariant.
+They must not encode filesystem, package-manager, URL, or path-resolution policy.
 
 ---
 
 ## Open Decisions / Risks
 
-1. **Strict mode toggle vs opt-in checking**: TypeScript checks everything by default; vizg v1 defaults to minimal analysis. Recommend `--strict` flag (default on) that enables full type checking, HIR lowering, and package resolution — matches existing "check" command behavior while keeping existing CLI usage unchanged for backward compat.
+1. **HIR representation:** choose the first HIR shape only after Goal 196 closes.
+   It must consume the stable semantic contract rather than compensate for ABI
+   or module-provider defects.
 
-2. **HIR representation choice**: Textual (human-readable) vs binary (compact). Start textual for inspection/debugging; binary format is optional later if performance matters for large programs or IDE integration latency concerns.
+2. **Future ABI extension:** semantic symbol/type queries may be added through
+   additive versioned structures or explicit capability queries. Do not expose
+   unstable internal `TypeId` values across independent contexts.
 
-3. **Package.json parsing depth**: Minimal JSON parsing (string search for specific keys) vs full JSON decoder. Recommend minimal first since vizg only cares about `"main"`, `"module"`, `"type"` — a full parser adds complexity for marginal benefit at this stage; add one if subpath exports map gets needed later.
+3. **Runtime provider design:** filesystem, package, URL, memory, and virtual
+   module providers belong to the runtime/consumer. Their policies must not be
+   copied into ViZG.
 
-4. **Protocol transport**: stdio-first matches how `clangd` and `rust-analyzer` work (zero config, works with any editor). WebSocket fallback can be added later if needed for browser-remote analysis tools.
+4. **Protocol transport:** any future inspector/LSP-like transport consumes the
+   public project/result APIs. It must not bypass ownership or recreate module
+   resolution inside the frontend.
 
-5. **Keep semantic ownership singular**: Future type-system work must extend the canonical collector, inference, dataflow, narrowing, checker, and project-propagation pipeline. It must not restore a parallel inference result or competing `TypeStore`.
+5. **Singular semantic ownership:** future type-system work must extend the
+   canonical collector, inference, dataflow, narrowing, checker, and project
+   propagation pipeline. It must not restore a parallel `TypeStore` or inference
+   result.
 
 ---
 
 ## Non-Goals Until Explicitly Revisited
 
-- Claiming full TypeScript or JavaScript support
-- Running npm packages (only analysis, not execution)
-- Acting as a browser or Node.js replacement
-- Bundling packages (Phase 3 resolves but doesn't bundle)
-- Emitting optimized native code from the current AST (future Phase 5+)
-- Handling class members beyond what parser already accepts (out of scope for all phases)
-- Hoisting, TDZ, or other runtime-order diagnostics (ScopeAnalyzer enhancement in binder is possible future work)
+- Resolving filesystem paths, URLs, packages, import maps, or `node_modules` in
+  ViZG.
+- Publishing a filesystem/provider implementation as part of the core or ABI.
+- Claiming full TypeScript or JavaScript compatibility.
+- Running or bundling imported modules.
+- Acting as a browser, Node.js replacement, or package manager.
+- Starting HIR before Goal 196 is validated locally.
+- Emitting MIR, bytecode, objects, native code, or linking executables in this
+  frontend repository.
+- Restoring the removed prototype ABI or introducing compatibility shims for it.
