@@ -693,7 +693,9 @@ pub const Scanner = struct {
                     '`' => {}, // escaped backtick
                     '\\' => {}, // escaped backslash itself
                     '\x30' => { // escape code 0: invalid when followed by another digit.
-                        if (!self.isAtEnd() and self.peek().? >= '0' and self.peek().? <= '9') return LexicalError.InvalidEscapeSequence;
+                        if (self.peekN(1)) |next| {
+                            if (std.ascii.isDigit(next)) return LexicalError.InvalidEscapeSequence;
+                        }
                     },
                     '\x78' => { // \xNN — require exactly 2 hex digits following 'x'.
                         const p1 = self.index + 1;
@@ -785,7 +787,13 @@ pub const Scanner = struct {
                 const esc = self.peek().?;
                 const escape_len: usize = switch (esc) {
                     'n', 't', 'r', 'a', 'b', 'f', 'v' => 1,
-                    '\x27', '"', '`', '$', '\\', '\x30' => 1,
+                    '\x27', '"', '`', '$', '\\' => 1,
+                    '\x30' => blk: {
+                        if (self.peekN(1)) |next| {
+                            if (std.ascii.isDigit(next)) return LexicalError.InvalidEscapeSequence;
+                        }
+                        break :blk 1;
+                    },
                     '\x78' => blk: { // \xNN — require exactly 2 hex digits following 'x'.
                         const p1 = self.index + 1;
                         const p2 = self.index + 2;
@@ -1203,6 +1211,14 @@ test "scanner accepts valid escape sequences" {
         const tok = try scanner.nextToken();
         try std.testing.expectEqual(TokenType.StringLiteral, tok.kind);
     }
+    // \0 is valid when it is not followed by a decimal digit.
+    {
+        var scanner = Scanner.init("const s = \"a\\0b\";", .{});
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        try std.testing.expectEqual(TokenType.StringLiteral, (try scanner.nextToken()).kind);
+    }
 }
 
 test "scanner rejects invalid escape sequences" {
@@ -1236,6 +1252,14 @@ test "scanner rejects invalid escape sequences" {
         const tok = scanner.nextToken();
         try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
     }
+    // A decimal digit after \0 would form a legacy octal escape, which v1 rejects.
+    {
+        var scanner = Scanner.init("const s = \"\\01\";", .{});
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        _ = try scanner.nextToken();
+        try std.testing.expectError(LexicalError.InvalidEscapeSequence, scanner.nextToken());
+    }
 }
 
 test "scanner rejects trailing backslash before EOF" {
@@ -1258,6 +1282,12 @@ test "template accepts valid escapes" {
     try std.testing.expectEqual(TokenType.NoSubstitutionTemplate, tok.kind);
     try std.testing.expectEqualStrings("`a\\nb`", tok.lexeme);
     try std.testing.expect(tok.flags.has_escape);
+
+    var null_escape = Scanner.init("const t = `a\\0b`;", .{});
+    _ = try null_escape.nextToken();
+    _ = try null_escape.nextToken();
+    _ = try null_escape.nextToken();
+    try std.testing.expectEqual(TokenType.NoSubstitutionTemplate, (try null_escape.nextToken()).kind);
 }
 
 test "scanner preserves raw tagged template segment lexemes" {
@@ -1281,6 +1311,12 @@ test "template rejects invalid escape sequences" {
     _ = try scanner.nextToken(); // Equal
     const tok = scanner.nextToken();
     try std.testing.expectError(LexicalError.InvalidEscapeSequence, tok);
+
+    var legacy_octal = Scanner.init("const t = `\\01`;", .{});
+    _ = try legacy_octal.nextToken();
+    _ = try legacy_octal.nextToken();
+    _ = try legacy_octal.nextToken();
+    try std.testing.expectError(LexicalError.InvalidEscapeSequence, legacy_octal.nextToken());
 }
 
 test "scanner handles comments as skipped trivia by default" {

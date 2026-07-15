@@ -44,10 +44,25 @@ This represents `export type ... from` without treating type-only as a resolver
 kind. Requests preserve the raw source specifier, attributes, and source span.
 ViZG does not normalize or interpret the specifier.
 
+Each external export independently declares its namespace availability as
+`value`, `type`, or `both`. The zero flag set is invalid. Linking filters the
+descriptor against the namespace requested by the import; `both` therefore
+supports one imported class name in both `new ExternalClass()` and an
+`ExternalClass` type annotation. The C ABI represents the same contract with
+`VIZG_EXTERNAL_NAMESPACE_VALUE`, `VIZG_EXTERNAL_NAMESPACE_TYPE`, and
+`VIZG_EXTERNAL_NAMESPACE_BOTH`.
+
 `Project` is one-shot. A source identity is supplied once, `step()` analyzes
 reachable modules and returns one pending request at a time, every request is
 answered once, and `finish()` is terminal. There are no source revisions or
 stale-request states. A host needing a new source revision creates a new project.
+
+After `finish()`, `Project` owns one deterministic canonical diagnostic table.
+Every module-originated row carries its host-assigned `ModuleId` directly;
+logical names remain labels and are never identity lookup keys. The table maps
+single-file diagnostics to scanner, parser, binder, resolver, types, or checker,
+host request failures to module-host, and graph/link failures to project. The
+Zig and C result accessors read this same table without a late merge.
 
 All submitted slices are borrowed for the call and copied when retained.
 Project state and semantic output live until project destruction.
@@ -79,15 +94,43 @@ The result surface provides summary, modules, canonical diagnostics, graph
 edges, semantic imports, and semantic exports. Strings and spans returned from a
 result remain borrowed from the project until destruction.
 
-Every public pointer/length pair is validated before dereference. WASM offsets
-are checked against current linear memory; host structures and retained input
-must not overlap the exclusive project workspace. Range overflow, invalid tags,
-non-zero reserved bytes, invalid booleans, and invalid response order return a
-controlled status.
+Finalization computes the closure reachable from submitted roots through
+resolved local import edges. Only that closure is validated and retained in the
+final module, edge, diagnostic, import, and export views; unreachable
+pre-supplied source is excluded. The summary is partial when either reachable
+module-host work failed or semantic analysis produced a partial result.
 
-Configured limits cover source bytes, modules, requests, edges, diagnostics,
-graph depth, and semantic types. Limit or allocation exhaustion is terminal for
-that project.
+Semantic import and re-export rows retain their exact graph edge index. Local
+and external identities occupy separate fields, and every optional module,
+external-module, and edge value has an explicit `has_*` flag. Consumers must not
+interpret numeric zero as an absent identity or edge.
+
+Every public typed pointer is checked for C alignment and its complete range is
+validated before dereference or output initialization. Nested strings and typed
+arrays are validated before slices are formed. WASM offsets are checked against
+current linear memory; host input and output must not overlap the exclusive
+project workspace, and project creation also rejects config/output aliasing.
+Range overflow, invalid tags, non-zero reserved bytes, invalid booleans, and
+invalid response order return a controlled status. Pointer-validation failures
+return `INVALID_ARGUMENT` before project state or host output is mutated.
+
+Configured project-owned limits cover per-module and aggregate source bytes,
+modules, requests, edges, diagnostics, graph depth, and semantic types. Each
+owner checks its bound before copying retained data or growing a collection.
+Graph depth is computed after resolution as the shortest resolved-edge distance
+from any root; relaxation makes cycles converge and removes discovery-order and
+host-response-order dependence. Limit or allocation exhaustion is terminal for
+that project, and `vizg_project_limit_kind` identifies the exact limit category
+for the immediately preceding failed project call.
+
+Fallible project mutations are ownership-transactional even though allocation
+exhaustion remains terminal for the caller. Source copying, the frontend and
+semantic pipeline, derived metadata, requests and edges, external descriptors,
+project semantics, canonical diagnostics, and ABI snapshot preparation remove
+all partially retained allocations on failure. Semantic and ABI result pointers
+are published only after their complete commit. Exhaustive fault-injection tests
+run each scenario once successfully and then fail every allocation index,
+checking teardown and publication invariants at every boundary.
 
 The official export table is:
 
@@ -97,6 +140,7 @@ vizg_project_workspace_alignment
 vizg_project_workspace_overhead
 vizg_project_create
 vizg_project_destroy
+vizg_project_limit_kind
 vizg_project_add_source
 vizg_project_step
 vizg_project_respond_source
@@ -114,6 +158,12 @@ vizg_project_result_export
 Native, Android, and `wasm32-freestanding` builds use the same header and ABI.
 The WASM build exports linear memory and the allowlist above and imports no host
 service.
+
+This ABI v1 surface is frozen. Goal 202's complete source, lifecycle, hostile
+input, fault-injection, limit-boundary, native-symbol, and WASM-export audit is
+recorded in [`FINAL_AUDIT.md`](FINAL_AUDIT.md). Future incompatible contract
+changes require a new ABI version; HIR may consume this contract but must not
+silently change it.
 
 ### Module-host validation fixtures
 
@@ -250,7 +300,7 @@ The store interns anonymous structural shapes, retains declaration identity for 
 
 `SemanticIdentity` is a value-qualified identity: module ID, optional binder symbol ID, declaration node ID, namespace, and canonical type ID. `SemanticExport` covers value declarations, functions, classes, enums, interfaces, and type aliases. Aliases and named/star/default re-exports retain the target identity rather than inventing a second declaration identity.
 
-`SemanticImport` records named, default, namespace, type-only, external, unresolved, and cyclic-partial states with its local symbol, target identity when known, runtime-binding flag, and stable source span. Namespace imports use an owned structural object made from runtime exports. Descriptor-backed external imports retain external provenance and declared portable types; missing external members remain inspectable unresolved links and emit a stable graph diagnostic.
+`SemanticImport` records named, default, namespace, type-only, external, unresolved, and cyclic-partial states with its local symbol, target identity when known, runtime-binding flag, and stable source span. Namespace imports use an owned structural object made from runtime exports. Descriptor-backed external imports retain external provenance, declared portable types, and value/type namespace availability; missing external members remain inspectable unresolved links and emit a stable graph diagnostic.
 
 Propagation uses a bounded fixed point. Cyclic graphs terminate; known declarations remain available while incomplete links keep stable `unknown` or cyclic-partial states. The final checker consumes the propagated `TypeInfo` and never duplicates inference. Diagnostics mark the result partial but do not invalidate modules, identities, types, or links.
 

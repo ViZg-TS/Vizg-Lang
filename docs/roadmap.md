@@ -2,11 +2,12 @@
 
 This roadmap separates implemented frontend work from planned layers. It is not a release promise.
 
-## Active Closure Program: Portable Core And Official ABI v1
+## Closed Foundation: Portable Core And Official ABI v1
 
-Goals 189–196 are the active serial hard gates. The memory-first host-driven API
-uses `VIZG_ABI_VERSION = 1`; earlier unpublished surfaces were deleted without
-compatibility shims.
+Goals 189–202 are closed. The memory-first host-driven API uses
+`VIZG_ABI_VERSION = 1`; earlier unpublished surfaces were deleted without
+compatibility shims. The final repeated audit and exact command evidence are in
+[`FINAL_AUDIT.md`](FINAL_AUDIT.md).
 
 The responsibility split is fixed:
 
@@ -15,8 +16,9 @@ The responsibility split is fixed:
 - Concrete filesystem hosts in this repository are validation fixtures only.
 - The project ABI is one-shot; changed source requires a new project.
 
-ABI v1 becomes frozen, and HIR planning becomes authorized, only after the local
-Goal 196 validation matrix passes on the applied patch series.
+ABI v1 is frozen. Goal 202 passed the complete local validation matrix with no
+unresolved in-scope finding, so HIR planning is authorized. HIR remains
+unimplemented and cannot retroactively change the frozen ABI v1 contract.
 
 ## Current Implementation Snapshot: Frontend And Host-Resolved Module Graph
 
@@ -66,23 +68,19 @@ Planned, not implemented:
 - Prepare for interpretation, analysis, or code generation.
 - Reserve `VZG7xxx` diagnostics for lowering errors.
 
-### HIR Entry Gate — Pending Goal 196 Local Validation
+### HIR Entry Gate — Opened By Goal 202
 
-Do not begin HIR until the applied patch series passes every command listed in
-`docs/portable-core-official-abi-v1-audit.md`. Static patch construction alone
-does not close this gate.
-
-Required conditions include a complete result ABI, safe host/WASM ranges,
-transactional error paths, one-shot bounded lifecycle, orthogonal module
-metadata, deterministic limits, no public resolver policy, and a clean repeated
-audit.
+Goal 202 closed the gate after the applied patch series passed the complete
+local command matrix and repeated audit. HIR planning may begin from the frozen
+portable project and ABI v1 contracts. The verified conditions and limitations
+are recorded in [`FINAL_AUDIT.md`](FINAL_AUDIT.md).
 
 ### Superseded portable-core closure records
 
-The earlier Goal 187/188 closure records are superseded by Goals 189–196. They
-must not be used as evidence that the current ABI patch series passed locally.
-The only active closure checklist is
-[`portable-core-official-abi-v1-audit.md`](portable-core-official-abi-v1-audit.md).
+The earlier Goal 187/188 closure records and the Goals 189–196 pre-validation
+checklist are superseded by Goal 202's
+[`FINAL_AUDIT.md`](FINAL_AUDIT.md). They must not be used as current freeze
+evidence.
 
 ### Typed Semantics v2 closure verification — 2026-07-13
 
