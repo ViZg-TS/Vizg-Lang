@@ -10,6 +10,7 @@
 
 #define VIZG_PROJECT_DEFAULT_WORKSPACE_BYTES (8u * 1024u * 1024u)
 #define VIZG_PROJECT_DEFAULT_MAX_SOURCE_BYTES (1u * 1024u * 1024u)
+#define VIZG_PROJECT_DEFAULT_MAX_TOTAL_SOURCE_BYTES (16u * 1024u * 1024u)
 #define VIZG_PROJECT_DEFAULT_MAX_MODULES 256u
 #define VIZG_PROJECT_DEFAULT_MAX_REQUESTS 1024u
 #define VIZG_PROJECT_DEFAULT_MAX_EDGES 1024u
@@ -30,10 +31,24 @@ enum {
     VIZG_PROJECT_STATUS_INTERNAL_ERROR = 5,
 };
 
+typedef uint32_t Vizg_LimitKind;
+enum {
+    VIZG_LIMIT_NONE = 0,
+    VIZG_LIMIT_SOURCE_BYTES = 1,
+    VIZG_LIMIT_TOTAL_SOURCE_BYTES = 2,
+    VIZG_LIMIT_MODULES = 3,
+    VIZG_LIMIT_REQUESTS = 4,
+    VIZG_LIMIT_EDGES = 5,
+    VIZG_LIMIT_GRAPH_DEPTH = 6,
+    VIZG_LIMIT_DIAGNOSTICS = 7,
+    VIZG_LIMIT_SEMANTIC_GROWTH = 8,
+};
+
 typedef struct Vizg_ProjectConfig {
     void *workspace_ptr;
     size_t workspace_len;
     size_t max_source_bytes;
+    size_t max_total_source_bytes;
     size_t max_modules;
     size_t max_requests;
     size_t max_edges;
@@ -75,6 +90,14 @@ enum {
     VIZG_EXTERNAL_EXPORT_NAMESPACE = 2,
 };
 
+typedef uint8_t Vizg_ExternalNamespaceFlags;
+enum {
+    /* Exactly VALUE, TYPE, or BOTH is required for every external export. */
+    VIZG_EXTERNAL_NAMESPACE_VALUE = 1u,
+    VIZG_EXTERNAL_NAMESPACE_TYPE = 2u,
+    VIZG_EXTERNAL_NAMESPACE_BOTH = 3u,
+};
+
 
 typedef uint32_t Vizg_ProjectModuleState;
 enum {
@@ -107,7 +130,7 @@ enum {
     VIZG_PROJECT_LINK_CYCLIC_PARTIAL = 4,
 };
 
-typedef uint32_t Vizg_DiagnosticSeverity;
+typedef uint8_t Vizg_DiagnosticSeverity;
 enum {
     VIZG_DIAGNOSTIC_ERROR = 0,
     VIZG_DIAGNOSTIC_WARNING = 1,
@@ -115,18 +138,16 @@ enum {
     VIZG_DIAGNOSTIC_HINT = 3,
 };
 
-typedef uint32_t Vizg_DiagnosticPhase;
+typedef uint8_t Vizg_DiagnosticPhase;
 enum {
     VIZG_DIAGNOSTIC_PHASE_SCANNER = 0,
     VIZG_DIAGNOSTIC_PHASE_PARSER = 1,
     VIZG_DIAGNOSTIC_PHASE_BINDER = 2,
     VIZG_DIAGNOSTIC_PHASE_RESOLVER = 3,
-    VIZG_DIAGNOSTIC_PHASE_CFG = 4,
-    VIZG_DIAGNOSTIC_PHASE_MODULE_GRAPH = 5,
-    VIZG_DIAGNOSTIC_PHASE_TYPE_CHECKER = 6,
-    VIZG_DIAGNOSTIC_PHASE_LOWERING = 7,
-    VIZG_DIAGNOSTIC_PHASE_RUNTIME = 8,
-    VIZG_DIAGNOSTIC_PHASE_INTERNAL = 9,
+    VIZG_DIAGNOSTIC_PHASE_TYPES = 4,
+    VIZG_DIAGNOSTIC_PHASE_CHECKER = 5,
+    VIZG_DIAGNOSTIC_PHASE_MODULE_HOST = 6,
+    VIZG_DIAGNOSTIC_PHASE_PROJECT = 7,
 };
 
 typedef uint32_t Vizg_DiagnosticCode;
@@ -151,6 +172,8 @@ enum {
     VIZG_DIAGNOSTIC_MODULE_NOT_FOUND = 5001,
     VIZG_DIAGNOSTIC_MISSING_EXPORT = 5002,
     VIZG_DIAGNOSTIC_CIRCULAR_IMPORT = 5003,
+    VIZG_DIAGNOSTIC_MODULE_ACCESS_DENIED = 5004,
+    VIZG_DIAGNOSTIC_MODULE_HOST_FAILED = 5005,
     VIZG_DIAGNOSTIC_UNKNOWN_TYPE_NAME = 6004,
     VIZG_DIAGNOSTIC_TYPE_MISMATCH = 6005,
     VIZG_DIAGNOSTIC_UNKNOWN_PROPERTY = 6006,
@@ -219,7 +242,7 @@ typedef struct Vizg_ExternalExport {
     const char *name_ptr;
     size_t name_len;
     Vizg_ExternalExportKind kind;
-    uint8_t type_only;
+    Vizg_ExternalNamespaceFlags namespace_flags; /* Zero/unknown bits invalid. */
     uint8_t has_type_metadata;
     uint8_t reserved[2];
     Vizg_ExternalType type_metadata;
@@ -258,9 +281,11 @@ typedef struct Vizg_ProjectModuleInfo {
 
 typedef struct Vizg_ProjectDiagnostic {
     uint64_t module_id;
+    uint8_t has_module_id;
     Vizg_DiagnosticSeverity severity;
-    Vizg_DiagnosticCode code;
     Vizg_DiagnosticPhase phase;
+    uint8_t reserved;
+    Vizg_DiagnosticCode code;
     const char *message_ptr;
     size_t message_len;
     const char *logical_name_ptr;
@@ -278,7 +303,7 @@ typedef struct Vizg_ProjectEdgeInfo {
     Vizg_ProjectRequestOperation request_operation;
     Vizg_ProjectEdgeState state;
     uint8_t type_only;
-    uint8_t has_target;
+    uint8_t has_target_module;
     uint8_t has_external_target;
     uint8_t reserved;
     Vizg_ProjectSpan span;
@@ -287,27 +312,41 @@ typedef struct Vizg_ProjectEdgeInfo {
 typedef struct Vizg_ProjectImportInfo {
     uint64_t module_id;
     uint64_t target_module_id;
+    uint64_t external_module_id;
+    size_t edge_index;
     uint32_t target_type_id;
     Vizg_ProjectLinkState link_state;
+    Vizg_ProjectRequestOperation request_operation;
     const char *local_name_ptr;
     size_t local_name_len;
     const char *imported_name_ptr;
     size_t imported_name_len;
+    const char *specifier_ptr;
+    size_t specifier_len;
     uint8_t type_only;
     uint8_t runtime_binding;
-    uint8_t has_target;
-    uint8_t reserved;
+    uint8_t has_target_module;
+    uint8_t has_external_target;
+    uint8_t has_edge_index;
+    uint8_t has_semantic_target;
+    uint8_t reserved[2];
     Vizg_ProjectSpan span;
 } Vizg_ProjectImportInfo;
 
 typedef struct Vizg_ProjectExportInfo {
     uint64_t module_id;
+    uint64_t target_module_id;
+    uint64_t external_module_id;
+    size_t edge_index;
     uint32_t target_type_id;
     const char *name_ptr;
     size_t name_len;
     uint8_t type_only;
     uint8_t re_export;
-    uint8_t reserved[2];
+    uint8_t has_target_module;
+    uint8_t has_external_target;
+    uint8_t has_edge_index;
+    uint8_t reserved[3];
     Vizg_ProjectSpan span;
 } Vizg_ProjectExportInfo;
 
@@ -315,23 +354,30 @@ typedef struct Vizg_ProjectExportInfo {
 extern "C" {
 #endif
 
-/* Inputs are borrowed for one call and copied when retained. Step output is
- * borrowed until the next call on that project. The caller owns one aligned,
- * exclusive workspace. The implementation performs no filesystem access,
- * callbacks, libc allocation, or hidden heap allocation. Project handles are
- * single-threaded; independent handles and immutable result views may be used
- * in parallel. Results are owned by the project and remain valid until
- * vizg_project_destroy. INVALID_ARGUMENT and
- * INVALID_STATE reject input/ordering; LIMIT_EXCEEDED and OUT_OF_MEMORY are
- * not transactional retry guarantees. On exhaustion or INTERNAL_ERROR,
- * destroy and restart. A successful finish can report an inspectable partial
- * result through has_failures. */
+/* Inputs are borrowed for one call and copied when retained. Every typed input
+ * and output requires its C alignment, and every non-empty pointer/length range
+ * must be complete and overflow-safe. The caller owns one aligned, exclusive
+ * workspace; host input and output may not overlap it, and project creation
+ * also forbids config/output overlap. Pointer validation completes before any
+ * output write or project mutation, so INVALID_ARGUMENT leaves both unchanged.
+ * Step output is borrowed until the next call on that project. The
+ * implementation performs no filesystem access, callbacks, libc allocation,
+ * or hidden heap allocation. Project handles are single-threaded; independent
+ * handles and immutable result views may be used in parallel. Results are
+ * owned by the project and remain valid until vizg_project_destroy.
+ * INVALID_STATE rejects ordering; LIMIT_EXCEEDED and OUT_OF_MEMORY are not
+ * transactional retry guarantees. On exhaustion or INTERNAL_ERROR, destroy
+ * and restart. A successful finish can report an inspectable partial result
+ * through is_partial and has_module_failures. */
 uint32_t vizg_abi_version(void);
 size_t vizg_project_workspace_alignment(void);
 size_t vizg_project_workspace_overhead(void);
 Vizg_ProjectStatus vizg_project_create(
     const Vizg_ProjectConfig *config, Vizg_Project **out_project);
 void vizg_project_destroy(Vizg_Project *project);
+/* Exact category for the immediately preceding LIMIT_EXCEEDED result. Other
+ * project calls reset this value to VIZG_LIMIT_NONE. */
+Vizg_LimitKind vizg_project_limit_kind(Vizg_Project *project);
 Vizg_ProjectStatus vizg_project_add_source(
     Vizg_Project *project, const Vizg_ProjectSource *source);
 Vizg_ProjectStatus vizg_project_step(

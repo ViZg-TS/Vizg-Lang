@@ -8,6 +8,44 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Froze official ABI v1 after the clean Goal 202 final audit: 439 tests and the
+  validation, cross-target, native/Android, layout, symbol, hostile-host,
+  allocation-failure, and import-free freestanding WASM gates pass with no
+  unresolved in-scope finding. HIR planning is now authorized against this
+  frozen contract.
+- Hardened scanner/parser boundaries found by the final audit: `\\0` is accepted
+  only as the complete legacy-free null escape, parser depth limits cover all
+  recursive expression/type paths, disabled recovery stops after the first
+  parser error, and malformed caller-supplied token streams fail safely.
+- Fixed named and star external re-exports to preserve external module/edge
+  provenance and value/type/both namespace availability, including type-only
+  star exports and default exclusion.
+- External export descriptors now declare value, type, or combined namespace
+  availability across the portable API and official C ABI. Zero/unknown flags
+  are rejected, while combined class exports link in constructor expressions
+  and type annotations.
+- Added exhaustive allocation-failure injection across project creation, source
+  and frontend processing, semantic metadata, request/edge construction,
+  external descriptors/linking, project results, canonical diagnostics, and ABI
+  snapshot publication. Every injected failure tears down without leaks or
+  publishing an uncommitted result pointer.
+- Project limits are now enforced by their owning collections before retained
+  copies or capacity growth, including an aggregate source-byte cap and exact
+  stable C ABI limit categories. Graph depth now uses the canonical shortest
+  resolved path from any root, independent of discovery order and cycles.
+- Final project results now retain only the root-reachable module closure,
+  include reachable module-host failures in `is_partial`, and expose exact
+  external-import and re-export provenance through explicit presence flags and
+  graph edge indexes.
+- Hardened every official ABI v1 host-memory boundary on native and WASM:
+  typed inputs and outputs require C alignment and complete overflow-safe
+  ranges, nested arrays and strings are checked before use, and project
+  creation rejects config/output/workspace aliasing without mutating state or
+  output on invalid input.
+- Added one project-owned canonical diagnostic table shared by the Zig and C
+  result APIs, with explicit module identities, fixed public phases,
+  deterministic exact-row deduplication, and distinct not-found, access-denied,
+  and other module-host failure codes.
 - Added the Goals 189–196 portable-core completion changes: complete project
   result accessors, runtime ABI version reporting, hostile host/WASM range
   validation, transactional project rollback, a bounded one-shot lifecycle,

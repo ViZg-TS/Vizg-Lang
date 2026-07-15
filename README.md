@@ -51,7 +51,7 @@ Build the WebAssembly C ABI module with:
 zig build wasm
 ```
 
-This installs `zig-out/wasm-freestanding/vizg.wasm`, targeting
+This installs `zig-out/lib/vizg.wasm`, targeting
 `wasm32-freestanding`. It imports nothing: there is no libc, WASI, allocator,
 filesystem, or callback dependency. Its exact exports are linear `memory` and
 the official ABI v1 allowlist below. The build also runs a minimal JavaScript
@@ -120,6 +120,13 @@ The ABI is memory-first, host-driven, and one-shot:
 A project does not accept source revisions. Reusing a `ModuleId` with another
 source is `INVALID_STATE`. Hosts that need revisions create a new project.
 
+Each external export declares whether it exists in the value namespace, the
+type namespace, or both. C hosts set exactly one of
+`VIZG_EXTERNAL_NAMESPACE_VALUE`, `VIZG_EXTERNAL_NAMESPACE_TYPE`, or
+`VIZG_EXTERNAL_NAMESPACE_BOTH`; zero and unknown bits are invalid arguments.
+An export marked `BOTH` may back the same imported class name in both a
+constructor expression and a type annotation.
+
 The result API exposes:
 
 - summary flags and counts;
@@ -130,22 +137,79 @@ The result API exposes:
 - semantic import links;
 - semantic exports and re-export metadata.
 
+`finish` retains only the module closure reachable from submitted roots through
+resolved local imports. Pre-supplied modules outside that closure do not appear
+in module, edge, diagnostic, import, or export result views and cannot make an
+otherwise valid project fail. `summary.is_partial` is set when either reachable
+module-host work failed or the semantic result itself is partial.
+
+Allocation exhaustion is terminal, but every fallible project phase rolls back
+its in-progress ownership before returning. No semantic result or ABI result
+pointer is published until the corresponding operation commits, so callers can
+safely destroy a project after any `OUT_OF_MEMORY` result.
+
+Import and re-export rows carry explicit graph provenance. Read a module,
+external-module, or edge value only when its matching `has_*` flag is set; zero
+is a valid identifier/index value and is never an implicit sentinel. For
+example:
+
+```c
+Vizg_ProjectImportInfo import_info;
+if (vizg_project_result_import(result, index, &import_info) ==
+        VIZG_PROJECT_STATUS_OK &&
+    import_info.has_external_target) {
+    uint64_t external = import_info.external_module_id;
+    /* Use the host-assigned external identity. */
+}
+
+if (import_info.has_edge_index) {
+    Vizg_ProjectEdgeInfo source_edge;
+    if (vizg_project_result_edge(result, import_info.edge_index, &source_edge) ==
+        VIZG_PROJECT_STATUS_OK) {
+        /* source_edge identifies the exact discovered import/re-export edge. */
+    }
+}
+
+Vizg_ProjectExportInfo export_info;
+if (vizg_project_result_export(result, index, &export_info) ==
+        VIZG_PROJECT_STATUS_OK &&
+    export_info.re_export && export_info.has_edge_index) {
+    /* export_info.edge_index identifies the re-export's source edge. */
+}
+```
+
 The ABI performs no filesystem, URL, package, or network resolution. ViZG emits
 raw specifiers and import metadata; the runtime or consumer assigns `ModuleId`
 values and decides how requests are resolved. Logical names and specifiers are
 labels, never graph identities. External modules use a separate identity domain.
 
+Canonical project diagnostics use exactly the scanner, parser, binder,
+resolver, types, checker, module-host, and project phases. Module-originated
+rows carry an explicit host-assigned identity; the ABI never derives one from a
+logical name. Host responses distinguish module-not-found (`VZG5001`), access
+denied (`VZG5004`), and other host failures (`VZG5005`).
+
 All retained input is copied into the caller-supplied workspace. Configuration
-bounds cumulative source bytes, modules, requests, edges, diagnostics, graph
-depth, and semantic types. `INVALID_ARGUMENT` rejects malformed or overlapping
-host ranges. `INVALID_STATE` rejects lifecycle and response-order errors.
+bounds per-module and cumulative source bytes, modules, requests, edges,
+diagnostics, graph depth, and semantic types. Collection limits are checked
+before retained input is copied or collection capacity grows. Graph depth is the
+shortest resolved-edge distance from any root, independent of request and host
+response order. Every typed input and output must have its C alignment, and
+every non-empty range must be complete and overflow-safe. Project creation
+rejects config/output aliasing, and host input or output may not overlap the
+exclusive workspace. Pointer validation completes before any output write or
+project mutation, so `INVALID_ARGUMENT` leaves both unchanged. `INVALID_STATE`
+rejects lifecycle and response-order errors.
 `LIMIT_EXCEEDED` and `OUT_OF_MEMORY` are terminal for that project: destroy it
-and create a new one with corrected limits or capacity.
+and create a new one with corrected limits or capacity. After
+`LIMIT_EXCEEDED`, `vizg_project_limit_kind` reports the exact stable category
+for the immediately preceding project call.
 
 On `wasm32`, pointers and `size_t` values are unsigned 32-bit offsets/counts in
-exported linear memory. Every non-empty range must be in bounds and outside the
-exclusive project workspace when required. The freestanding module imports no
-WASI, libc, filesystem, allocator, or callback service.
+exported linear memory. Every non-empty range, including nested strings and
+typed arrays, must be in bounds and outside the exclusive project workspace
+when required. The freestanding module imports no WASI, libc, filesystem,
+allocator, or callback service.
 
 The exact ABI v1 symbol allowlist is:
 
@@ -155,6 +219,7 @@ vizg_project_workspace_alignment
 vizg_project_workspace_overhead
 vizg_project_create
 vizg_project_destroy
+vizg_project_limit_kind
 vizg_project_add_source
 vizg_project_step
 vizg_project_respond_source
@@ -173,7 +238,11 @@ vizg_project_result_export
 driver at `test/support/fs_validation_host.zig` is validation-only and is not
 part of the Zig package or C ABI.
 
-Run the local ABI gates before treating this contract as frozen:
+ABI v1 is frozen by the clean Goal 202 closure recorded in
+[`docs/FINAL_AUDIT.md`](docs/FINAL_AUDIT.md). Re-run its complete command matrix
+before changing any public structure, constant, lifecycle rule, or symbol.
+
+The narrow ABI gates are:
 
 ```sh
 zig build abi-symbols-test
@@ -270,5 +339,6 @@ docs/                     Contributor and architecture documentation
 - [Diagnostics](docs/diagnostics.md)
 - [CLI](docs/cli.md)
 - [Roadmap](docs/roadmap.md)
-- [Portable core and official ABI v1 final audit](docs/portable-core-official-abi-v1-audit.md)
+- [ABI v1 final audit and freeze record](docs/FINAL_AUDIT.md)
+- [Superseded Goals 189–196 audit checklist](docs/portable-core-official-abi-v1-audit.md)
 - [Changelog](CHANGELOG.md)

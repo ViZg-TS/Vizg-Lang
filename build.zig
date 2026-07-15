@@ -226,7 +226,7 @@ pub fn build(b: *std.Build) void {
     wasm_module.export_memory = true;
 
     const install_wasm = b.addInstallArtifact(wasm_module, .{
-        .dest_dir = .{ .override = .{ .custom = "wasm-freestanding" } },
+        .dest_dir = .{ .override = .{ .custom = "lib" } },
     });
     const wasm_host_test = b.addSystemCommand(&.{
         "node",
@@ -338,6 +338,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     abi_lifecycle_mod.addIncludePath(b.path("Lib"));
+    abi_lifecycle_mod.addCSourceFile(.{
+        .file = b.path("test/c_abi/hostile_pointer_probe.c"),
+        .flags = &.{"-std=c11"},
+    });
     abi_lifecycle_mod.linkLibrary(vizg_lib);
     const abi_lifecycle_tests = b.addRunArtifact(b.addTest(.{
         .root_module = abi_lifecycle_mod,
@@ -373,6 +377,7 @@ pub fn build(b: *std.Build) void {
         \\vizg_project_create
         \\vizg_project_destroy
         \\vizg_project_finish
+        \\vizg_project_limit_kind
         \\vizg_project_respond_external
         \\vizg_project_respond_failure
         \\vizg_project_respond_source
