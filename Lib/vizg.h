@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #define VIZG_ABI_VERSION 1u
+#define VIZG_MAX_SOURCE_LENGTH UINT32_MAX
 
 #define VIZG_PROJECT_DEFAULT_WORKSPACE_BYTES (8u * 1024u * 1024u)
 #define VIZG_PROJECT_DEFAULT_MAX_SOURCE_BYTES (1u * 1024u * 1024u)
@@ -42,11 +43,13 @@ enum {
     VIZG_LIMIT_GRAPH_DEPTH = 6,
     VIZG_LIMIT_DIAGNOSTICS = 7,
     VIZG_LIMIT_SEMANTIC_GROWTH = 8,
+    VIZG_LIMIT_PARSE_DEPTH = 9,
 };
 
 typedef struct Vizg_ProjectConfig {
     void *workspace_ptr;
     size_t workspace_len;
+    /* Must be no greater than VIZG_MAX_SOURCE_LENGTH. */
     size_t max_source_bytes;
     size_t max_total_source_bytes;
     size_t max_modules;
@@ -203,6 +206,7 @@ typedef struct Vizg_ProjectSource {
     const char *logical_name_ptr;
     size_t logical_name_len;
     const char *source_ptr;
+    /* Must be no greater than VIZG_MAX_SOURCE_LENGTH. */
     size_t source_len;
     Vizg_ProjectSourceKind kind;
     uint8_t is_root;
@@ -210,6 +214,7 @@ typedef struct Vizg_ProjectSource {
 } Vizg_ProjectSource;
 
 typedef struct Vizg_ProjectSpan {
+    /* Source byte offsets and locations use the ABI's stable uint32_t width. */
     uint32_t start;
     uint32_t end;
     uint32_t line;
@@ -265,8 +270,9 @@ typedef struct Vizg_ProjectResultSummary {
     uint8_t is_partial;
     uint8_t has_syntax_errors;
     uint8_t has_semantic_errors;
+    uint8_t has_project_errors;
     uint8_t has_module_failures;
-    uint8_t reserved[4];
+    uint8_t reserved[3];
 } Vizg_ProjectResultSummary;
 
 typedef struct Vizg_ProjectModuleInfo {
@@ -368,7 +374,11 @@ extern "C" {
  * INVALID_STATE rejects ordering; LIMIT_EXCEEDED and OUT_OF_MEMORY are not
  * transactional retry guarantees. On exhaustion or INTERNAL_ERROR, destroy
  * and restart. A successful finish can report an inspectable partial result
- * through is_partial and has_module_failures. */
+ * through is_partial and the syntax, semantic, project, and module-host error
+ * flags in Vizg_ProjectResultSummary. If creation returns LIMIT_EXCEEDED for
+ * max_source_bytes, it returns a destroy-only handle so the caller can inspect
+ * VIZG_LIMIT_SOURCE_BYTES. Other failures retain the validation and output
+ * behavior documented above. */
 uint32_t vizg_abi_version(void);
 size_t vizg_project_workspace_alignment(void);
 size_t vizg_project_workspace_overhead(void);

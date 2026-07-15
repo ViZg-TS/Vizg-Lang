@@ -4,6 +4,7 @@ pub const abi = @import("abi.zig");
 
 /// Version sentinel — host must compare \`vizg_abi_version()\` against this.
 pub const VIZG_ABI_VERSION = abi.VIZG_ABI_VERSION;
+pub const VIZG_MAX_SOURCE_LENGTH = abi.VIZG_MAX_SOURCE_LENGTH;
 
 /// Project construction / lifecycle types.
 pub const Vizg_ProjectStatus = abi.Vizg_ProjectStatus;

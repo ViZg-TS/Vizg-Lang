@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const vizg = @import("vizg-impl");
 
 pub const VIZG_ABI_VERSION: u32 = 1;
+pub const VIZG_MAX_SOURCE_LENGTH: usize = vizg.tokens.MAX_SOURCE_LENGTH;
 pub const Vizg_ExternalNamespaceFlags = u8;
 pub const VIZG_EXTERNAL_NAMESPACE_VALUE: Vizg_ExternalNamespaceFlags = 1;
 pub const VIZG_EXTERNAL_NAMESPACE_TYPE: Vizg_ExternalNamespaceFlags = 2;
@@ -29,6 +30,7 @@ pub const Vizg_LimitKind = enum(u32) {
     GRAPH_DEPTH = 6,
     DIAGNOSTICS = 7,
     SEMANTIC_GROWTH = 8,
+    PARSE_DEPTH = 9,
 };
 
 pub const Vizg_ProjectConfig = extern struct {
@@ -111,8 +113,9 @@ pub const Vizg_ProjectResultSummary = extern struct {
     is_partial: u8,
     has_syntax_errors: u8,
     has_semantic_errors: u8,
+    has_project_errors: u8,
     has_module_failures: u8,
-    reserved: [4]u8,
+    reserved: [3]u8,
 };
 
 pub const Vizg_ProjectModuleInfo = extern struct {
@@ -208,6 +211,7 @@ const OwnedProject = struct {
     last_limit: Vizg_LimitKind = .NONE,
     result_view: OwnedProjectResult = undefined,
     result_ready: bool = false,
+    creation_limited: bool = false,
     destroyed: bool = false,
 
     fn deinit(self: *OwnedProject) void {
@@ -335,6 +339,17 @@ fn sourceInputsOutsideWorkspace(owned: *const OwnedProject, input: *const Vizg_P
         inputOutsideWorkspace(owned, input.source_ptr, input.source_len);
 }
 
+fn validSourceScalars(input: *const Vizg_ProjectSource) bool {
+    return sourceKind(input.kind) != null and input.is_root <= 1 and
+        input.reserved[0] == 0 and input.reserved[1] == 0 and input.reserved[2] == 0;
+}
+
+fn sourceLengthStatus(owned: *OwnedProject, source_len: usize) ?Vizg_ProjectStatus {
+    if (source_len > VIZG_MAX_SOURCE_LENGTH or source_len > owned.project.limits.max_source_bytes)
+        return limitStatus(owned, .SOURCE_BYTES);
+    return null;
+}
+
 fn diagnosticSeverity(value: vizg.diagnostics.Severity) u8 {
     return switch (value) {
         .@"error" => 0,
@@ -413,7 +428,7 @@ fn span(value: vizg.project.SourceSpan) Vizg_ProjectSpan {
 fn moduleSource(input: *const Vizg_ProjectSource) ?vizg.ModuleSource {
     if (!validAlignedHostArray(u8, input.logical_name_ptr, input.logical_name_len) or
         !validAlignedHostArray(u8, input.source_ptr, input.source_len) or
-        input.is_root > 1 or input.reserved[0] != 0 or input.reserved[1] != 0 or input.reserved[2] != 0)
+        !validSourceScalars(input))
     {
         return null;
     }
@@ -429,7 +444,6 @@ fn statusFromError(owned: *OwnedProject, err: anyerror) Vizg_ProjectStatus {
     if (limitKindFromError(err)) |kind| return limitStatus(owned, kind);
     return switch (err) {
         error.OutOfMemory => .OUT_OF_MEMORY,
-        error.ParseRecursionLimitReached => .LIMIT_EXCEEDED,
         error.PendingRequests,
         error.IncompleteModules,
         error.ForeignRequest,
@@ -460,6 +474,7 @@ fn limitKindFromError(err: anyerror) ?Vizg_LimitKind {
         error.GraphDepthLimitExceeded => .GRAPH_DEPTH,
         error.DiagnosticLimitExceeded => .DIAGNOSTICS,
         error.SemanticTypeLimitExceeded, error.TypeComplexityLimit => .SEMANTIC_GROWTH,
+        error.ParseRecursionLimitReached => .PARSE_DEPTH,
         else => null,
     };
 }
@@ -517,11 +532,12 @@ pub fn projectCreate(config: ?*const Vizg_ProjectConfig, out_project: [*c]?*Vizg
     owned.fba = .init(storage[projectWorkspaceOverhead()..]);
     owned.step_attributes = .empty;
     owned.workspace_len = storage.len;
-    owned.last_limit = .NONE;
+    owned.last_limit = if (args.max_source_bytes > VIZG_MAX_SOURCE_LENGTH) .SOURCE_BYTES else .NONE;
     owned.result_ready = false;
+    owned.creation_limited = owned.last_limit != .NONE;
     owned.destroyed = false;
     owned.project = .initWithLimits(owned.fba.allocator(), .{
-        .max_source_bytes = args.max_source_bytes,
+        .max_source_bytes = @min(args.max_source_bytes, VIZG_MAX_SOURCE_LENGTH),
         .max_total_source_bytes = args.max_total_source_bytes,
         .max_modules = args.max_modules,
         .max_requests = args.max_requests,
@@ -531,6 +547,7 @@ pub fn projectCreate(config: ?*const Vizg_ProjectConfig, out_project: [*c]?*Vizg
         .max_semantic_types = args.max_semantic_types,
     });
     out_project[0] = @ptrCast(owned);
+    if (owned.last_limit != .NONE) return .LIMIT_EXCEEDED;
     return .OK;
 }
 
@@ -546,11 +563,14 @@ pub fn projectLimitKind(project: ?*Vizg_Project) callconv(.c) Vizg_LimitKind {
 
 pub fn projectAddSource(project: ?*Vizg_Project, input: ?*const Vizg_ProjectSource) callconv(.c) Vizg_ProjectStatus {
     const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
     beginProjectCall(owned);
     const args = input orelse return .INVALID_ARGUMENT;
     if (!validAlignedHostObject(Vizg_ProjectSource, args) or
         !inputOutsideWorkspace(owned, args, @sizeOf(Vizg_ProjectSource)) or
-        !sourceInputsOutsideWorkspace(owned, args)) return .INVALID_ARGUMENT;
+        !validSourceScalars(args)) return .INVALID_ARGUMENT;
+    if (sourceLengthStatus(owned, args.source_len)) |status| return status;
+    if (!sourceInputsOutsideWorkspace(owned, args)) return .INVALID_ARGUMENT;
     const source = moduleSource(args) orelse return .INVALID_ARGUMENT;
     if (args.is_root == 1) {
         owned.project.addRoot(source) catch |err| return statusFromError(owned, err);
@@ -562,6 +582,7 @@ pub fn projectAddSource(project: ?*Vizg_Project, input: ?*const Vizg_ProjectSour
 
 pub fn projectStep(project: ?*Vizg_Project, out_step: ?*Vizg_ProjectStep) callconv(.c) Vizg_ProjectStatus {
     const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
     beginProjectCall(owned);
     const output = out_step orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_ProjectStep, output, 1) or
@@ -600,12 +621,15 @@ pub fn projectStep(project: ?*Vizg_Project, out_step: ?*Vizg_ProjectStep) callco
 
 pub fn projectRespondSource(project: ?*Vizg_Project, request_id: u64, input: ?*const Vizg_ProjectSource) callconv(.c) Vizg_ProjectStatus {
     const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
     beginProjectCall(owned);
     const args = input orelse return .INVALID_ARGUMENT;
     if (!validAlignedHostObject(Vizg_ProjectSource, args) or
         !inputOutsideWorkspace(owned, args, @sizeOf(Vizg_ProjectSource)) or
-        !sourceInputsOutsideWorkspace(owned, args)) return .INVALID_ARGUMENT;
+        !validSourceScalars(args)) return .INVALID_ARGUMENT;
     if (args.is_root != 0) return .INVALID_ARGUMENT;
+    if (sourceLengthStatus(owned, args.source_len)) |status| return status;
+    if (!sourceInputsOutsideWorkspace(owned, args)) return .INVALID_ARGUMENT;
     const source = moduleSource(args) orelse return .INVALID_ARGUMENT;
     owned.project.respondSource(.init(request_id), source) catch |err| return statusFromError(owned, err);
     return .OK;
@@ -654,6 +678,7 @@ fn validExternalExport(owned: *const OwnedProject, item: *const Vizg_ExternalExp
 
 pub fn projectRespondExternal(project: ?*Vizg_Project, request_id: u64, input: ?*const Vizg_ExternalModule) callconv(.c) Vizg_ProjectStatus {
     const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
     beginProjectCall(owned);
     const args = input orelse return .INVALID_ARGUMENT;
     if (!validAlignedHostObject(Vizg_ExternalModule, args) or
@@ -708,6 +733,7 @@ pub fn projectRespondExternal(project: ?*Vizg_Project, request_id: u64, input: ?
 
 pub fn projectRespondFailure(project: ?*Vizg_Project, request_id: u64, failure_kind: u32) callconv(.c) Vizg_ProjectStatus {
     const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
     beginProjectCall(owned);
     switch (failure_kind) {
         0 => owned.project.respondNotFound(.init(request_id)) catch |err| return statusFromError(owned, err),
@@ -720,6 +746,7 @@ pub fn projectRespondFailure(project: ?*Vizg_Project, request_id: u64, failure_k
 
 pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResult) callconv(.c) Vizg_ProjectStatus {
     const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
     beginProjectCall(owned);
     if (!validAlignedMutableHostArray(?*Vizg_ProjectResult, out_result, 1) or
         !inputOutsideWorkspace(owned, out_result, @sizeOf(?*Vizg_ProjectResult))) return .INVALID_ARGUMENT;
@@ -738,11 +765,12 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
         .edge_count = owned.project.edges().len,
         .import_count = if (semantic_result) |value| value.imports.len else 0,
         .export_count = if (semantic_result) |value| value.exports.len else 0,
-        .is_partial = @intFromBool(finished.has_failures or if (semantic_result) |value| value.is_partial else false),
+        .is_partial = @intFromBool(false),
         .has_syntax_errors = @intFromBool(false),
         .has_semantic_errors = @intFromBool(false),
-        .has_module_failures = @intFromBool(finished.has_failures),
-        .reserved = .{ 0, 0, 0, 0 },
+        .has_project_errors = @intFromBool(false),
+        .has_module_failures = @intFromBool(false),
+        .reserved = .{ 0, 0, 0 },
     }, .owner = owned };
     result.summary.has_syntax_errors = @intFromBool(
         resultHasPhase(result, .scanner) or resultHasPhase(result, .parser),
@@ -750,6 +778,14 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
     result.summary.has_semantic_errors = @intFromBool(
         resultHasPhase(result, .binder) or resultHasPhase(result, .resolver) or
             resultHasPhase(result, .types) or resultHasPhase(result, .checker),
+    );
+    result.summary.has_project_errors = @intFromBool(resultHasPhase(result, .project));
+    result.summary.has_module_failures = @intFromBool(resultHasPhase(result, .module_host));
+    result.summary.is_partial = @intFromBool(
+        result.summary.has_syntax_errors != 0 or
+            result.summary.has_semantic_errors != 0 or
+            result.summary.has_project_errors != 0 or
+            result.summary.has_module_failures != 0,
     );
     owned.result_ready = true;
     out_result[0] = @ptrCast(result);
@@ -936,6 +972,7 @@ test "public diagnostic ABI mappings are stable" {
 }
 
 test "public limit ABI values and exact error mappings are stable" {
+    try std.testing.expectEqual(@as(usize, std.math.maxInt(u32)), VIZG_MAX_SOURCE_LENGTH);
     try std.testing.expectEqual(@as(u32, 0), @intFromEnum(Vizg_LimitKind.NONE));
     try std.testing.expectEqual(@as(u32, 1), @intFromEnum(Vizg_LimitKind.SOURCE_BYTES));
     try std.testing.expectEqual(@as(u32, 2), @intFromEnum(Vizg_LimitKind.TOTAL_SOURCE_BYTES));
@@ -945,6 +982,7 @@ test "public limit ABI values and exact error mappings are stable" {
     try std.testing.expectEqual(@as(u32, 6), @intFromEnum(Vizg_LimitKind.GRAPH_DEPTH));
     try std.testing.expectEqual(@as(u32, 7), @intFromEnum(Vizg_LimitKind.DIAGNOSTICS));
     try std.testing.expectEqual(@as(u32, 8), @intFromEnum(Vizg_LimitKind.SEMANTIC_GROWTH));
+    try std.testing.expectEqual(@as(u32, 9), @intFromEnum(Vizg_LimitKind.PARSE_DEPTH));
 
     const mappings = [_]struct { err: anyerror, kind: Vizg_LimitKind }{
         .{ .err = error.SourceLimitExceeded, .kind = .SOURCE_BYTES },
@@ -957,6 +995,7 @@ test "public limit ABI values and exact error mappings are stable" {
         .{ .err = error.DiagnosticLimitExceeded, .kind = .DIAGNOSTICS },
         .{ .err = error.SemanticTypeLimitExceeded, .kind = .SEMANTIC_GROWTH },
         .{ .err = error.TypeComplexityLimit, .kind = .SEMANTIC_GROWTH },
+        .{ .err = error.ParseRecursionLimitReached, .kind = .PARSE_DEPTH },
     };
     for (mappings) |mapping| try std.testing.expectEqual(mapping.kind, limitKindFromError(mapping.err).?);
     try std.testing.expect(limitKindFromError(error.OutOfMemory) == null);
