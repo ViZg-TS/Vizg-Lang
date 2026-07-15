@@ -2,14 +2,11 @@
 
 *Created: 2026-07-10 — Informed by V8 engine architecture, JavaScriptCore Inspector protocol, TypeScript compiler design.*
 
-> **Superseded and non-executable.** This historical plan does not authorize
-> implementation work. Goals 174–188 replace the former portability sequence
-> and freeze the active architecture as a portable core with host-driven
-> modules and the official memory-first ABI v1. The earlier unpublished ABI was
-> removed. No shim, deprecated alias, compatibility library, or parallel ABI is
-> retained. Goal 188 closed on 2026-07-14, so HIR planning is authorized. This
-> historical document remains non-executable and does not authorize HIR
-> implementation.
+> **Mixed historical and active plan.** Goals through 207 are retained as closed
+> design and audit context. Goal 207 froze the portable project API and official
+> ABI v1. Goals 208–231 are the active executable HIR v1 plan and must be completed
+> in strict order. See `docs/FINAL_AUDIT.md`, `docs/hir-v1-design.md`, and
+> `docs/hir-v1-lowering-matrix.md`.
 
 ## Architecture Reference
 
@@ -64,10 +61,12 @@ Vizg maps this to its existing analysis layers since vizg is **analysis-only** (
 | `src/semantics/checker.zig` | Checker v2 | Validates the supported semantic model through the canonical compatibility relation | ✅ Complete for supported syntax |
 | `src/semantics/type_inference.zig` | Canonical Expression Inference | Infers expressions, calls, access, operators, aggregates, and function returns into the owned semantic result | ✅ Complete for supported syntax |
 | `src/semantics/dataflow.zig` | CFG Dataflow | Computes deterministic block facts and narrowing program points | ✅ Complete for supported syntax |
-| `src/modules/graph.zig` | Module Graph | Recursive analysis of local imports with cache | ✅ Partial — no package.json or node_modules lookup |
-| `src/modules/resolver.zig` | Import Resolution | Relative path resolution + extension list | ⚠️ ~50% — relative imports work; external/package resolution stubbed |
-| `src/modules/linker.zig` | Cross-file Linking | Named/default/namespace import linking to exports | ✅ Complete for local imports |
-| `src/modules/externals.zig` | External Registry | Manual externals list (e.g., "node:fs", "lodash") | ⚠️ ~30% — manual registry only, no auto-detection from package.json |
+| `src/project/contracts.zig` | Host Contract | Opaque module/request identities and source/external response descriptors | ✅ Implemented |
+| `src/project/session.zig` | Project Session | One-shot host-driven module ingestion, graph construction, and semantic completion | ✅ Implemented; Goal 207 audit closed |
+| `src/project/state_machine.zig` | Request State Machine | Deterministic pull-based module requests and host responses | ✅ Implemented; Goal 207 audit closed |
+| `src/project/graph.zig` | Project Graph | Host-resolved source/external edges and discovered module metadata | ✅ Implemented; Goal 207 audit closed |
+| `src/modules/linker.zig` | Cross-file Linking | Named/default/namespace import linking to host-supplied module identities | ✅ Implemented for supported syntax |
+| `test/support/fs_validation_host.zig` | Validation Fixture | Test/reference filesystem provider used only to exercise the host API | 🧪 Test-only; not ViZG module resolution |
 
 ### Diagnostic Code Ranges Currently Allocated
 
@@ -138,211 +137,1170 @@ vizg TypeChecker v2:       →     src/semantics/checker.zig
 
 ---
 
-## Phase 2: HIR / Lowering Layer
+## Phase 2: HIR v1 — Canonical Typed Lowering
+
+### Status
+
+**Active executable plan.** Goal 207 froze the frontend, project semantics and official ABI v1. Goals 208–231 define the first HIR implementation and must be completed in strict numerical order.
+
+Normative design documents:
+
+- [`docs/hir-v1-design.md`](docs/hir-v1-design.md) — ownership, legal structure, invariants, textual form and TypeScript-to-HIR examples.
+- [`docs/hir-v1-lowering-matrix.md`](docs/hir-v1-lowering-matrix.md) — exhaustive AST/type/operator/control/module equivalence table and coverage checklist.
 
 ### Purpose
-Bridge between frontend AST and any backend (emitter, interpreter, optimizer) by normalizing control flow and expression forms. Mirrors V8's Ignition bytecode generation — post-analysis, before execution/optimization.
 
-### Architecture — Direct V8 Mapping
+Transform the immutable typed project result into one canonical, verified, target-independent HIR.
 
 ```txt
-V8: TypedAST                → vizg: AST from frontend pipeline (with optional TypeChecker output)
-V8: BytecodeGenerator        → vizg: src/hir/hir_builder.zig (lowering pass)
-    ├── emit constants       →     fold literals into HIRConstants pool
-    ├── normalize control    →     convert if/else → ternary, flatten loops to while-goto form
-    └── SSA-like renaming    →     rename shadowed variables per basic block (SSA-lite)
-V8: MacroAssembler           → vizg: future emitter layer (JavaScript? native?) — not in scope
-
-HIR representation choice: textual over binary. Visual inspection is the use case,
-not performance for execution — matches how TypeScript's --showConfig and other
-analysis tools expose IRs for readability.
+ProjectSemanticResult
+→ eligibility gate
+→ raw internal HIR
+→ legal HIR operations
+→ ANF temporary normalization
+→ explicit blocks and terminators
+→ mandatory local canonicalization
+→ verification
+→ immutable HirProject
 ```
 
-### Tasks
+HIR v1 is:
 
-#### 2.1 Create `src/hir/hir_node.zig` — Compact IR Node Set
-
-Keep only what any backend needs:
-- Declarations (let/const/var with initializers)
-- Assignments (`=` and compound `+=`, etc.)
-- Calls (function + arguments, no parameter list inline)
-- Member access (`.prop`) and element access (`[expr]`)
-- Binary ops (all operators — needed for all computation)
-- Conditions/branches (if/else → conditional branch to blocks)
-- Loops (while/for → while-goto with condition block + loop back)
-- Returns
-- Block scopes (mirroring CFG basic blocks)
-
-Drop: comments, import/export syntax sugar (moved to module layer), type annotations (already in types layer), AST node IDs mapped to HIR node indices.
-
-```zig
-pub const HirNodeKind = enum {
-    declaration,        // let x = init;
-    assignment,         // x = expr;
-    call,               // foo(a, b);
-    member_access,      // obj.prop
-    element_access,     // arr[idx]
-    binary_op,          // a + b
-    conditional,        // if/else
-    while_loop,         // while
-    for_loop,           // for (init; cond; step) → lowered to while-goto form
-    return_statement,   // return expr;
-    block,              // group of sequential statements
-};
-
-pub const HirNode = struct {
-    id: usize,
-    kind: HirNodeKind,
-    // Various field sets depending on `kind` — discriminated union.
-};
+```txt
+typed
+ANF-like
+block-based
+binding-aware
+module-aware
+source-traceable
+independent of optimize mode
 ```
 
-#### 2.2 Create `src/hir/hir_builder.zig` — Lowering Pass
+HIR v1 is not:
 
-Walk AST and emit HIR nodes using existing CFG structure (from `cfg.zig`) as the basic block decomposition guide:
-- Use CFG's already-built basic blocks to split long function bodies into manageable scopes
-- Map each AST node to its HIR equivalent, preserving spans for diagnostics
-- Handle expression statement stripping (`expr;` → pure side-effect call or discard result)
-
-#### 2.3 Create `src/hir/normalization.zig` — Control Flow Normalization
-
-- Hoist declarations out of conditional branches (C++ semantics: "declarations in a block are scoped to that block" — normalize to single-decl-at-function-entry + separate assignments in branches)
-- Convert simple if-else with same LHS into ternary when both branches are pure expressions (`if(cond){a=1}else{a=2}` → `a = cond ? 1 : 2;`)
-- Flatten nested loops — optional, keep simpler form for now
-
-#### 2.4 CLI Integration — New Command
-
-```sh
-vizg hir <file>           # print HIR in readable textual form (like tsc --showConfig)
-vizg hir --brief <file>   # single-line per statement
+```txt
+an AST copy
+full SSA
+MIR
+bytecode
+runtime
+backend
+memory-management policy
+GC or RC
 ```
 
-In `src/main.zig`: add new subcommand handler that calls into a new `print_hir` helper.
-
-### V8 Reference Mapping
-- Ignition bytecode → vizg HIR: both are post-analysis normalized forms
-- Constants pool → could be extended to constant-fold literals in the HIR pass later
-- TurboFan IR (SSA form) → optional future step if optimization is ever needed; not for Phase 2
-
-### Files Changed (Phase 2)
-| File | Action | Notes |
-|------|--------|-------|
-| `src/hir/hir_node.zig` | New | Compact IR node set, basic blocks mirroring CFG |
-| `src/hir/hir_builder.zig` | New | Lower AST → HIR using existing CFG as guide |
-| `src/hir/normalization.zig` | New | Control flow normalization (hoisting, ternary conversion) |
-| `src/hir/print_hir.zig` | New | Human-readable textual representation |
-| `src/main.zig` | Edit | Add `hir` subcommand |
-| `docs/frontend-pipeline.md` | Edit | Document new HIR layer in pipeline diagram |
+Full SSA, global optimization, layout, async state machines, exception ABI, memory management, bytecode and native lowering belong to a separate MIR/runtime project.
 
 ---
 
-## Phase 3: Module Graph Expansion — Package Lookup & package.json Resolution
+### Goal 208 — Freeze HIR v1 Contract And Lowering Matrix
 
-### Purpose
-Add proper external module semantics following Node.js resolution: `package.json` lookup, `node_modules` traversal, and subpath exports — so vizg can analyze projects with real dependency trees.
+**Depends on:** Goal 207.
 
-### Architecture — Direct V8/Node Mapping
+#### Work
 
-V8 executes modules loaded through Node's resolver algorithm (inherited by JSC when running JS). Vizg mirrors this *resolution* phase only — it never executes the code:
+- Add `docs/hir-v1-design.md` as the normative architectural contract.
+- Add `docs/hir-v1-lowering-matrix.md` as the exhaustive lowering checklist.
+- Define legal HIR versus illegal AST-only forms.
+- Define the HIR/MIR boundary and explicitly exclude all memory-management decisions.
+- Record the future reduction of pipeline syntax to ordinary calls without enabling the currently unsupported parser feature.
+- Remove or supersede every contradictory Phase 2 design statement, including `SSA-lite`, declaration hoisting, `if`-to-ternary rewriting, and final `while_loop`/`for_loop` HIR nodes.
+
+#### Acceptance
 
 ```txt
-V8/Node: Module._resolveFilename() → vizg: src/modules/resolver.zig extended
-    ├── 1. relative specifier ("./foo")         → existing resolveRelative() ✅ already works
-    ├── 2. package.json "main"/"module"/exports → NEW: read JSON from node_modules/<pkg>/package.json
-    ├── 3. built-in node: protocol             → NEW: track as external, mark known
-    └── 4. fallback to .ts/.js extension list → existing with extensions config ✅
-
-Node resolution algorithm (simplified):
-1. If specifier starts with "./" or "../": resolve relative path ✅ already implemented
-2. Otherwise it's a package name:
-   a. Walk up from source file dir looking for node_modules/<pkg>/package.json
-   b. Read "main" field → entry point; if missing, use index.js/.ts
-   c. If "exports" map present: match subpath (e.g., "./*": "./src/*.ts")
-   d. If still not found after 3 levels up, mark as unresolved external
+[ ] One unambiguous HIR v1 contract exists.
+[ ] Every current NodeData and TypeNodeData variant has a documented outcome.
+[ ] Every supported operator and assignment family has a documented outcome.
+[ ] HIR and MIR responsibilities do not overlap.
+[ ] No GC, RC, heap, root-map or safepoint field exists in the HIR contract.
 ```
 
-### Tasks
+---
 
-#### 3.1 Create `src/modules/package_json.zig` — Minimal JSON Parsing
+### Goal 209 — Establish `src/hir/` Package, Ownership And Identity Domains
 
-Vizg only needs three fields: `"main"`, `"module"`, `"type"`. No full JSON parser required:
+**Depends on:** Goal 208.
 
-```zig
-const PackageJson = struct {
-    main: ?[]const u8,       // entry point filename (e.g., "index.ts")
-    module: ?[]const u8,     // ESM entry point override
-    @"type": []const u8,      // "commonjs" or "module" — affects import vs require semantics
+#### Work
 
-    pub fn init(allocator: std.mem.Allocator, contents: []const u8) !PackageJson?
-    //   - scan for known keys by substring search (avoid full parser)
-    //   - return null if file doesn't exist or has no relevant fields
-};
+Create the package skeleton:
+
+```txt
+src/hir/root.zig
+src/hir/model.zig
+src/hir/ids.zig
+src/hir/result.zig
+src/hir/tests.zig
 ```
 
-Cache parsed results per directory path to avoid repeated reads on module-graph traversal.
+Define opaque project-local IDs:
 
-#### 3.2 Extend `src/modules/resolver.zig` — Package Lookup
-
-Add a new resolution path after relative resolution fails:
-
-```zig
-// New method (returns resolved file path or marks as external)
-pub fn resolveSpecifier(
-    self: Resolver,
-    from_path: []const u8,
-    specifier: []const u8,
-) !ResolvedImport {
-    return if (isRelativeSpecifier(specifier)) .{
-        // existing relative resolution path — already works
-    } else {
-        try lookupPackage(allocator, io, from_dir, specifier);
-    };
-}
-
-fn lookupPackage(...) !?[]const u8
-//   - walk up from `from_dir` looking for node_modules/<specifier>
-//   - read package.json (max 5 levels deep — prevents DoS)
-//   - apply "main" / "module" → "<dir>/<file>" or use "exports" map if present
+```txt
+EntityId
+FunctionId
+BlockId
+InstructionId
+ValueId
+BindingId
+PlaceId
+RegionId
+OriginId
 ```
 
-#### 3.3 Extend `src/modules/loader.zig` — Package Integration
+Define `HirResult` ownership:
 
-- After loading entry file, scan all imports for non-relative specifiers
-- For each one, attempt package resolution via new resolver method
-- Add resolved packages to the module graph with a new import edge status `.resolved_package` (distinguish from `.external` which means "not found")
-- Existing `externals.zig` Registry handles manual externals; keep for backward compat
+- immutable after successful construction;
+- project-owned;
+- valid until project destruction;
+- shares project-local `ModuleId`, semantic declaration identity and `TypeId` domains;
+- does not alter frozen C ABI v1;
+- has explicit deinitialization for all internal allocations.
 
-#### 3.4 Update Linker — External Handling
+#### Acceptance
 
-Distinguish three external states in `ImportEdge.status`:
-```zig
-pub const ImportStatus = enum {
-    local,                    // resolved to a source file ✅ already exists
-    @"package",               // NEW: resolved to npm package entry point (from package.json)
-    external_known_builtin,   // e.g., "node:path" — known Node.js built-in
-    external_unknown,         // truly unresolved import ❌ existing .external splits here
-};
+```txt
+[ ] Empty HirResult can be created and destroyed without leaks.
+[ ] Invalid IDs have one canonical sentinel or checked representation.
+[ ] IDs from another project/context are rejected in debug/verifier paths.
+[ ] Semantic-result lifetime requirements are explicit and tested.
+[ ] No filesystem, target, backend or runtime dependency enters `src/hir/`.
 ```
 
-#### 3.5 CLI Flags — BuildOptions Extension
+---
 
-Add options to `loader.BuildOptions`:
-- `--externals-dir <path>` — override where to look for node_modules (default: CWD + traverse up)
-- `--modules-root <path>` — override modules search root
-- These are stored in the loader but don't change resolver's core relative-path logic
+### Goal 210 — Implement Core HIR Schema And Legal Operation Set
 
-### V8 Reference Mapping
-- Node's `Module._resolveFilename()` algorithm → vizg's package resolver (direct mapping per step above)
-- JSC's internal module loader uses similar resolution but with Webpack-style bundling awareness — useful if vizg ever needs to support bundle-aware analysis; out of scope for Phase 3
+**Depends on:** Goal 209.
 
-### Files Changed (Phase 3)
-| File | Action | Notes |
-|------|--------|-------|
-| `src/modules/package_json.zig` | New | Parse package.json fields via substring search |
-| `src/modules/resolver.zig` | Edit | Add resolveSpecifier() with package lookup fallback |
-| `src/modules/loader.zig` | Edit | Scan imports, route through package resolution |
-| `src/modules/graph.zig` | Edit | Handle new `.package` and `.external_known_builtin` import statuses |
-| `src/main.zig` | Edit | Add --externals-dir / --modules-root CLI flags |
+#### Work
+
+Implement the core records:
+
+```txt
+HirProject / HirResult
+HirModule
+HirEntity
+HirFunction
+HirBinding
+HirCapture
+HirBlock
+HirBlockParameter
+HirInstruction
+HirTerminator
+HirPlace
+HirRegion
+HirConstant
+EffectSet
+```
+
+Implement the legal operation families documented in `hir-v1-design.md` without implementing lowering yet.
+
+Key rules:
+
+- immutable temporary `ValueId` results;
+- mutable language `BindingId` values;
+- semantic `PlaceId` references, never physical addresses;
+- block parameters for temporary merge values;
+- no final structured `if`, `switch`, loop, arrow, assignment, update or optional-chain nodes;
+- no machine types or memory-management metadata.
+
+#### Acceptance
+
+```txt
+[ ] Core HIR can represent every legal shape in the design examples.
+[ ] Operation constructors validate immediate arity/payload invariants.
+[ ] Every operation has a conservative EffectSet definition.
+[ ] The schema contains no AST union payloads as executable fallbacks.
+[ ] The schema contains no SSA phi node for mutable source bindings.
+```
+
+---
+
+### Goal 211 — Add HIR Eligibility Gate, Diagnostics And Limits
+
+**Depends on:** Goal 210.
+
+#### Work
+
+Create:
+
+```txt
+src/hir/eligibility.zig
+src/hir/diagnostics.zig
+src/hir/limits.zig
+```
+
+Before building HIR, reject projects/modules with:
+
+- blocking frontend or semantic diagnostics;
+- unsupported executable syntax;
+- incomplete required module semantics;
+- invalid type/symbol/module identities;
+- partial-result categories that are not executable;
+- exceeded HIR input or output limits.
+
+Allocate stable `VZG7xxx` diagnostics beginning with the codes in the design document.
+
+Add pre-growth limits for entities, functions, blocks, instructions, values, bindings, places, regions, origins, trace events and rewrites.
+
+#### Acceptance
+
+```txt
+[ ] Ineligible projects produce diagnostics and no public partial HirResult.
+[ ] Unsupported recovery nodes cannot enter lowering.
+[ ] Every growth limit is checked before insertion/allocation.
+[ ] Limit kind, summary and diagnostic remain consistent.
+[ ] External modules may provide bindings/types without fabricated bodies.
+```
+
+---
+
+### Goal 212 — Lower Project, Module And Entity Shells
+
+**Depends on:** Goal 211.
+
+#### Work
+
+Create:
+
+```txt
+src/hir/builder.zig
+src/hir/lower_project.zig
+src/hir/lower_module.zig
+```
+
+Build deterministic project/module shells:
+
+- one `HirModule` per reachable source module;
+- exact host-supplied `ModuleId` preservation;
+- one module-initialization function per source module;
+- dependency/import/export descriptors from the linked semantic graph;
+- deterministic entity/function ordering;
+- external binding/entity references without executable bodies.
+
+Do not resolve specifiers or inspect the filesystem.
+
+#### Acceptance
+
+```txt
+[ ] Multi-module shell output is deterministic.
+[ ] Module initialization dependencies match the project graph.
+[ ] Import/export bindings preserve live semantic identities.
+[ ] Logical names are descriptive only and never used as identity.
+[ ] Module cycles build finite shells without recursive duplication.
+```
+
+---
+
+### Goal 213 — Lower Constants, Bindings, Declarations And Type Erasure
+
+**Depends on:** Goal 212.
+
+#### Work
+
+Implement lowering for:
+
+```txt
+Program / BlockStatement shell traversal
+Literal
+Identifier
+VariableDeclaration / VariableDeclarator
+Function declaration shell references
+TypeAliasDeclaration
+InterfaceDeclaration
+AsExpression
+SatisfiesExpression
+NonNullExpression
+all TypeNodeData
+```
+
+Define binding kinds and initialization states for:
+
+```txt
+var
+let
+const
+parameter
+catch
+import
+function
+class
+enum
+synthetic
+```
+
+Erase type-only executable wrappers while retaining `TypeId`, symbol and origin metadata where configured.
+
+#### Acceptance
+
+```txt
+[ ] Every identifier read uses its resolved semantic binding/entity.
+[ ] No spelling-based lookup occurs during lowering.
+[ ] `var`, `let` and `const` initialization/TDZ distinctions remain represented.
+[ ] Type aliases, interfaces and type assertions emit no executable HIR.
+[ ] Type-erasure snapshots preserve values and optional provenance.
+```
+
+---
+
+### Goal 214 — Implement ANF Expression Builder And Evaluation Order
+
+**Depends on:** Goal 213.
+
+#### Work
+
+Create:
+
+```txt
+src/hir/lower_expression.zig
+src/hir/anf_builder.zig
+```
+
+Enforce:
+
+- every non-trivial expression produces a named `ValueId`;
+- instruction operands are already lowered values/constants/allowed handles;
+- left-to-right source evaluation order;
+- expression statements discard only the final value, never effects;
+- sequence expressions lower all members in order;
+- block parameters merge temporary expression values;
+- temporary values are defined exactly once.
+
+#### Acceptance
+
+```txt
+[ ] Nested effectful calls produce deterministic left-to-right instructions.
+[ ] No legal instruction contains an unevaluated nested AST expression.
+[ ] Sequence expressions retain all effects and return only the last value.
+[ ] Branch-produced expression values merge through typed block parameters.
+[ ] Temporary-value use-before-definition is impossible through builder APIs.
+```
+
+---
+
+### Goal 215 — Implement Places, Simple Assignment, Compound Assignment And Updates
+
+**Depends on:** Goal 214.
+
+#### Work
+
+Create:
+
+```txt
+src/hir/lower_place.zig
+src/hir/lower_assignment.zig
+```
+
+Implement semantic places:
+
+```txt
+binding place
+static property place
+computed element place
+super property place
+```
+
+Lower:
+
+```txt
+=
++= -= *= /= %= **=
+&= |= ^= <<= >>= >>>=
+++ --
+delete
+```
+
+The base/key of a property target must evaluate exactly once. Prefix/postfix updates must return the correct old/new value.
+
+Logical assignments are deferred to Goal 216 because they require control flow.
+
+#### Acceptance
+
+```txt
+[ ] Side-effectful assignment targets evaluate exactly once.
+[ ] LHS evaluation order relative to RHS matches language semantics.
+[ ] Prefix/postfix result differences are tested.
+[ ] No final assignment/update AST operation survives.
+[ ] PlaceId never exposes a physical pointer or storage layout.
+```
+
+---
+
+### Goal 216 — Lower Operators, Short Circuit, Logical Assignment And Optional Chains
+
+**Depends on:** Goal 215.
+
+#### Work
+
+Implement all current unary and binary operators using semantic operation modes from typed semantics.
+
+Lower control-sensitive forms:
+
+```txt
+&&
+||
+??
+&&=
+||=
+??=
+?:
+optional member access
+optional element access
+optional call
+```
+
+Rules:
+
+- truthiness uses explicit `to_boolean`;
+- nullish checks use explicit `is_nullish`;
+- unselected operands/arms are not evaluated;
+- optional computed keys and arguments are not evaluated on nullish paths;
+- loose and strict equality remain distinct;
+- no target numeric representation is selected.
+
+#### Acceptance
+
+```txt
+[ ] Every operator token supported by the parser has a lowering rule or a controlled eligibility failure.
+[ ] `&&`, `||` and `??` differ correctly.
+[ ] Logical assignments load their place once and store only on the selected path.
+[ ] Optional chains preserve single evaluation and result `undefined` on the nullish path.
+[ ] Pipeline syntax remains rejected but its future call reduction remains documented.
+```
+
+---
+
+### Goal 217 — Lower Access, Calls, Receivers, Construction, Meta And Dynamic Import
+
+**Depends on:** Goal 216.
+
+#### Work
+
+Lower:
+
+```txt
+MemberExpression
+ElementAccessExpression
+CallExpression
+NewExpression
+ThisExpression
+SuperExpression
+MetaProperty
+ImportExpression
+```
+
+Use distinct canonical operations for:
+
+```txt
+ordinary call
+method call with receiver
+super method/constructor call
+construct
+dynamic import
+import.meta
+new.target
+```
+
+Preserve callee/base/key/argument evaluation order and receiver semantics.
+
+#### Acceptance
+
+```txt
+[ ] `obj.method()` does not degrade into receiver-less `call(get_property(...))`.
+[ ] Computed method keys evaluate once.
+[ ] Optional method calls preserve receiver on the taken path.
+[ ] `new` remains distinct from `call`.
+[ ] Dynamic import remains runtime-semantic and performs no ViZG resolution.
+```
+
+---
+
+### Goal 218 — Lower Objects, Arrays, Spread, Templates And RegExp
+
+**Depends on:** Goal 217.
+
+#### Work
+
+Lower:
+
+```txt
+ObjectExpression / ObjectProperty kinds
+ArrayExpression
+SpreadElement in object/array/call contexts
+TemplateExpression
+TaggedTemplateExpression
+RegExpLiteral
+```
+
+Required distinctions:
+
+```txt
+array hole versus explicit undefined
+object spread versus iterable spread
+method/accessor definition versus data property
+tagged-template site identity
+regexp creation per evaluation semantics
+computed key/value source order
+```
+
+#### Acceptance
+
+```txt
+[ ] Object properties and spreads execute in source order.
+[ ] Array holes remain distinguishable.
+[ ] Spread lowering is context-specific.
+[ ] Tagged templates preserve raw/cooked data and stable source-site identity.
+[ ] RegExp lowering preserves pattern, flags, origin and observable identity creation.
+```
+
+---
+
+### Goal 219 — Lower Functions, Parameters, Closures And Captures
+
+**Depends on:** Goal 218.
+
+#### Work
+
+Unify:
+
+```txt
+FunctionDeclaration
+FunctionExpression
+ArrowFunctionExpression
+object/class method
+constructor
+getter
+setter
+async/generator flags
+```
+
+Implement parameter plans:
+
+```txt
+ordinary argument read
+default initializer branch
+rest argument collection
+optional marker erasure
+parameter-property handoff to class initialization
+```
+
+Consume resolved capture information or derive it only from already resolved semantic identities. Do not re-resolve names.
+
+#### Acceptance
+
+```txt
+[ ] All function-like forms use one canonical function body representation.
+[ ] Arrow lexical receiver semantics are explicit.
+[ ] Default initializers run per call and in parameter order.
+[ ] Rest parameters collect from the correct index.
+[ ] Captures are explicit without choosing environment layout.
+```
+
+---
+
+### Goal 220 — Lower `if`, Ternary And Loop Families To Blocks
+
+**Depends on:** Goal 219.
+
+#### Work
+
+Lower:
+
+```txt
+IfStatement
+ConditionalExpression
+WhileStatement
+DoWhileStatement
+ForStatement(classic)
+ForStatement(in)
+ForStatement(of)
+```
+
+Use explicit blocks, branches, jumps and iterator/enumeration operations.
+
+For `for...of`, establish close-on-abrupt-exit region semantics. `for await...of` is completed in Goal 223.
+
+#### Acceptance
+
+```txt
+[ ] No structured if/loop node survives.
+[ ] Classic `for` continue targets update, not condition.
+[ ] `do...while` body executes before the first condition.
+[ ] `for...in` is not rewritten as `Object.keys`.
+[ ] `for...of` preserves iterator closing on abrupt completion.
+```
+
+---
+
+### Goal 221 — Lower `switch`, Labels, `break` And `continue`
+
+**Depends on:** Goal 220.
+
+#### Work
+
+Lower `switch` into:
+
+```txt
+one discriminant evaluation
+ordered strict-equality case-test chain
+explicit default target
+case-body blocks
+fallthrough edges
+resolved exit target
+```
+
+Erase label spellings after resolving break/continue target identities.
+
+Support nested labeled loops and switches without target ambiguity.
+
+#### Acceptance
+
+```txt
+[ ] Discriminant evaluates once.
+[ ] Case expressions evaluate lazily and in source order.
+[ ] Default works in any source position.
+[ ] Fallthrough is represented only by CFG edges.
+[ ] Labeled break/continue reaches the exact resolved target.
+```
+
+---
+
+### Goal 222 — Lower Exceptions, Catch And Finally Regions
+
+**Depends on:** Goal 221.
+
+#### Work
+
+Implement:
+
+```txt
+HirRegion exception/cleanup model
+TryStatement
+CatchClause
+FinallyClause
+leave_region
+resume_completion
+pending completion kinds
+```
+
+Pending completions:
+
+```txt
+normal
+return
+throw
+break
+continue
+```
+
+Do not duplicate finally bodies at each exit and do not choose a native exception ABI.
+
+#### Acceptance
+
+```txt
+[ ] `finally` runs for normal and every abrupt completion.
+[ ] A completion created inside finally replaces the pending completion.
+[ ] Catch binding scope and initialization are correct.
+[ ] Illegal region entry/exit is rejected.
+[ ] No runtime/backend exception representation is encoded.
+```
+
+---
+
+### Goal 223 — Lower Async, Generators, Yield And Async Iteration Semantics
+
+**Depends on:** Goal 222.
+
+#### Work
+
+Lower and validate:
+
+```txt
+async function flags
+await
+generator flags
+yield
+yield*
+async generators
+for await...of
+```
+
+Retain semantic suspension operations and async iterator protocol. Do not construct state machines, frames or resume ABI.
+
+#### Acceptance
+
+```txt
+[ ] `await` appears only in valid async contexts.
+[ ] `yield`/`yield*` appear only in valid generator contexts.
+[ ] `for await...of` preserves async iterator acquisition, await and close semantics.
+[ ] Suspension operations carry source origin and result TypeId.
+[ ] No state-machine blocks or runtime frame layout are introduced.
+```
+
+---
+
+### Goal 224 — Lower Classes, Enums And Complete Module Initialization
+
+**Depends on:** Goal 223.
+
+#### Work
+
+Implement canonical entities and initialization plans for:
+
+```txt
+ClassDeclaration / ClassExpression
+ClassField
+ClassMethod
+constructors/getters/setters
+extends evaluation
+instance field initialization
+static field initialization
+parameter properties
+EnumDeclaration / EnumMember
+module top-level execution
+imports/exports/re-exports/export-all
+```
+
+Preserve source order, class TDZ, derived-constructor `super()` constraints, live module bindings and enum reverse mapping.
+
+Do not define prototype/object layout or constructor ABI.
+
+#### Acceptance
+
+```txt
+[ ] Class syntax lowers to one class entity plus canonical function/init plans.
+[ ] Field/static initialization order is covered by tests.
+[ ] Parameter properties initialize at the correct constructor point.
+[ ] Numeric and string enum behavior differs correctly.
+[ ] Module initialization and live export binding behavior are deterministic across cycles.
+```
+
+---
+
+### Goal 225 — Implement Mandatory Canonicalization
+
+**Depends on:** Goal 224.
+
+#### Work
+
+Create:
+
+```txt
+src/hir/canonicalize.zig
+src/hir/rewrite.zig
+```
+
+Implement deterministic worklist-based rewrites:
+
+```txt
+safe primitive literal folding
+literal branch to jump
+trivial copy elimination
+unreachable block removal
+legal jump-only block merging
+identical merge-value collapse
+unused proven-pure instruction removal
+empty-return normalization
+```
+
+Canonicalization runs regardless of Zig optimize mode.
+
+Explicitly exclude full SSA, SCCP, global DCE, CSE/GVN/PRE, LICM, inlining, specialization, escape analysis, layout and memory management.
+
+#### Acceptance
+
+```txt
+[ ] Rewrites converge or return controlled VZG7009.
+[ ] Each rewrite reduces a documented structural measure or is otherwise proven non-cyclic.
+[ ] Origins remain traceable after replacement/merging.
+[ ] Effectful or identity-creating operations are never removed as pure.
+[ ] Canonical output is identical across build optimization modes.
+```
+
+---
+
+### Goal 226 — Implement Structural, Semantic And Canonical HIR Verifier
+
+**Depends on:** Goal 225.
+
+#### Work
+
+Create:
+
+```txt
+src/hir/verifier.zig
+```
+
+Verify:
+
+```txt
+ID ownership and ranges
+module/entity/function ownership
+block terminators and targets
+block parameter arity/types
+ValueId single definition and valid dominance/block flow
+binding and place validity
+instruction type contracts
+function-context restrictions
+exception/cleanup region nesting
+absence of illegal AST-only forms
+mandatory canonical-form invariants
+```
+
+Run verification after raw legal lowering and after canonicalization.
+
+#### Acceptance
+
+```txt
+[ ] Corruption tests exist for every ID and operation family.
+[ ] Invalid graphs return diagnostics instead of panics/undefined behavior.
+[ ] Verifier accepts all canonical snapshots.
+[ ] Verifier rejects every deliberately non-canonical test fixture.
+[ ] Verification is deterministic and bounded.
+```
+
+---
+
+### Goal 227 — Implement Source Provenance And Optional Lowering Trace
+
+**Depends on:** Goal 226.
+
+#### Work
+
+Create:
+
+```txt
+src/hir/origin.zig
+src/hir/trace.zig
+```
+
+Debug levels:
+
+```txt
+none
+minimal
+full
+```
+
+Preserve:
+
+```txt
+ModuleId
+primary source span
+principal and contributing AST NodeIds
+original syntax kind
+semantic declaration identity
+TypeId
+parent origin
+lowering rule
+synthetic reason
+```
+
+Full mode records transformation events without bloating executable node payloads.
+
+#### Acceptance
+
+```txt
+[ ] Every executable instruction and terminator has a valid OriginId in minimal/full mode.
+[ ] Multi-origin rewrites preserve all relevant source contributors.
+[ ] Erased syntax can appear in full lowering trace without executable nodes.
+[ ] Debug metadata can be disabled without changing executable HIR.
+[ ] No origin record reconstructs module identity from a path.
+```
+
+---
+
+### Goal 228 — Add Deterministic HIR Printer And Reference Snapshots
+
+**Depends on:** Goal 227.
+
+#### Work
+
+Create:
+
+```txt
+src/hir/printer.zig
+src/hir/snapshot_test.zig
+```
+
+Printer modes:
+
+```txt
+canonical
+brief
+with_types
+with_origins
+with_full_trace
+```
+
+Output is a stable debug/test representation, not a serialized ABI.
+
+Add snapshots for every major example in the design document and every lowering-matrix family.
+
+#### Acceptance
+
+```txt
+[ ] Same project produces byte-identical canonical text across repeated runs.
+[ ] Ordering never depends on hash-map iteration or pointer addresses.
+[ ] Types and origins can be enabled independently.
+[ ] Snapshots cover all supported NodeData families.
+[ ] Printer handles invalid IDs through controlled debug output and never out-of-bounds access.
+```
+
+---
+
+### Goal 229 — Integrate HIR Into Project APIs And Close Lowering-Matrix Coverage
+
+**Depends on:** Goal 228.
+
+#### Work
+
+- Add the Zig project/session entry point that derives HIR from a completed semantic project result.
+- Keep C ABI v1 unchanged.
+- Define terminal/idempotent behavior for repeated HIR derivation within the one-shot project lifecycle.
+- Add project-owned immutable HIR access through Zig APIs.
+- Mark every row in `hir-v1-lowering-matrix.md` with implementation/test evidence.
+- Update `src/root.zig`, `docs/frontend-pipeline.md`, `docs/architecture.md`, `docs/roadmap.md` and README as appropriate.
+
+Optional CLI printing may consume the Zig API, but it must remain an adapter and must not introduce filesystem policy into HIR.
+
+#### Acceptance
+
+```txt
+[ ] Completed semantic project can derive exactly one canonical HirResult.
+[ ] Repeated derivation is bounded and does not create unlimited snapshots.
+[ ] Project destruction invalidates and frees HIR exactly once.
+[ ] Frozen ABI v1 symbol/layout gates remain unchanged.
+[ ] Every lowering-matrix row has passing evidence or a deliberate unsupported marker.
+```
+
+---
+
+### Goal 230 — HIR Limits, Fuzzing, Adversarial Cases And Cross-Mode Reproducibility
+
+**Depends on:** Goal 229.
+
+#### Work
+
+Test adversarial inputs:
+
+```txt
+deep expression nesting
+wide blocks and modules
+large switch dispatch
+nested labels/loops
+nested optional chains and logical assignments
+deep try/finally nesting
+abrupt iterator exits
+module cycles
+very large provenance/trace volume
+canonicalization rewrite stress
+corrupted HIR verifier fixtures
+```
+
+Run equivalent HIR snapshot tests in supported Zig optimize modes and portable build gates where HIR is compiled.
+
+#### Acceptance
+
+```txt
+[ ] No unbounded recursion or growth on configured adversarial fixtures.
+[ ] Every limit fails before growth and reports VZG7010 consistently.
+[ ] Canonical HIR output is reproducible across optimize modes.
+[ ] Fuzz/property tests preserve verifier invariants.
+[ ] Existing frontend, ABI, Android and wasm-freestanding gates remain green.
+```
+
+---
+
+### Goal 231 — Final HIR v1 Audit And Freeze
+
+**Depends on:** Goal 230.
+
+#### Work
+
+Perform a clean-revision audit covering:
+
+```txt
+contract compliance
+complete lowering matrix
+ownership and teardown
+limits and diagnostics
+semantic preservation tests
+canonicalization convergence
+verifier completeness
+deterministic textual snapshots
+source provenance
+module-host boundary
+C ABI v1 non-regression
+native/Android/wasm build gates
+```
+
+Create `docs/HIR_V1_AUDIT.md` with exact commit SHA, clean-tree status, commands and real outputs.
+
+Recommended tag:
+
+```sh
+git tag -a vizg-hir-v1 -m "ViZG canonical typed HIR v1"
+```
+
+#### Acceptance
+
+```txt
+[ ] Goals 208–231: PASS.
+[ ] Unresolved HIR P0/P1/P2 findings: 0.
+[ ] Every supported lowering-matrix row is closed.
+[ ] Every legal operation has verifier and printer coverage.
+[ ] HIR contains no MIR/backend/memory-management policy.
+[ ] Frozen official ABI v1 remains unchanged.
+[ ] Exact audited revision and tag/reference are recorded.
+[ ] MIR/runtime planning is authorized only after this freeze.
+```
+
+---
+
+### Required implementation order
+
+```txt
+208 Contract and matrix
+ ↓
+209 Ownership and IDs
+ ↓
+210 Core schema
+ ↓
+211 Eligibility, diagnostics and limits
+ ↓
+212 Project/module shells
+ ↓
+213 Bindings, constants and erasure
+ ↓
+214 ANF evaluation order
+ ↓
+215 Places and assignment
+ ↓
+216 Operators and conditional expressions
+ ↓
+217 Calls, access and construction
+ ↓
+218 Aggregates, templates and regexp
+ ↓
+219 Functions and closures
+ ↓
+220 If and loops
+ ↓
+221 Switch and labeled control
+ ↓
+222 Exceptions and finally
+ ↓
+223 Async/generators
+ ↓
+224 Classes, enums and module initialization
+ ↓
+225 Mandatory canonicalization
+ ↓
+226 Verifier
+ ↓
+227 Provenance and trace
+ ↓
+228 Printer and snapshots
+ ↓
+229 Project integration and matrix closure
+ ↓
+230 Robustness and reproducibility
+ ↓
+231 Final audit and freeze
+```
+
+No goal may silently implement work assigned to a later goal in a way that freezes an unreviewed contract. Earlier scaffolding may reserve types/APIs, but behavioral closure occurs only in its assigned goal.
+
+### Planned files
+
+| File | Action | Responsibility |
+|---|---|---|
+| `src/hir/root.zig` | New | Public Zig exports for the HIR package |
+| `src/hir/ids.zig` | New | Opaque HIR identity types |
+| `src/hir/model.zig` | New | Core immutable HIR schema and operation set |
+| `src/hir/result.zig` | New | Ownership and project result lifecycle |
+| `src/hir/eligibility.zig` | New | Lowering gate |
+| `src/hir/diagnostics.zig` | New | `VZG7xxx` diagnostics |
+| `src/hir/limits.zig` | New | Bounded HIR resource model |
+| `src/hir/builder.zig` | New | Internal mutable construction state |
+| `src/hir/lower_project.zig` | New | Project/entity ordering |
+| `src/hir/lower_module.zig` | New | Modules, imports, exports and initialization |
+| `src/hir/lower_expression.zig` | New | General expression lowering |
+| `src/hir/anf_builder.zig` | New | Named temporary/value sequencing |
+| `src/hir/lower_place.zig` | New | Semantic lvalue/place construction |
+| `src/hir/lower_assignment.zig` | New | Assignment/update lowering |
+| `src/hir/lower_control.zig` | New | Branches, loops, switch and labels |
+| `src/hir/lower_function.zig` | New | Functions, parameters and closures |
+| `src/hir/lower_class.zig` | New | Classes and enums |
+| `src/hir/lower_exception.zig` | New | Exception and cleanup regions |
+| `src/hir/lower_suspend.zig` | New | Async/generator semantic operations |
+| `src/hir/canonicalize.zig` | New | Mandatory canonicalization driver |
+| `src/hir/rewrite.zig` | New | Local convergent rewrite rules |
+| `src/hir/verifier.zig` | New | Structural/semantic/canonical verification |
+| `src/hir/origin.zig` | New | Source provenance side table |
+| `src/hir/trace.zig` | New | Optional full lowering trace |
+| `src/hir/printer.zig` | New | Stable textual HIR |
+| `src/hir/tests.zig` | New | Unit and integration tests |
+| `docs/hir-v1-design.md` | New | Normative architecture and examples |
+| `docs/hir-v1-lowering-matrix.md` | New | Exhaustive lowering equivalence matrix |
+| `docs/HIR_V1_AUDIT.md` | Goal 231 | Final revision evidence |
+
+---
+
+## Runtime Module Resolution — Outside ViZG
+
+### Boundary
+
+ViZG does not resolve module specifiers. It discovers import/export syntax,
+emits an environment-neutral request, accepts a host-provided response, and
+links the supplied `ModuleId` into the project graph.
+
+```txt
+ViZG:
+    importer ModuleId
+    raw specifier
+    operation: import | re-export | dynamic import
+    type_only flag
+    import attributes
+    source span
+
+Runtime / consumer:
+    resolve filesystem, URL, package, memory, or virtual-module policy
+    assign the canonical ModuleId
+    provide source bytes, external metadata, or a controlled failure
+```
+
+The following are explicitly outside the ViZG core and official ABI:
+
+- relative or absolute path normalization;
+- extension probing and `index.*` lookup;
+- `package.json`, `node_modules`, import maps, or package exports;
+- URL fetching, network policy, caches, credentials, or redirects;
+- symlink, filesystem sandbox, or path-traversal policy;
+- runtime-specific builtin-module detection.
+
+A filesystem provider may exist under `test/support/` or inside the CLI only as
+a validation fixture proving that an external consumer can drive the API. It
+must not be exported from `src/root.zig`, the C ABI, or public documentation as
+a ViZG resolver. Core module-system tests should use an in-memory provider.
+
+### Active module work
+
+The active module work is limited to the provider-independent contract:
+
+1. discover imports, exports, and re-exports from source;
+2. preserve raw specifier, operation, `type_only`, attributes, and spans;
+3. emit deterministic `RequestId` values;
+4. accept host-supplied `ModuleId` and source/external responses;
+5. reject stale, duplicate, foreign, or invalid responses;
+6. construct the graph and propagate semantic identities;
+7. expose diagnostics and graph metadata through the official ABI;
+8. enforce resource limits independent of resolver policy.
+
+No package-resolution phase exists in ViZG. A future runtime may implement one
+without changing the core module contract.
 
 ---
 
@@ -456,64 +1414,92 @@ Document in `docs/protocol.md`:
 
 ## Implementation Order & Dependencies
 
-```
-Phase 1 (type checker v2) — no phase dependencies; start here
-├── Prereqs: existing types model, semantics type_info, diagnostics VZG6xxx codes
-└── Parallelizable with Phase 3 (module graph expansion); both touch frontend but independently
-│
-Phase 3 (module graph expansion) — depends only on current module layer
-├── Required: existing module graph, resolver, linker
-└── Can run alongside Phase 1; no upstream dependencies on other phases
-│
-Phase 2 (HIR / lowering) — requires typed AST from Phase 1 to be meaningful
-└── Deps on Phase 1 completed: HIR lowerer needs type info to annotate nodes properly
-│
-Phase 4 (inspector protocol) — depends on all three above; interfaces all layers via public APIs
-├── Required: all phases above for anything useful to expose
-└── Run last; exposes frontend results, type-checking output, and module graph as CDP-like messages
+```txt
+Goals 189–207
+└── closed portable frontend, project semantics and official ABI v1
+
+Goals 208–231
+└── active strict HIR v1 chain documented in Phase 2
+
+Future MIR/runtime project
+└── consumes frozen HIR v1 and owns global optimization, representation,
+    memory management, execution and backend lowering
+
+Runtime module resolution
+└── belongs to a separate runtime/consumer layer and is not a ViZG phase
 ```
 
-### Recommended Order (with rationale)
+### Required order
 
-1. **Phase 3 first** (package lookup) — smallest work, unblocks Phase 4 protocol with real data
-2. **Phase 1 second** (type checker v2) — critical layer; enables any backend to make type-aware decisions
-3. **Phase 2 third** (HIR/lowering) — bridge to runtime or emission backends
-4. **Phase 4 last** (inspector protocol) — requires stable public APIs from all previous phases
+1. Goals 189–207 remain closed and are not reopened without new evidence.
+2. Goals 208–231 execute in strict numerical order.
+3. HIR work must not modify frozen C ABI v1 or introduce resolver policy.
+4. MIR/runtime planning begins only after Goal 231 freezes HIR v1.
+5. Filesystem/package/URL resolution remains in the runtime or consumer that
+   implements the module-provider contract.
 
 ---
 
 ## Diagnostic Code Allocation Summary
 
-| Range | Purpose | Allocated In Phase | Notes |
-|-------|---------|-------------------|-------|
-| `VZG6004` | unknown_type_name (type checker) | Phase 1 | Already exists as diagnostic code enum variant, unused |
-| `VZG6005` | type_mismatch (type checker) | Phase 1 | Already emitted by v1 for literal mismatches; extended in v2 |
-| `VZG7xxx` | HIR/lowering errors | Phase 2 | Reserved per roadmap |
-| New VZG5xxx | package.json resolution failures | Phase 3 | Add: e.g., `VZG5004 module_not_found_package`, `VZG5005 invalid_package_json` |
-| `VZG8xxx` | Protocol-level errors | Phase 4 | Reserved per roadmap; follow CDP negative-integer convention |
+| Range | Purpose | Notes |
+|-------|---------|-------|
+| `VZG1xxx` | Scanner/lexer errors | Existing frontend diagnostics |
+| `VZG2xxx` | Parser errors | Existing frontend diagnostics |
+| `VZG3xxx` | Binder errors | Existing frontend diagnostics |
+| `VZG4xxx` | Resolver errors | Identifier/type-name resolution, not module-specifier policy |
+| `VZG5xxx` | Module-provider/graph errors | Missing, denied, failed, duplicate, invalid-response, or limit outcomes |
+| `VZG6xxx` | Type checker semantic errors | Existing semantic diagnostics |
+| `VZG7xxx` | HIR/lowering errors | Active allocation under Goals 208–231 |
+| `VZG8xxx` | Future protocol errors | Reserved |
+
+Module diagnostics describe the result of a host response or graph invariant.
+They must not encode filesystem, package-manager, URL, or path-resolution policy.
 
 ---
 
 ## Open Decisions / Risks
 
-1. **Strict mode toggle vs opt-in checking**: TypeScript checks everything by default; vizg v1 defaults to minimal analysis. Recommend `--strict` flag (default on) that enables full type checking, HIR lowering, and package resolution — matches existing "check" command behavior while keeping existing CLI usage unchanged for backward compat.
+1. **Exact Zig packing is not the contract.** `docs/hir-v1-design.md` freezes the
+   semantic shape, identities and invariants. Goal 210 may choose efficient Zig
+   layouts only when they preserve that contract.
 
-2. **HIR representation choice**: Textual (human-readable) vs binary (compact). Start textual for inspection/debugging; binary format is optional later if performance matters for large programs or IDE integration latency concerns.
+2. **Dynamic language effects are easy to misclassify.** Property access,
+   conversions, comparison, iteration and calls may invoke user code or throw.
+   Canonicalization must use conservative `EffectSet` definitions.
 
-3. **Package.json parsing depth**: Minimal JSON parsing (string search for specific keys) vs full JSON decoder. Recommend minimal first since vizg only cares about `"main"`, `"module"`, `"type"` — a full parser adds complexity for marginal benefit at this stage; add one if subpath exports map gets needed later.
+3. **Exception/finally lowering is the highest semantic-risk area.** Goal 222
+   must model pending abrupt completions without duplicating cleanup bodies or
+   importing a backend exception ABI.
 
-4. **Protocol transport**: stdio-first matches how `clangd` and `rust-analyzer` work (zero config, works with any editor). WebSocket fallback can be added later if needed for browser-remote analysis tools.
+4. **Existing CFG is analysis input, not executable HIR.** It may guide lowering,
+   but HIR must build its own typed blocks, values, places, terminators and
+   regions. It must not wrap AST `NodeId` CFG blocks as the final representation.
 
-5. **Keep semantic ownership singular**: Future type-system work must extend the canonical collector, inference, dataflow, narrowing, checker, and project-propagation pipeline. It must not restore a parallel inference result or competing `TypeStore`.
+5. **Future ABI extension:** any public HIR exposure requires additive explicit
+   versioning. Context-local `TypeId`, HIR IDs and pointers must not be presented
+   as independently portable global identities.
+
+6. **Runtime provider design:** filesystem, package, URL, memory, and virtual
+   module providers belong to the runtime/consumer. Their policies must not be
+   copied into ViZG.
+
+7. **Singular semantic ownership:** HIR consumes the canonical semantic result.
+   It must not restore a parallel resolver, type store, inference engine or
+   compatibility relation.
 
 ---
 
 ## Non-Goals Until Explicitly Revisited
 
-- Claiming full TypeScript or JavaScript support
-- Running npm packages (only analysis, not execution)
-- Acting as a browser or Node.js replacement
-- Bundling packages (Phase 3 resolves but doesn't bundle)
-- Emitting optimized native code from the current AST (future Phase 5+)
-- Handling class members beyond what parser already accepts (out of scope for all phases)
-- Hoisting, TDZ, or other runtime-order diagnostics (ScopeAnalyzer enhancement in binder is possible future work)
+- Resolving filesystem paths, URLs, packages, import maps, or `node_modules` in
+  ViZG.
+- Publishing a filesystem/provider implementation as part of the core or ABI.
+- Claiming full TypeScript or JavaScript compatibility.
+- Running or bundling imported modules.
+- Acting as a browser, Node.js replacement, or package manager.
+- Changing frozen ABI v1 structures, constants, lifecycle, or symbols from HIR
+  work instead of introducing an explicitly versioned ABI.
+- Emitting MIR, bytecode, objects, native code, or linking executables in this
+  frontend repository.
+- Restoring the removed prototype ABI or introducing compatibility shims for it.
