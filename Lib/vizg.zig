@@ -4,6 +4,7 @@ pub const abi = @import("abi.zig");
 
 /// Version sentinel — host must compare \`vizg_abi_version()\` against this.
 pub const VIZG_ABI_VERSION = abi.VIZG_ABI_VERSION;
+pub const VIZG_HIR_API_VERSION = abi.VIZG_HIR_API_VERSION;
 pub const VIZG_MAX_SOURCE_LENGTH = abi.VIZG_MAX_SOURCE_LENGTH;
 
 /// Project construction / lifecycle types.
@@ -30,6 +31,11 @@ pub const Vizg_ProjectDiagnostic = abi.Vizg_ProjectDiagnostic;
 pub const Vizg_ProjectEdgeInfo = abi.Vizg_ProjectEdgeInfo;
 pub const Vizg_ProjectImportInfo = abi.Vizg_ProjectImportInfo;
 pub const Vizg_ProjectExportInfo = abi.Vizg_ProjectExportInfo;
+
+/// Versioned immutable HIR result view.
+pub const Vizg_HirEntityKind = abi.Vizg_HirEntityKind;
+pub const Vizg_HirSummary = abi.Vizg_HirSummary;
+pub const Vizg_HirRecord = abi.Vizg_HirRecord;
 
 comptime {
     _ = abi;

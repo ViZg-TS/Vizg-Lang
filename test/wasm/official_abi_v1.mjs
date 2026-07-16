@@ -13,7 +13,11 @@ if (imports.length !== 0) {
 const expectedExports = [
   "memory",
   "vizg_abi_version",
+  "vizg_hir_api_version",
+  "vizg_hir_record_at",
+  "vizg_hir_summary",
   "vizg_project_add_source",
+  "vizg_project_analyze_source",
   "vizg_project_create",
   "vizg_project_destroy",
   "vizg_project_finish",
@@ -26,6 +30,7 @@ const expectedExports = [
   "vizg_project_result_export",
   "vizg_project_result_import",
   "vizg_project_result_module",
+  "vizg_project_result_destroy",
   "vizg_project_result_summary",
   "vizg_project_step",
   "vizg_project_workspace_alignment",
@@ -41,6 +46,9 @@ if (JSON.stringify(actualExports) !== JSON.stringify(expectedExports)) {
 const { exports: api } = await WebAssembly.instantiate(module);
 if (api.vizg_abi_version() !== 1) {
   throw new Error(`unexpected ABI version: ${api.vizg_abi_version()}`);
+}
+if (api.vizg_hir_api_version() !== 1) {
+  throw new Error(`unexpected HIR ABI version: ${api.vizg_hir_api_version()}`);
 }
 const PAGE_BYTES = 64 * 1024;
 const WORKSPACE_BYTES = 8 * 1024 * 1024;

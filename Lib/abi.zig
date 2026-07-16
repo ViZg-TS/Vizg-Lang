@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const vizg = @import("vizg-impl");
 
 pub const VIZG_ABI_VERSION: u32 = 1;
+pub const VIZG_HIR_API_VERSION: u32 = 1;
 pub const VIZG_MAX_SOURCE_LENGTH: usize = vizg.tokens.MAX_SOURCE_LENGTH;
 pub const Vizg_ExternalNamespaceFlags = u8;
 pub const VIZG_EXTERNAL_NAMESPACE_VALUE: Vizg_ExternalNamespaceFlags = 1;
@@ -199,6 +200,47 @@ pub const Vizg_ProjectExportInfo = extern struct {
     span: Vizg_ProjectSpan,
 };
 
+pub const Vizg_HirEntityKind = enum(u32) {
+    MODULE = 0,
+    EXTERNAL_DECLARATION = 1,
+    FUNCTION = 2,
+    BLOCK = 3,
+    INSTRUCTION = 4,
+    BINDING = 5,
+    TYPE = 6,
+    ORIGIN = 7,
+};
+
+pub const Vizg_HirSummary = extern struct {
+    module_count: usize,
+    external_declaration_count: usize,
+    function_count: usize,
+    block_count: usize,
+    instruction_count: usize,
+    binding_count: usize,
+    type_count: usize,
+    origin_count: usize,
+};
+
+/// Kind-neutral immutable record. `tag`, `parent_id`, `secondary_id`, and
+/// `flags` are interpreted according to `kind`; unknown fields are zero.
+pub const Vizg_HirRecord = extern struct {
+    kind: Vizg_HirEntityKind,
+    tag: u32,
+    id: u64,
+    parent_id: u64,
+    secondary_id: u64,
+    module_id: u64,
+    type_id: u32,
+    effect_bits: u16,
+    flags: u8,
+    reserved: [1]u8,
+    origin_id: u32,
+    name_ptr: [*c]const u8,
+    name_len: usize,
+    child_count: usize,
+};
+
 pub const Vizg_Project = opaque {};
 pub const Vizg_ProjectResult = opaque {};
 
@@ -218,6 +260,11 @@ const OwnedProject = struct {
         if (self.destroyed) return;
         const allocator = self.fba.allocator();
         self.step_attributes.deinit(allocator);
+        if (self.result_ready) {
+            if (self.result_view.hir_result) |*value| value.deinit();
+            self.result_view.hir_result = null;
+            self.result_view.destroyed = true;
+        }
         self.project.deinit();
         if (self.result_ready) self.result_view.magic = 0;
         self.result_ready = false;
@@ -229,6 +276,9 @@ const OwnedProjectResult = struct {
     magic: u64 = result_magic,
     summary: Vizg_ProjectResultSummary,
     owner: *OwnedProject,
+    hir_result: ?vizg.hir.HirResult = null,
+    owns_owner: bool = false,
+    destroyed: bool = false,
 };
 
 const project_magic: u64 = 0x565a_4750_524f_4a31;
@@ -301,7 +351,7 @@ fn ownedResult(result: ?*const Vizg_ProjectResult) ?*const OwnedProjectResult {
     const handle = result orelse return null;
     if (!validAlignedHostObject(OwnedProjectResult, handle)) return null;
     const owned: *const OwnedProjectResult = @ptrCast(@alignCast(handle));
-    if (owned.magic != result_magic) return null;
+    if (owned.magic != result_magic or owned.destroyed) return null;
     const owner_handle: *Vizg_Project = @ptrCast(owned.owner);
     const owner = ownedProject(owner_handle) orelse return null;
     if (owner != owned.owner or !rangeInsideWorkspace(owner, handle, @sizeOf(OwnedProjectResult))) return null;
@@ -753,9 +803,23 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
     out_result[0] = null;
     const finished = owned.project.finish() catch |err| return statusFromError(owned, err);
     if (owned.result_ready) {
+        if (owned.result_view.destroyed) return .INVALID_STATE;
         out_result[0] = @ptrCast(&owned.result_view);
         return .OK;
     }
+    var hir_result: ?vizg.hir.HirResult = null;
+    if (!finished.has_failures) {
+        var lowered = vizg.hir.lowerProject(owned.fba.allocator(), &owned.project, .{}) catch |err|
+            return statusFromError(owned, err);
+        switch (lowered) {
+            .result => |value| {
+                hir_result = value;
+                lowered = undefined;
+            },
+            .diagnostics => |*report| report.deinit(),
+        }
+    }
+    errdefer if (hir_result) |*value| value.deinit();
     const result = &owned.result_view;
     const semantic_result = owned.project.semanticResult();
     const canonical_diagnostic_count = diagnosticCount(owned);
@@ -771,7 +835,7 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
         .has_project_errors = @intFromBool(false),
         .has_module_failures = @intFromBool(false),
         .reserved = .{ 0, 0, 0 },
-    }, .owner = owned };
+    }, .owner = owned, .hir_result = hir_result };
     result.summary.has_syntax_errors = @intFromBool(
         resultHasPhase(result, .scanner) or resultHasPhase(result, .parser),
     );
@@ -939,6 +1003,236 @@ pub fn projectResultExport(result: ?*const Vizg_ProjectResult, index: usize, out
     return .OK;
 }
 
+pub fn projectResultDestroy(result: ?*Vizg_ProjectResult) callconv(.c) void {
+    const handle = result orelse return;
+    if (!validAlignedHostObject(OwnedProjectResult, handle)) return;
+    const owned: *OwnedProjectResult = @ptrCast(@alignCast(handle));
+    if (owned.magic != result_magic or owned.destroyed) return;
+    const owner_handle: *Vizg_Project = @ptrCast(owned.owner);
+    const owner = ownedProject(owner_handle) orelse return;
+    if (owner != owned.owner or !rangeInsideWorkspace(owner, handle, @sizeOf(OwnedProjectResult))) return;
+    const owns_owner = owned.owns_owner;
+    if (owned.hir_result) |*value| value.deinit();
+    owned.hir_result = null;
+    owned.destroyed = true;
+    if (owns_owner) owner.deinit();
+}
+
+pub fn hirApiVersion() callconv(.c) u32 {
+    return VIZG_HIR_API_VERSION;
+}
+
+fn hirOwned(result: ?*const Vizg_ProjectResult, requested_version: u32) ?*const OwnedProjectResult {
+    if (requested_version != VIZG_HIR_API_VERSION) return null;
+    const owned = ownedResult(result) orelse return null;
+    if (owned.hir_result == null) return null;
+    return owned;
+}
+
+fn idIndex(id: anytype) u64 {
+    return id.index() orelse std.math.maxInt(u32);
+}
+
+fn effectBits(effects: vizg.hir.EffectSet) u8 {
+    return @as(u8, @intFromBool(effects.pure)) |
+        (@as(u8, @intFromBool(effects.may_throw)) << 1) |
+        (@as(u8, @intFromBool(effects.may_call_user_code)) << 2) |
+        (@as(u8, @intFromBool(effects.reads_state)) << 3) |
+        (@as(u8, @intFromBool(effects.writes_state)) << 4) |
+        (@as(u8, @intFromBool(effects.may_suspend)) << 5) |
+        (@as(u8, @intFromBool(effects.creates_identity)) << 6);
+}
+
+pub fn hirSummary(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    out_summary: ?*Vizg_HirSummary,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = hirOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_summary orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirSummary, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirSummary))) return .INVALID_ARGUMENT;
+    const project = owned.hir_result.?.project;
+    var block_count: usize = 0;
+    var instruction_count: usize = 0;
+    var binding_count: usize = 0;
+    for (project.functions) |function| {
+        block_count += function.blocks.len;
+        binding_count += function.bindings.len;
+        for (function.blocks) |block| instruction_count += block.instructions.len;
+    }
+    output.* = .{
+        .module_count = project.modules.len,
+        .external_declaration_count = project.external_declarations.len,
+        .function_count = project.functions.len,
+        .block_count = block_count,
+        .instruction_count = instruction_count,
+        .binding_count = binding_count,
+        .type_count = owned.hir_result.?.typeCount(),
+        .origin_count = project.origins.records.len,
+    };
+    return .OK;
+}
+
+fn emptyHirRecord(kind: Vizg_HirEntityKind) Vizg_HirRecord {
+    return std.mem.zeroInit(Vizg_HirRecord, .{ .kind = kind });
+}
+
+pub fn hirRecordAt(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    kind: Vizg_HirEntityKind,
+    index: usize,
+    out_record: ?*Vizg_HirRecord,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = hirOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_record orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirRecord, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirRecord))) return .INVALID_ARGUMENT;
+    const hir_result = &owned.hir_result.?;
+    const project = hir_result.project;
+    output.* = emptyHirRecord(kind);
+    switch (kind) {
+        .MODULE => {
+            if (index >= project.modules.len) return .INVALID_ARGUMENT;
+            const item = project.modules[index];
+            output.id = item.module_id.value();
+            output.module_id = item.module_id.value();
+            output.secondary_id = idIndex(item.initialization);
+            output.origin_id = @intCast(idIndex(item.origin));
+            output.name_ptr = item.logical_name.ptr;
+            output.name_len = item.logical_name.len;
+            output.child_count = item.entities.len;
+        },
+        .EXTERNAL_DECLARATION => {
+            if (index >= project.external_declarations.len) return .INVALID_ARGUMENT;
+            const item = project.external_declarations[index];
+            output.id = item.symbol_id.value();
+            output.parent_id = item.module_id.value();
+            output.tag = @intFromEnum(item.kind);
+            output.type_id = item.type_id;
+            output.effect_bits = @bitCast(item.effects);
+            output.name_ptr = item.exported_name.ptr;
+            output.name_len = item.exported_name.len;
+        },
+        .FUNCTION => {
+            if (index >= project.functions.len) return .INVALID_ARGUMENT;
+            const item = project.functions[index];
+            output.id = idIndex(item.id);
+            output.module_id = item.module_id.value();
+            output.tag = @intFromEnum(item.kind);
+            output.type_id = item.signature_type;
+            output.origin_id = @intCast(idIndex(item.origin));
+            output.child_count = item.blocks.len;
+        },
+        .BLOCK, .INSTRUCTION, .BINDING => {
+            var current: usize = 0;
+            for (project.functions) |function| {
+                if (kind == .BINDING) for (function.bindings) |item| {
+                    if (current == index) {
+                        output.id = idIndex(item.id);
+                        output.parent_id = idIndex(function.id);
+                        output.module_id = function.module_id.value();
+                        output.tag = @intFromEnum(item.kind);
+                        output.type_id = item.type_id;
+                        output.flags = @intFromBool(item.mutable);
+                        output.origin_id = @intCast(idIndex(item.origin));
+                        output.name_ptr = item.name.ptr;
+                        output.name_len = item.name.len;
+                        return .OK;
+                    }
+                    current += 1;
+                };
+                for (function.blocks) |block| {
+                    if (kind == .BLOCK) {
+                        if (current == index) {
+                            output.id = idIndex(block.id);
+                            output.parent_id = idIndex(function.id);
+                            output.module_id = function.module_id.value();
+                            output.tag = @intFromEnum(std.meta.activeTag(block.terminator));
+                            output.origin_id = @intCast(idIndex(block.origin));
+                            output.child_count = block.instructions.len;
+                            return .OK;
+                        }
+                        current += 1;
+                    } else if (kind == .INSTRUCTION) for (block.instructions) |item| {
+                        if (current == index) {
+                            output.id = idIndex(item.id);
+                            output.parent_id = idIndex(block.id);
+                            output.secondary_id = idIndex(function.id);
+                            output.module_id = function.module_id.value();
+                            output.tag = @intFromEnum(std.meta.activeTag(item.operation));
+                            output.type_id = item.result_type orelse 0;
+                            output.effect_bits = effectBits(item.effects);
+                            output.flags = @intFromBool(item.result != null);
+                            output.origin_id = @intCast(idIndex(item.origin));
+                            return .OK;
+                        }
+                        current += 1;
+                    };
+                }
+            }
+            return .INVALID_ARGUMENT;
+        },
+        .TYPE => {
+            const item = hir_result.typeAt(index) orelse return .INVALID_ARGUMENT;
+            output.id = item.id;
+            output.tag = @intFromEnum(std.meta.activeTag(item.kind));
+        },
+        .ORIGIN => {
+            if (index >= project.origins.records.len) return .INVALID_ARGUMENT;
+            const item = project.origins.records[index];
+            output.id = index;
+            output.module_id = item.module_id.value();
+            output.tag = @intFromEnum(item.lowering_rule);
+            output.type_id = item.type_id orelse 0;
+            output.secondary_id = item.primary_span.start;
+            output.child_count = item.ast_nodes.len;
+        },
+    }
+    return .OK;
+}
+
+pub fn projectAnalyzeSource(
+    config: ?*const Vizg_ProjectConfig,
+    input: ?*const Vizg_ProjectSource,
+    out_result: [*c]?*Vizg_ProjectResult,
+) callconv(.c) Vizg_ProjectStatus {
+    if (!validAlignedMutableHostArray(?*Vizg_ProjectResult, out_result, 1)) return .INVALID_ARGUMENT;
+    const config_args = config orelse return .INVALID_ARGUMENT;
+    const input_args = input orelse return .INVALID_ARGUMENT;
+    if (!validAlignedHostObject(Vizg_ProjectConfig, config_args) or
+        !validAlignedHostObject(Vizg_ProjectSource, input_args)) return .INVALID_ARGUMENT;
+    out_result[0] = null;
+    var project: ?*Vizg_Project = null;
+    const create_status = projectCreate(config_args, &project);
+    if (create_status != .OK) return create_status;
+    const handle = project orelse return .INTERNAL_ERROR;
+    const add_status = projectAddSource(handle, input_args);
+    if (add_status != .OK) {
+        projectDestroy(handle);
+        return add_status;
+    }
+    var step_output = std.mem.zeroes(Vizg_ProjectStep);
+    const step_status = projectStep(handle, &step_output);
+    if (step_status != .OK) {
+        projectDestroy(handle);
+        return step_status;
+    }
+    if (step_output.kind != 0) {
+        projectDestroy(handle);
+        return .INVALID_STATE;
+    }
+    const finish_status = projectFinish(handle, out_result);
+    if (finish_status != .OK) {
+        projectDestroy(handle);
+    } else {
+        const result: *OwnedProjectResult = @ptrCast(@alignCast(out_result[0].?));
+        result.owns_owner = true;
+    }
+    return finish_status;
+}
+
 comptime {
     @export(&abiVersion, .{ .name = "vizg_abi_version" });
     @export(&projectWorkspaceAlignment, .{ .name = "vizg_project_workspace_alignment" });
@@ -958,6 +1252,11 @@ comptime {
     @export(&projectResultEdge, .{ .name = "vizg_project_result_edge" });
     @export(&projectResultImport, .{ .name = "vizg_project_result_import" });
     @export(&projectResultExport, .{ .name = "vizg_project_result_export" });
+    @export(&projectResultDestroy, .{ .name = "vizg_project_result_destroy" });
+    @export(&projectAnalyzeSource, .{ .name = "vizg_project_analyze_source" });
+    @export(&hirApiVersion, .{ .name = "vizg_hir_api_version" });
+    @export(&hirSummary, .{ .name = "vizg_hir_summary" });
+    @export(&hirRecordAt, .{ .name = "vizg_hir_record_at" });
 }
 
 test "public diagnostic ABI mappings are stable" {
@@ -1089,15 +1388,17 @@ test "external response conversion uses reclaimable workspace scratch" {
 }
 
 fn allocationFailureAbiSnapshot(allocator: std.mem.Allocator) !void {
-    const word_count = (projectWorkspaceOverhead() + @sizeOf(u64) - 1) / @sizeOf(u64);
+    const workspace_capacity = projectWorkspaceOverhead() + 4 * 1024 * 1024;
+    const word_count = (workspace_capacity + @sizeOf(u64) - 1) / @sizeOf(u64);
     const storage = try allocator.alloc(u64, word_count);
     const storage_bytes = std.mem.sliceAsBytes(storage);
     const owned: *OwnedProject = @ptrCast(@alignCast(storage.ptr));
     owned.* = .{
-        .fba = .init(storage_bytes[projectWorkspaceOverhead()..projectWorkspaceOverhead()]),
-        .project = .init(allocator),
+        .fba = .init(storage_bytes[projectWorkspaceOverhead()..]),
+        .project = undefined,
         .workspace_len = storage_bytes.len,
     };
+    owned.project = .init(owned.fba.allocator());
     defer {
         owned.deinit();
         allocator.free(storage);

@@ -271,8 +271,17 @@ fn inferNode(
                 null
         else
             null,
-        .CallExpression => |call| try inferCall(allocator, call.callee, call.arguments, call.optional, false, entries, store),
-        .NewExpression => |call| try inferCall(allocator, call.callee, call.arguments, false, true, entries, store),
+        .CallExpression => |call| try inferCall(
+            allocator,
+            call.callee,
+            call.arguments,
+            call.optional,
+            tree.node(call.callee).data == .SuperExpression,
+            tree.node(call.callee).data == .SuperExpression,
+            entries,
+            store,
+        ),
+        .NewExpression => |call| try inferCall(allocator, call.callee, call.arguments, false, true, false, entries, store),
         .SpreadElement => |spread| if (findType(entries, spread.argument)) |ty| .{ .type_id = ty } else null,
         .ArrayExpression => |array| .{ .type_id = try inferArray(allocator, node_id, array, tree, entries, store) },
         .ObjectExpression => |object| .{ .type_id = try inferObject(allocator, node_id, object, tree, entries, store) },
@@ -305,6 +314,7 @@ fn inferCall(
     arguments: []const ast_mod.NodeId,
     optional: bool,
     construct: bool,
+    super_call: bool,
     entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
 ) !?OperatorResult {
@@ -314,12 +324,20 @@ fn inferCall(
     if (construct) {
         if (callee_type == store.builtins.any or callee_type == store.builtins.unknown)
             return .{ .type_id = callee_type };
-        if (callee.kind != .class_constructor) return .{
-            .type_id = store.builtins.unknown,
-            .valid = false,
-            .issue = .invalid_constructor,
+        const identity = switch (callee.kind) {
+            .class_constructor => |constructor| constructor.identity,
+            .class => |instance| if (super_call) instance.identity else return .{
+                .type_id = store.builtins.unknown,
+                .valid = false,
+                .issue = .invalid_constructor,
+            },
+            else => return .{
+                .type_id = store.builtins.unknown,
+                .valid = false,
+                .issue = .invalid_constructor,
+            },
         };
-        const class = store.lookupClassSemanticType(callee.kind.class_constructor.identity) orelse return .{
+        const class = store.lookupClassSemanticType(identity) orelse return .{
             .type_id = store.builtins.unknown,
             .valid = false,
             .issue = .invalid_constructor,

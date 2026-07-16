@@ -36,6 +36,20 @@ pub const ExternalModuleId = enum(u64) {
     }
 };
 
+/// Stable host-assigned identity for one declaration in a source-less module.
+/// Its domain is distinct from both source declarations and module identities.
+pub const ExternalSymbolId = enum(u64) {
+    _,
+
+    pub fn init(value_: u64) ExternalSymbolId {
+        return @enumFromInt(value_);
+    }
+
+    pub fn value(self: ExternalSymbolId) u64 {
+        return @intFromEnum(self);
+    }
+};
+
 /// Opaque identity assigned by the core to one unresolved module request.
 pub const RequestId = enum(u64) {
     _,
@@ -146,6 +160,42 @@ pub const ExternalNamespace = packed struct(u8) {
     }
 };
 
+pub const ExternalDeclarationKind = enum(u32) {
+    function,
+    global,
+    constant,
+    type,
+};
+
+pub const ExternalParameterDescriptor = struct {
+    name: []const u8 = "",
+    type_metadata: ExternalType,
+    optional: bool = false,
+    has_default: bool = false,
+    rest: bool = false,
+};
+
+pub const ExternalFunctionDescriptor = struct {
+    parameters: []const ExternalParameterDescriptor = &.{},
+    return_type: ExternalType,
+    type_parameter_count: u32 = 0,
+    is_async: bool = false,
+    is_generator: bool = false,
+    is_constructor: bool = false,
+};
+
+/// Conservative effect declaration. `unknown` dominates every other bit.
+pub const ExternalEffectSet = packed struct(u16) {
+    reads_memory: bool = false,
+    writes_memory: bool = false,
+    may_throw: bool = false,
+    may_suspend: bool = false,
+    allocates: bool = false,
+    calls_unknown: bool = false,
+    unknown: bool = true,
+    reserved: u9 = 0,
+};
+
 /// One external export. Default exports must use name `default`. Namespace
 /// exports are named namespace-valued members; `import *` is synthesized from
 /// every member available in the namespace requested by the import.
@@ -154,6 +204,10 @@ pub const ExternalExportDescriptor = struct {
     kind: ExternalExportKind = .named,
     namespace: ExternalNamespace = .{ .value = true },
     type_metadata: ?ExternalType = null,
+    symbol_id: ?ExternalSymbolId = null,
+    declaration_kind: ?ExternalDeclarationKind = null,
+    function: ?ExternalFunctionDescriptor = null,
+    effects: ?ExternalEffectSet = null,
 };
 
 /// Borrowed source-less module metadata. Retaining APIs copy every slice.
@@ -166,12 +220,14 @@ pub const ExternalModuleDescriptor = struct {
 comptime {
     if (@sizeOf(ModuleId) != @sizeOf(u64)) @compileError("ModuleId must remain C-representable as u64");
     if (@sizeOf(ExternalModuleId) != @sizeOf(u64)) @compileError("ExternalModuleId must remain C-representable as u64");
+    if (@sizeOf(ExternalSymbolId) != @sizeOf(u64)) @compileError("ExternalSymbolId must remain C-representable as u64");
     if (@sizeOf(RequestId) != @sizeOf(u64)) @compileError("RequestId must remain C-representable as u64");
     if (@sizeOf(SourceKind) != @sizeOf(u32)) @compileError("SourceKind must remain C-representable as u32");
     if (@sizeOf(RequestOperation) != @sizeOf(u32)) @compileError("RequestOperation must remain C-representable as u32");
     if (@sizeOf(ExternalExportKind) != @sizeOf(u32)) @compileError("ExternalExportKind must remain C-representable as u32");
     if (@sizeOf(ExternalType) != @sizeOf(u32)) @compileError("ExternalType must remain C-representable as u32");
     if (@sizeOf(ExternalNamespace) != @sizeOf(u8)) @compileError("ExternalNamespace must remain C-representable as u8");
+    if (@sizeOf(ExternalDeclarationKind) != @sizeOf(u32)) @compileError("ExternalDeclarationKind must remain C-representable as u32");
 }
 
 test "module identity is host assigned and independent of logical names" {

@@ -373,7 +373,11 @@ pub fn build(b: *std.Build) void {
         \\archive="$1"
         \\actual="$(nm -g --defined-only "$archive" | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^vizg_/ { print $3 }' | LC_ALL=C sort -u)"
         \\expected='vizg_abi_version
+        \\vizg_hir_api_version
+        \\vizg_hir_record_at
+        \\vizg_hir_summary
         \\vizg_project_add_source
+        \\vizg_project_analyze_source
         \\vizg_project_create
         \\vizg_project_destroy
         \\vizg_project_finish
@@ -381,6 +385,7 @@ pub fn build(b: *std.Build) void {
         \\vizg_project_respond_external
         \\vizg_project_respond_failure
         \\vizg_project_respond_source
+        \\vizg_project_result_destroy
         \\vizg_project_result_diagnostic
         \\vizg_project_result_edge
         \\vizg_project_result_export
@@ -437,16 +442,9 @@ pub fn build(b: *std.Build) void {
 
     // Regression gate: the installed archive must link into the default PIE
     // produced by the documented native C compiler command.
-    const native_consumer_source = b.addWriteFiles().add("official_abi_v1_consumer.c",
-        \\#include "vizg.h"
-        \\int main(void) {
-        \\    if (vizg_abi_version() != VIZG_ABI_VERSION) return 1;
-        \\    return vizg_project_workspace_alignment() == 0 ? 2 : 0;
-        \\}
-    );
     const native_consumer_link = b.addSystemCommand(&.{ "cc", "-std=c11", "-I", "Lib" });
     if (target.result.os.tag == .linux) native_consumer_link.addArg("-Wl,-z,noexecstack");
-    native_consumer_link.addFileArg(native_consumer_source);
+    native_consumer_link.addFileArg(b.path("example/hir_consumer.c"));
     native_consumer_link.addArtifactArg(vizg_lib);
     native_consumer_link.addArg("-o");
     const native_consumer_exe = native_consumer_link.addOutputFileArg("official_abi_v1_consumer");

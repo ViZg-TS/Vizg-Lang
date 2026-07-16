@@ -14,18 +14,24 @@ pub const tokens = @import("frontend/tokens.zig");
 
 pub const semantics = @import("semantics/root.zig");
 pub const project = @import("project/root.zig");
+pub const hir = @import("hir/root.zig");
 
 // Official portable project contracts. These identities are distinct from the
 // semantic analysis graph records exported through `modules`.
 pub const ModuleId = project.ModuleId;
 pub const RequestId = project.RequestId;
 pub const ExternalModuleId = project.ExternalModuleId;
+pub const ExternalSymbolId = project.ExternalSymbolId;
 pub const ModuleSource = project.ModuleSource;
 pub const ModuleRequest = project.ModuleRequest;
 pub const ModuleRequestInput = project.ModuleRequestInput;
 pub const ExternalExportKind = project.ExternalExportKind;
 pub const ExternalType = project.ExternalType;
 pub const ExternalNamespace = project.ExternalNamespace;
+pub const ExternalDeclarationKind = project.ExternalDeclarationKind;
+pub const ExternalParameterDescriptor = project.ExternalParameterDescriptor;
+pub const ExternalFunctionDescriptor = project.ExternalFunctionDescriptor;
+pub const ExternalEffectSet = project.ExternalEffectSet;
 pub const ExternalExportDescriptor = project.ExternalExportDescriptor;
 pub const ExternalModuleDescriptor = project.ExternalModuleDescriptor;
 pub const ModuleState = project.ModuleState;
@@ -51,6 +57,7 @@ test {
     _ = frontend;
     _ = tokens;
     _ = project;
+    _ = hir;
     _ = @import("modules/graph.zig");
     _ = @import("modules/root.zig");
     // Keep semantics layer wired in so its tests register alongside the rest.

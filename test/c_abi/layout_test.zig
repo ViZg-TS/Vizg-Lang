@@ -19,6 +19,8 @@ extern fn vizg_c_sizeof_Vizg_ExternalNamespaceFlags() usize;
 extern fn vizg_c_alignof_Vizg_ExternalNamespaceFlags() usize;
 extern fn vizg_c_sizeof_Vizg_ExternalType() usize;
 extern fn vizg_c_alignof_Vizg_ExternalType() usize;
+extern fn vizg_c_sizeof_Vizg_HirEntityKind() usize;
+extern fn vizg_c_alignof_Vizg_HirEntityKind() usize;
 extern fn vizg_c_sizeof_Vizg_ProjectConfig() usize;
 extern fn vizg_c_alignof_Vizg_ProjectConfig() usize;
 extern fn vizg_c_sizeof_Vizg_ProjectSource() usize;
@@ -45,6 +47,10 @@ extern fn vizg_c_alignof_Vizg_ProjectDiagnostic() usize;
 extern fn vizg_c_alignof_Vizg_ProjectEdgeInfo() usize;
 extern fn vizg_c_alignof_Vizg_ProjectImportInfo() usize;
 extern fn vizg_c_alignof_Vizg_ProjectExportInfo() usize;
+extern fn vizg_c_sizeof_Vizg_HirSummary() usize;
+extern fn vizg_c_alignof_Vizg_HirSummary() usize;
+extern fn vizg_c_sizeof_Vizg_HirRecord() usize;
+extern fn vizg_c_alignof_Vizg_HirRecord() usize;
 extern fn vizg_c_fields_Vizg_ProjectConfig() usize;
 extern fn vizg_c_fields_Vizg_ProjectSource() usize;
 extern fn vizg_c_fields_Vizg_ProjectSpan() usize;
@@ -57,6 +63,8 @@ extern fn vizg_c_fields_Vizg_ProjectDiagnostic() usize;
 extern fn vizg_c_fields_Vizg_ProjectEdgeInfo() usize;
 extern fn vizg_c_fields_Vizg_ProjectImportInfo() usize;
 extern fn vizg_c_fields_Vizg_ProjectExportInfo() usize;
+extern fn vizg_c_fields_Vizg_HirSummary() usize;
+extern fn vizg_c_fields_Vizg_HirRecord() usize;
 extern fn vizg_c_value_project_status_internal_error() u32;
 extern fn vizg_c_value_limit_semantic_growth() u32;
 extern fn vizg_c_value_limit_parse_depth() u32;
@@ -84,6 +92,7 @@ test "official ABI v1 C and Zig layouts match" {
     try expectLayout(u32, vizg_c_sizeof_Vizg_ExternalExportKind(), vizg_c_alignof_Vizg_ExternalExportKind());
     try expectLayout(abi.Vizg_ExternalNamespaceFlags, vizg_c_sizeof_Vizg_ExternalNamespaceFlags(), vizg_c_alignof_Vizg_ExternalNamespaceFlags());
     try expectLayout(u32, vizg_c_sizeof_Vizg_ExternalType(), vizg_c_alignof_Vizg_ExternalType());
+    try expectLayout(u32, vizg_c_sizeof_Vizg_HirEntityKind(), vizg_c_alignof_Vizg_HirEntityKind());
     try expectLayout(abi.Vizg_ProjectConfig, vizg_c_sizeof_Vizg_ProjectConfig(), vizg_c_alignof_Vizg_ProjectConfig());
     try expectLayout(abi.Vizg_ProjectSource, vizg_c_sizeof_Vizg_ProjectSource(), vizg_c_alignof_Vizg_ProjectSource());
     try expectLayout(abi.Vizg_ProjectSpan, vizg_c_sizeof_Vizg_ProjectSpan(), vizg_c_alignof_Vizg_ProjectSpan());
@@ -97,6 +106,8 @@ test "official ABI v1 C and Zig layouts match" {
     try expectLayout(abi.Vizg_ProjectEdgeInfo, vizg_c_sizeof_Vizg_ProjectEdgeInfo(), vizg_c_alignof_Vizg_ProjectEdgeInfo());
     try expectLayout(abi.Vizg_ProjectImportInfo, vizg_c_sizeof_Vizg_ProjectImportInfo(), vizg_c_alignof_Vizg_ProjectImportInfo());
     try expectLayout(abi.Vizg_ProjectExportInfo, vizg_c_sizeof_Vizg_ProjectExportInfo(), vizg_c_alignof_Vizg_ProjectExportInfo());
+    try expectLayout(abi.Vizg_HirSummary, vizg_c_sizeof_Vizg_HirSummary(), vizg_c_alignof_Vizg_HirSummary());
+    try expectLayout(abi.Vizg_HirRecord, vizg_c_sizeof_Vizg_HirRecord(), vizg_c_alignof_Vizg_HirRecord());
 
     try std.testing.expectEqual(f(abi.Vizg_ProjectConfig, "workspace_ptr", 1) + f(abi.Vizg_ProjectConfig, "workspace_len", 2) + f(abi.Vizg_ProjectConfig, "max_source_bytes", 3) + f(abi.Vizg_ProjectConfig, "max_total_source_bytes", 4) + f(abi.Vizg_ProjectConfig, "max_modules", 5) + f(abi.Vizg_ProjectConfig, "max_requests", 6) + f(abi.Vizg_ProjectConfig, "max_edges", 7) + f(abi.Vizg_ProjectConfig, "max_diagnostics", 8) + f(abi.Vizg_ProjectConfig, "max_graph_depth", 9) + f(abi.Vizg_ProjectConfig, "max_semantic_types", 10), vizg_c_fields_Vizg_ProjectConfig());
     try std.testing.expectEqual(f(abi.Vizg_ProjectSource, "module_id", 1) + f(abi.Vizg_ProjectSource, "logical_name_ptr", 2) + f(abi.Vizg_ProjectSource, "logical_name_len", 3) + f(abi.Vizg_ProjectSource, "source_ptr", 4) + f(abi.Vizg_ProjectSource, "source_len", 5) + f(abi.Vizg_ProjectSource, "kind", 6) + f(abi.Vizg_ProjectSource, "is_root", 7) + f(abi.Vizg_ProjectSource, "reserved", 8), vizg_c_fields_Vizg_ProjectSource());
@@ -110,6 +121,8 @@ test "official ABI v1 C and Zig layouts match" {
     try std.testing.expectEqual(f(abi.Vizg_ProjectEdgeInfo, "request_id", 1) + f(abi.Vizg_ProjectEdgeInfo, "importer_module_id", 2) + f(abi.Vizg_ProjectEdgeInfo, "target_module_id", 3) + f(abi.Vizg_ProjectEdgeInfo, "external_module_id", 4) + f(abi.Vizg_ProjectEdgeInfo, "specifier_ptr", 5) + f(abi.Vizg_ProjectEdgeInfo, "specifier_len", 6) + f(abi.Vizg_ProjectEdgeInfo, "request_operation", 7) + f(abi.Vizg_ProjectEdgeInfo, "state", 8) + f(abi.Vizg_ProjectEdgeInfo, "type_only", 9) + f(abi.Vizg_ProjectEdgeInfo, "has_target_module", 10) + f(abi.Vizg_ProjectEdgeInfo, "has_external_target", 11) + f(abi.Vizg_ProjectEdgeInfo, "reserved", 12) + f(abi.Vizg_ProjectEdgeInfo, "span", 13), vizg_c_fields_Vizg_ProjectEdgeInfo());
     try std.testing.expectEqual(f(abi.Vizg_ProjectImportInfo, "module_id", 1) + f(abi.Vizg_ProjectImportInfo, "target_module_id", 2) + f(abi.Vizg_ProjectImportInfo, "external_module_id", 3) + f(abi.Vizg_ProjectImportInfo, "edge_index", 4) + f(abi.Vizg_ProjectImportInfo, "target_type_id", 5) + f(abi.Vizg_ProjectImportInfo, "link_state", 6) + f(abi.Vizg_ProjectImportInfo, "request_operation", 7) + f(abi.Vizg_ProjectImportInfo, "local_name_ptr", 8) + f(abi.Vizg_ProjectImportInfo, "local_name_len", 9) + f(abi.Vizg_ProjectImportInfo, "imported_name_ptr", 10) + f(abi.Vizg_ProjectImportInfo, "imported_name_len", 11) + f(abi.Vizg_ProjectImportInfo, "specifier_ptr", 12) + f(abi.Vizg_ProjectImportInfo, "specifier_len", 13) + f(abi.Vizg_ProjectImportInfo, "type_only", 14) + f(abi.Vizg_ProjectImportInfo, "runtime_binding", 15) + f(abi.Vizg_ProjectImportInfo, "has_target_module", 16) + f(abi.Vizg_ProjectImportInfo, "has_external_target", 17) + f(abi.Vizg_ProjectImportInfo, "has_edge_index", 18) + f(abi.Vizg_ProjectImportInfo, "has_semantic_target", 19) + f(abi.Vizg_ProjectImportInfo, "reserved", 20) + f(abi.Vizg_ProjectImportInfo, "span", 21), vizg_c_fields_Vizg_ProjectImportInfo());
     try std.testing.expectEqual(f(abi.Vizg_ProjectExportInfo, "module_id", 1) + f(abi.Vizg_ProjectExportInfo, "target_module_id", 2) + f(abi.Vizg_ProjectExportInfo, "external_module_id", 3) + f(abi.Vizg_ProjectExportInfo, "edge_index", 4) + f(abi.Vizg_ProjectExportInfo, "target_type_id", 5) + f(abi.Vizg_ProjectExportInfo, "name_ptr", 6) + f(abi.Vizg_ProjectExportInfo, "name_len", 7) + f(abi.Vizg_ProjectExportInfo, "type_only", 8) + f(abi.Vizg_ProjectExportInfo, "re_export", 9) + f(abi.Vizg_ProjectExportInfo, "has_target_module", 10) + f(abi.Vizg_ProjectExportInfo, "has_external_target", 11) + f(abi.Vizg_ProjectExportInfo, "has_edge_index", 12) + f(abi.Vizg_ProjectExportInfo, "reserved", 13) + f(abi.Vizg_ProjectExportInfo, "span", 14), vizg_c_fields_Vizg_ProjectExportInfo());
+    try std.testing.expectEqual(f(abi.Vizg_HirSummary, "module_count", 1) + f(abi.Vizg_HirSummary, "external_declaration_count", 2) + f(abi.Vizg_HirSummary, "function_count", 3) + f(abi.Vizg_HirSummary, "block_count", 4) + f(abi.Vizg_HirSummary, "instruction_count", 5) + f(abi.Vizg_HirSummary, "binding_count", 6) + f(abi.Vizg_HirSummary, "type_count", 7) + f(abi.Vizg_HirSummary, "origin_count", 8), vizg_c_fields_Vizg_HirSummary());
+    try std.testing.expectEqual(f(abi.Vizg_HirRecord, "kind", 1) + f(abi.Vizg_HirRecord, "tag", 2) + f(abi.Vizg_HirRecord, "id", 3) + f(abi.Vizg_HirRecord, "parent_id", 4) + f(abi.Vizg_HirRecord, "secondary_id", 5) + f(abi.Vizg_HirRecord, "module_id", 6) + f(abi.Vizg_HirRecord, "type_id", 7) + f(abi.Vizg_HirRecord, "effect_bits", 8) + f(abi.Vizg_HirRecord, "flags", 9) + f(abi.Vizg_HirRecord, "reserved", 10) + f(abi.Vizg_HirRecord, "origin_id", 11) + f(abi.Vizg_HirRecord, "name_ptr", 12) + f(abi.Vizg_HirRecord, "name_len", 13) + f(abi.Vizg_HirRecord, "child_count", 14), vizg_c_fields_Vizg_HirRecord());
 
     try std.testing.expectEqual(@as(u32, @intFromEnum(abi.Vizg_ProjectStatus.INTERNAL_ERROR)), vizg_c_value_project_status_internal_error());
     try std.testing.expectEqual(@as(u32, @intFromEnum(abi.Vizg_LimitKind.SEMANTIC_GROWTH)), vizg_c_value_limit_semantic_growth());

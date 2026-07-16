@@ -237,6 +237,17 @@ Try CFGs expose normal try and catch paths and join their fallthrough through an
 
 `frontend.analyze` remains single-file. Imports and exports are recorded as module metadata and forwarded to the linker layer below for cross-file resolution.
 
+### Project HIR Derivation
+
+After a Zig `Project` reaches its completed semantic state, `hir.deriveProject`
+derives and installs one verified, immutable HIR result owned by that project.
+Repeated derivation returns the same result pointer without rebuilding it. A
+sealed HIR result owns its type snapshot, provenance, strings, and lowering
+allocations, so it can outlive semantic/project teardown when ownership is
+transferred. Zig consumers use checked immutable views. Non-Zig consumers use
+the separately versioned additive HIR summary/record API; project-input ABI v1
+structures and lifecycle remain unchanged.
+
 ## Note on Type Model Location
 
 The type model and semantic mapping do **not** live inside `src/frontend/`. They are separate layers:

@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #define VIZG_ABI_VERSION 1u
+#define VIZG_HIR_API_VERSION 1u
 #define VIZG_MAX_SOURCE_LENGTH UINT32_MAX
 
 #define VIZG_PROJECT_DEFAULT_WORKSPACE_BYTES (8u * 1024u * 1024u)
@@ -356,6 +357,48 @@ typedef struct Vizg_ProjectExportInfo {
     Vizg_ProjectSpan span;
 } Vizg_ProjectExportInfo;
 
+typedef uint32_t Vizg_HirEntityKind;
+enum {
+    VIZG_HIR_ENTITY_MODULE = 0,
+    VIZG_HIR_ENTITY_EXTERNAL_DECLARATION = 1,
+    VIZG_HIR_ENTITY_FUNCTION = 2,
+    VIZG_HIR_ENTITY_BLOCK = 3,
+    VIZG_HIR_ENTITY_INSTRUCTION = 4,
+    VIZG_HIR_ENTITY_BINDING = 5,
+    VIZG_HIR_ENTITY_TYPE = 6,
+    VIZG_HIR_ENTITY_ORIGIN = 7,
+};
+
+typedef struct Vizg_HirSummary {
+    size_t module_count;
+    size_t external_declaration_count;
+    size_t function_count;
+    size_t block_count;
+    size_t instruction_count;
+    size_t binding_count;
+    size_t type_count;
+    size_t origin_count;
+} Vizg_HirSummary;
+
+/* Generic immutable record. Kind-specific tag and id field meanings are
+ * versioned by VIZG_HIR_API_VERSION. String storage is borrowed from result. */
+typedef struct Vizg_HirRecord {
+    Vizg_HirEntityKind kind;
+    uint32_t tag;
+    uint64_t id;
+    uint64_t parent_id;
+    uint64_t secondary_id;
+    uint64_t module_id;
+    uint32_t type_id;
+    uint16_t effect_bits;
+    uint8_t flags;
+    uint8_t reserved[1];
+    uint32_t origin_id;
+    const char *name_ptr;
+    size_t name_len;
+    size_t child_count;
+} Vizg_HirRecord;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -370,7 +413,8 @@ extern "C" {
  * implementation performs no filesystem access, callbacks, libc allocation,
  * or hidden heap allocation. Project handles are single-threaded; independent
  * handles and immutable result views may be used in parallel. Results are
- * owned by the project and remain valid until vizg_project_destroy.
+ * owned by the project and remain valid until vizg_project_result_destroy or
+ * vizg_project_destroy.
  * INVALID_STATE rejects ordering; LIMIT_EXCEEDED and OUT_OF_MEMORY are not
  * transactional retry guarantees. On exhaustion or INTERNAL_ERROR, destroy
  * and restart. A successful finish can report an inspectable partial result
@@ -421,6 +465,18 @@ Vizg_ProjectStatus vizg_project_result_import(
 Vizg_ProjectStatus vizg_project_result_export(
     const Vizg_ProjectResult *result, size_t index,
     Vizg_ProjectExportInfo *out_export);
+void vizg_project_result_destroy(Vizg_ProjectResult *result);
+Vizg_ProjectStatus vizg_project_analyze_source(
+    const Vizg_ProjectConfig *config,
+    const Vizg_ProjectSource *source,
+    Vizg_ProjectResult **out_result);
+uint32_t vizg_hir_api_version(void);
+Vizg_ProjectStatus vizg_hir_summary(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    Vizg_HirSummary *out_summary);
+Vizg_ProjectStatus vizg_hir_record_at(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    Vizg_HirEntityKind kind, size_t index, Vizg_HirRecord *out_record);
 
 #ifdef __cplusplus
 }

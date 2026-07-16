@@ -130,6 +130,61 @@ test "official ABI v1 exposes version and a project-owned terminal result" {
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), c.vizg_project_result_summary(first, &summary));
 }
 
+test "versioned C HIR consumer reads immutable result records" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    var config = workspace.config();
+    var source = projectSource(
+        17,
+        "hir-consumer.ts",
+        "export function answer(value: number): number { return value + 1; }",
+        true,
+    );
+    var result: ?*c.Vizg_ProjectResult = null;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_analyze_source(&config, &source, &result),
+    );
+    defer c.vizg_project_result_destroy(result);
+
+    try std.testing.expectEqual(@as(u32, c.VIZG_HIR_API_VERSION), c.vizg_hir_api_version());
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
+    );
+    try std.testing.expectEqual(@as(usize, 1), summary.module_count);
+    try std.testing.expect(summary.function_count > 0);
+    try std.testing.expect(summary.block_count > 0);
+    try std.testing.expect(summary.instruction_count > 0);
+    try std.testing.expect(summary.binding_count > 0);
+    try std.testing.expect(summary.type_count > 0);
+
+    var record: c.Vizg_HirRecord = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_MODULE, 0, &record),
+    );
+    try std.testing.expectEqual(@as(c.Vizg_HirEntityKind, c.VIZG_HIR_ENTITY_MODULE), record.kind);
+    try std.testing.expectEqual(@as(u64, 17), record.module_id);
+    try std.testing.expectEqualStrings("hir-consumer.ts", record.name_ptr[0..record.name_len]);
+    for (0..summary.type_count) |index| {
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_TYPE, index, &record),
+        );
+        try std.testing.expectEqual(@as(c.Vizg_HirEntityKind, c.VIZG_HIR_ENTITY_TYPE), record.kind);
+    }
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
+        c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_MODULE, summary.module_count, &record),
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION + 1, &summary),
+    );
+}
+
 test "official ABI v1 drives source and external host responses" {
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();
