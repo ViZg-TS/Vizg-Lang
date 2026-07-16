@@ -12,6 +12,9 @@ if (imports.length !== 0) {
 
 const expectedExports = [
   "memory",
+  "vizg_hir_api_version",
+  "vizg_hir_record_at",
+  "vizg_hir_summary",
   "vizg_project_add_source",
   "vizg_project_analyze_source",
   "vizg_project_create",

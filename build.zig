@@ -32,6 +32,9 @@ pub fn build(b: *std.Build) void {
         .name = "vizg",
         .root_module = vizg_cabi,
     });
+    // The installed native archive must carry Zig's compiler runtime so the
+    // documented plain C linker invocation is sufficient in every mode.
+    vizg_lib.bundle_compiler_rt = true;
 
     // A fixed Debug build keeps runtime safety checks enabled regardless of the
     // caller's selected optimization mode. It is the adversarial audit gate.
@@ -356,9 +359,13 @@ pub fn build(b: *std.Build) void {
         "sh",
         "-c",
         \\set -eu
+        \\export LC_ALL=C
         \\archive="$1"
         \\actual="$(nm -g --defined-only "$archive" | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^vizg_/ { print $3 }' | sort -u)"
-        \\expected='vizg_project_add_source
+        \\expected='vizg_hir_api_version
+        \\vizg_hir_record_at
+        \\vizg_hir_summary
+        \\vizg_project_add_source
         \\vizg_project_analyze_source
         \\vizg_project_create
         \\vizg_project_destroy
@@ -418,15 +425,9 @@ pub fn build(b: *std.Build) void {
 
     // Regression gate: the installed archive must link into the default PIE
     // produced by the documented native C compiler command.
-    const native_consumer_source = b.addWriteFiles().add("official_abi_v1_consumer.c",
-        \\#include "vizg.h"
-        \\int main(void) {
-        \\    return vizg_project_workspace_alignment() == 0 ? 1 : 0;
-        \\}
-    );
     const native_consumer_link = b.addSystemCommand(&.{ "cc", "-std=c11", "-I", "Lib" });
     if (target.result.os.tag == .linux) native_consumer_link.addArg("-Wl,-z,noexecstack");
-    native_consumer_link.addFileArg(native_consumer_source);
+    native_consumer_link.addFileArg(b.path("example/hir_consumer.c"));
     native_consumer_link.addArtifactArg(vizg_lib);
     native_consumer_link.addArg("-o");
     const native_consumer_exe = native_consumer_link.addOutputFileArg("official_abi_v1_consumer");

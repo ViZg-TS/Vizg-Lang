@@ -3,6 +3,7 @@
 pub const abi = @import("abi.zig");
 
 pub const VIZG_ABI_VERSION = abi.VIZG_ABI_VERSION;
+pub const VIZG_HIR_API_VERSION = abi.VIZG_HIR_API_VERSION;
 pub const Vizg_ProjectStatus = abi.Vizg_ProjectStatus;
 pub const Vizg_ProjectConfig = abi.Vizg_ProjectConfig;
 pub const Vizg_ProjectSource = abi.Vizg_ProjectSource;
@@ -12,6 +13,9 @@ pub const Vizg_ProjectStep = abi.Vizg_ProjectStep;
 pub const Vizg_ExternalExport = abi.Vizg_ExternalExport;
 pub const Vizg_ExternalModule = abi.Vizg_ExternalModule;
 pub const Vizg_ProjectResultSummary = abi.Vizg_ProjectResultSummary;
+pub const Vizg_HirEntityKind = abi.Vizg_HirEntityKind;
+pub const Vizg_HirSummary = abi.Vizg_HirSummary;
+pub const Vizg_HirRecord = abi.Vizg_HirRecord;
 
 comptime {
     _ = abi;

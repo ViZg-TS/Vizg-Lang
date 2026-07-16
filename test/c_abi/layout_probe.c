@@ -12,6 +12,7 @@ LAYOUT(Vizg_ProjectRequestKind)
 LAYOUT(Vizg_ProjectFailureKind)
 LAYOUT(Vizg_ExternalExportKind)
 LAYOUT(Vizg_ExternalType)
+LAYOUT(Vizg_HirEntityKind)
 LAYOUT(Vizg_ProjectConfig)
 LAYOUT(Vizg_ProjectSource)
 LAYOUT(Vizg_ProjectSpan)
@@ -20,6 +21,8 @@ LAYOUT(Vizg_ProjectStep)
 LAYOUT(Vizg_ExternalExport)
 LAYOUT(Vizg_ExternalModule)
 LAYOUT(Vizg_ProjectResultSummary)
+LAYOUT(Vizg_HirSummary)
+LAYOUT(Vizg_HirRecord)
 
 #define F(type, field, weight) (offsetof(type, field) * (weight))
 
@@ -66,6 +69,22 @@ size_t vizg_c_fields_Vizg_ExternalModule(void) {
 size_t vizg_c_fields_Vizg_ProjectResultSummary(void) {
     return F(Vizg_ProjectResultSummary, module_count, 1) + F(Vizg_ProjectResultSummary, has_failures, 2) +
         F(Vizg_ProjectResultSummary, reserved, 3);
+}
+size_t vizg_c_fields_Vizg_HirSummary(void) {
+    return F(Vizg_HirSummary, module_count, 1) +
+        F(Vizg_HirSummary, external_declaration_count, 2) +
+        F(Vizg_HirSummary, function_count, 3) + F(Vizg_HirSummary, block_count, 4) +
+        F(Vizg_HirSummary, instruction_count, 5) + F(Vizg_HirSummary, binding_count, 6) +
+        F(Vizg_HirSummary, type_count, 7) + F(Vizg_HirSummary, origin_count, 8);
+}
+size_t vizg_c_fields_Vizg_HirRecord(void) {
+    return F(Vizg_HirRecord, kind, 1) + F(Vizg_HirRecord, tag, 2) +
+        F(Vizg_HirRecord, id, 3) + F(Vizg_HirRecord, parent_id, 4) +
+        F(Vizg_HirRecord, secondary_id, 5) + F(Vizg_HirRecord, module_id, 6) +
+        F(Vizg_HirRecord, type_id, 7) + F(Vizg_HirRecord, effect_bits, 8) +
+        F(Vizg_HirRecord, flags, 9) + F(Vizg_HirRecord, reserved, 10) +
+        F(Vizg_HirRecord, origin_id, 11) + F(Vizg_HirRecord, name_ptr, 12) +
+        F(Vizg_HirRecord, name_len, 13) + F(Vizg_HirRecord, child_count, 14);
 }
 
 uint32_t vizg_c_value_project_status_internal_error(void) { return VIZG_PROJECT_STATUS_INTERNAL_ERROR; }

@@ -15,6 +15,8 @@ extern fn vizg_c_sizeof_Vizg_ExternalExportKind() usize;
 extern fn vizg_c_alignof_Vizg_ExternalExportKind() usize;
 extern fn vizg_c_sizeof_Vizg_ExternalType() usize;
 extern fn vizg_c_alignof_Vizg_ExternalType() usize;
+extern fn vizg_c_sizeof_Vizg_HirEntityKind() usize;
+extern fn vizg_c_alignof_Vizg_HirEntityKind() usize;
 extern fn vizg_c_sizeof_Vizg_ProjectConfig() usize;
 extern fn vizg_c_alignof_Vizg_ProjectConfig() usize;
 extern fn vizg_c_sizeof_Vizg_ProjectSource() usize;
@@ -31,6 +33,10 @@ extern fn vizg_c_sizeof_Vizg_ExternalModule() usize;
 extern fn vizg_c_alignof_Vizg_ExternalModule() usize;
 extern fn vizg_c_sizeof_Vizg_ProjectResultSummary() usize;
 extern fn vizg_c_alignof_Vizg_ProjectResultSummary() usize;
+extern fn vizg_c_sizeof_Vizg_HirSummary() usize;
+extern fn vizg_c_alignof_Vizg_HirSummary() usize;
+extern fn vizg_c_sizeof_Vizg_HirRecord() usize;
+extern fn vizg_c_alignof_Vizg_HirRecord() usize;
 extern fn vizg_c_fields_Vizg_ProjectConfig() usize;
 extern fn vizg_c_fields_Vizg_ProjectSource() usize;
 extern fn vizg_c_fields_Vizg_ProjectSpan() usize;
@@ -39,6 +45,8 @@ extern fn vizg_c_fields_Vizg_ProjectStep() usize;
 extern fn vizg_c_fields_Vizg_ExternalExport() usize;
 extern fn vizg_c_fields_Vizg_ExternalModule() usize;
 extern fn vizg_c_fields_Vizg_ProjectResultSummary() usize;
+extern fn vizg_c_fields_Vizg_HirSummary() usize;
+extern fn vizg_c_fields_Vizg_HirRecord() usize;
 extern fn vizg_c_value_project_status_internal_error() u32;
 extern fn vizg_c_value_project_request_re_export() u32;
 extern fn vizg_c_value_external_type_object() u32;
@@ -59,6 +67,7 @@ test "official ABI v1 C and Zig layouts match" {
     try expectLayout(u32, vizg_c_sizeof_Vizg_ProjectFailureKind(), vizg_c_alignof_Vizg_ProjectFailureKind());
     try expectLayout(u32, vizg_c_sizeof_Vizg_ExternalExportKind(), vizg_c_alignof_Vizg_ExternalExportKind());
     try expectLayout(u32, vizg_c_sizeof_Vizg_ExternalType(), vizg_c_alignof_Vizg_ExternalType());
+    try expectLayout(u32, vizg_c_sizeof_Vizg_HirEntityKind(), vizg_c_alignof_Vizg_HirEntityKind());
     try expectLayout(abi.Vizg_ProjectConfig, vizg_c_sizeof_Vizg_ProjectConfig(), vizg_c_alignof_Vizg_ProjectConfig());
     try expectLayout(abi.Vizg_ProjectSource, vizg_c_sizeof_Vizg_ProjectSource(), vizg_c_alignof_Vizg_ProjectSource());
     try expectLayout(abi.Vizg_ProjectSpan, vizg_c_sizeof_Vizg_ProjectSpan(), vizg_c_alignof_Vizg_ProjectSpan());
@@ -67,6 +76,8 @@ test "official ABI v1 C and Zig layouts match" {
     try expectLayout(abi.Vizg_ExternalExport, vizg_c_sizeof_Vizg_ExternalExport(), vizg_c_alignof_Vizg_ExternalExport());
     try expectLayout(abi.Vizg_ExternalModule, vizg_c_sizeof_Vizg_ExternalModule(), vizg_c_alignof_Vizg_ExternalModule());
     try expectLayout(abi.Vizg_ProjectResultSummary, vizg_c_sizeof_Vizg_ProjectResultSummary(), vizg_c_alignof_Vizg_ProjectResultSummary());
+    try expectLayout(abi.Vizg_HirSummary, vizg_c_sizeof_Vizg_HirSummary(), vizg_c_alignof_Vizg_HirSummary());
+    try expectLayout(abi.Vizg_HirRecord, vizg_c_sizeof_Vizg_HirRecord(), vizg_c_alignof_Vizg_HirRecord());
 
     try std.testing.expectEqual(f(abi.Vizg_ProjectConfig, "workspace_ptr", 1) + f(abi.Vizg_ProjectConfig, "workspace_len", 2) + f(abi.Vizg_ProjectConfig, "max_source_bytes", 3) + f(abi.Vizg_ProjectConfig, "max_modules", 4) + f(abi.Vizg_ProjectConfig, "max_diagnostics", 5) + f(abi.Vizg_ProjectConfig, "max_graph_depth", 6) + f(abi.Vizg_ProjectConfig, "max_semantic_types", 7), vizg_c_fields_Vizg_ProjectConfig());
     try std.testing.expectEqual(f(abi.Vizg_ProjectSource, "module_id", 1) + f(abi.Vizg_ProjectSource, "logical_name_ptr", 2) + f(abi.Vizg_ProjectSource, "logical_name_len", 3) + f(abi.Vizg_ProjectSource, "source_ptr", 4) + f(abi.Vizg_ProjectSource, "source_len", 5) + f(abi.Vizg_ProjectSource, "kind", 6) + f(abi.Vizg_ProjectSource, "is_root", 7) + f(abi.Vizg_ProjectSource, "reserved", 8) + f(abi.Vizg_ProjectSource, "revision", 9), vizg_c_fields_Vizg_ProjectSource());
@@ -76,6 +87,8 @@ test "official ABI v1 C and Zig layouts match" {
     try std.testing.expectEqual(f(abi.Vizg_ExternalExport, "name_ptr", 1) + f(abi.Vizg_ExternalExport, "name_len", 2) + f(abi.Vizg_ExternalExport, "kind", 3) + f(abi.Vizg_ExternalExport, "type_only", 4) + f(abi.Vizg_ExternalExport, "has_type_metadata", 5) + f(abi.Vizg_ExternalExport, "reserved", 6) + f(abi.Vizg_ExternalExport, "type_metadata", 7), vizg_c_fields_Vizg_ExternalExport());
     try std.testing.expectEqual(f(abi.Vizg_ExternalModule, "external_module_id", 1) + f(abi.Vizg_ExternalModule, "logical_name_ptr", 2) + f(abi.Vizg_ExternalModule, "logical_name_len", 3) + f(abi.Vizg_ExternalModule, "exports_ptr", 4) + f(abi.Vizg_ExternalModule, "export_count", 5), vizg_c_fields_Vizg_ExternalModule());
     try std.testing.expectEqual(f(abi.Vizg_ProjectResultSummary, "module_count", 1) + f(abi.Vizg_ProjectResultSummary, "has_failures", 2) + f(abi.Vizg_ProjectResultSummary, "reserved", 3), vizg_c_fields_Vizg_ProjectResultSummary());
+    try std.testing.expectEqual(f(abi.Vizg_HirSummary, "module_count", 1) + f(abi.Vizg_HirSummary, "external_declaration_count", 2) + f(abi.Vizg_HirSummary, "function_count", 3) + f(abi.Vizg_HirSummary, "block_count", 4) + f(abi.Vizg_HirSummary, "instruction_count", 5) + f(abi.Vizg_HirSummary, "binding_count", 6) + f(abi.Vizg_HirSummary, "type_count", 7) + f(abi.Vizg_HirSummary, "origin_count", 8), vizg_c_fields_Vizg_HirSummary());
+    try std.testing.expectEqual(f(abi.Vizg_HirRecord, "kind", 1) + f(abi.Vizg_HirRecord, "tag", 2) + f(abi.Vizg_HirRecord, "id", 3) + f(abi.Vizg_HirRecord, "parent_id", 4) + f(abi.Vizg_HirRecord, "secondary_id", 5) + f(abi.Vizg_HirRecord, "module_id", 6) + f(abi.Vizg_HirRecord, "type_id", 7) + f(abi.Vizg_HirRecord, "effect_bits", 8) + f(abi.Vizg_HirRecord, "flags", 9) + f(abi.Vizg_HirRecord, "reserved", 10) + f(abi.Vizg_HirRecord, "origin_id", 11) + f(abi.Vizg_HirRecord, "name_ptr", 12) + f(abi.Vizg_HirRecord, "name_len", 13) + f(abi.Vizg_HirRecord, "child_count", 14), vizg_c_fields_Vizg_HirRecord());
 
     try std.testing.expectEqual(@as(u32, @intFromEnum(abi.Vizg_ProjectStatus.INTERNAL_ERROR)), vizg_c_value_project_status_internal_error());
     try std.testing.expectEqual(@as(u32, 3), vizg_c_value_project_request_re_export());

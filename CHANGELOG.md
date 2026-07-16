@@ -8,13 +8,32 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Completed the implementation and validation gates for Goals 208–237,
+  establishing verified immutable HIR v1 as ViZG's final product. The final
+  audit records consumer, ownership, stable external, cross-mode,
+  verifier/printer, lowering-matrix, native/Android/WASM, and ABI evidence with
+  zero unresolved HIR P0/P1/P2 findings; the immutable freeze SHA remains
+  pending the intentional freeze commit.
+- Stabilized semantic-result arena ownership across value returns, preventing
+  optimized-build crashes when HIR/project consumers extend the retained type
+  store after analysis.
+- Bundled Zig compiler runtime support into the installed native archive so the
+  documented plain C linker invocation also succeeds in `ReleaseSafe`.
 - Froze the normative HIR v1 architecture and exhaustive lowering matrix:
   typed ANF-like values, explicit bindings and block control flow; project-local
   semantic identities and ownership; mandatory canonicalization; and a strict
   boundary excluding MIR, backend, runtime, and memory-management policy.
-- Established the portable `src/hir/` package, explicit `HirResult` ownership,
-  semantic-result borrowing, and result-local checked identities for every HIR
-  entity kind without changing C ABI v1.
+- Established the portable `src/hir/` package, sealed `HirResult` ownership,
+  an owned read-only type snapshot, and result-local checked identities for
+  every HIR entity kind; owned HIR now survives semantic/project teardown.
+- Added the official immutable HIR consumer contract: deterministic Zig
+  lookup/iteration plus separately versioned C summary/record access through
+  opaque result ownership, with controlled invalid/foreign handles and a
+  runnable standalone C consumer.
+- Added stable host-supplied `ExternalSymbolId` declarations independent of
+  descriptor order, distinct identity domains, function/global/constant/type
+  kinds, complete function semantic types, conservative effects, provenance,
+  canonical body-less lowering, and malformed-metadata rejection.
 - Added the target-independent HIR v1 core schema, closed legal operation set,
   semantic places and block-parameter control flow, with validated payload
   shapes and conservative per-operation effects.
@@ -84,8 +103,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
   snapshots spanning every supported lowering family.
 - Integrated canonical HIR derivation with the Zig project/session lifecycle:
   one verified immutable result is project-owned, repeated derivation is
-  idempotent, and source invalidation destroys HIR before borrowed semantics,
-  without changing frozen C ABI v1.
+  idempotent, and sealing removes semantic-storage lifetime dependence. The
+  project-input C ABI v1 remains unchanged while HIR access has its own version.
 - Added adversarial HIR closure coverage for deeply nested and wide control
   flow, cyclic modules, large provenance traces, mutation/property corpora,
   verifier corruption, and canonical rewrite stress. The previously unwired
