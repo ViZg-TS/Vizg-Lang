@@ -259,7 +259,8 @@ docs/                     Contributor and architecture documentation
 - No package, `node_modules`, `package.json`, or `tsconfig` resolution.
 - No runtime module loading, CommonJS, or bundling. Dynamic imports are represented syntactically.
 - No complete TypeScript semantic type checker.
-- No HIR/lowering layer.
+- Canonical typed HIR lowering is available through the Zig project API; MIR,
+  backend, runtime, and code generation layers remain out of scope.
 - No code generation or native compilation.
 - No JavaScript runtime or execution engine.
 - No package manager, bundler, or runtime module loader.

@@ -25,8 +25,8 @@ Responsibilities are fixed:
 Core never calls host code. Requests and responses cross the API boundary, and
 the host drives progress by calling the core again. Native filesystem support
 is an optional host adapter, not a core dependency. Goal 188 closed the final
-portable-core audit on 2026-07-14; HIR planning is authorized, while
-implementation requires a separate executable goal.
+portable-core audit on 2026-07-14. HIR implementation is now governed by the
+strict Goals 208–231 chain without changing this frozen ABI.
 
 ## Portable Roots And ABI Boundary
 
@@ -432,21 +432,173 @@ The CLI is intentionally diagnostic and exploratory. It is not a compiler driver
 
 Diagnostics are phase-tagged records with a severity, stable code, display name, message, source span, optional label, and optional path. Current diagnostics come from scanner, parser, binder, resolver, module graph, and semantic checking phases. Future phase names already exist in the enum, but their systems are not implemented yet.
 
-## Future Layers
+## Active HIR v1 Contract And Future Layers
 
-Likely future layers are intentionally separate from the current frontend and module graph:
+HIR v1 is the active next layer and remains separate from the frontend and
+module graph. Its normative contract is
+[`hir-v1-design.md`](hir-v1-design.md), its exhaustive source mapping is
+[`hir-v1-lowering-matrix.md`](hir-v1-lowering-matrix.md), and its strict
+implementation order is Goals 208–231 in [`VIZG_PLAN.md`](../VIZG_PLAN.md).
+HIR uses typed ANF-like values, explicit mutable bindings, blocks and
+terminators; it is neither SSA-lite nor MIR. Structured `if`, ternary and loop
+syntax lowers to control-flow blocks, never final syntax-shaped HIR nodes.
+The portable Zig root exports `hir`; each `HirResult` borrows the completed
+project semantic result, owns its HIR allocations, and scopes every HIR ID to
+one result-local identity domain. The core schema exposes modules, entities,
+canonical functions, bindings, captures, semantic places, regions, blocks,
+instructions and terminators. Its closed operation union validates immediate
+payload shape, derives conservative effects, and contains no AST fallback,
+mutable-binding phi, machine type, or memory-management metadata.
+An eligibility gate runs before HIR allocation: it requires complete local
+semantics, rejects blocking or recovered unsupported syntax, validates linked
+module/symbol/type identities, and applies canonical input and output budgets.
+Failures use stable `VZG7xxx` diagnostics and expose no partial `HirResult`;
+linked external identities remain valid metadata without fabricated bodies.
+Eligible projects lower deterministically to one shell per reachable source
+module. Shell identity is the exact host-supplied `ModuleId`; logical names are
+descriptive only. Each shell owns one module-initialization function and records
+initialization dependencies from resolved static and re-export graph edges.
+Import and export descriptors retain their linked semantic declarations and
+types. Graph cycles are traversed iteratively and never duplicate shells, and
+lowering performs no specifier resolution or filesystem access.
+Module and block declaration lowering resolves every declaration and identifier
+through binder/resolver `SymbolId`s; spelling is never an identity lookup key.
+Bindings record `var` hoisting, function hoisting, live imports, and `let`/`const`
+temporal-dead-zone initialization explicitly. Literals become typed HIR values,
+while type aliases, interfaces, type nodes, `as`, `satisfies`, and non-null
+wrappers emit no executable operation; transparent wrappers reuse the operand
+value and retain semantic type identity. Function declarations create canonical
+function/entity shells, with body lowering deferred to its ordered phase.
+Expression lowering is block-aware ANF: callees and arguments evaluate in
+left-to-right source order, sequence expressions retain every effect and yield
+their last value, and conditional expression results cross control-flow edges
+only as typed block arguments and parameters. The ANF builder assigns each
+temporary once and rejects instruction or terminator operands that have not
+already been defined in the same result identity domain.
+Assignments and updates lower through semantic `PlaceId` references for
+bindings, static properties, computed elements, and super properties. A place
+captures its already-evaluated base and key, never a physical address or
+storage layout. Simple and non-logical compound assignments, prefix/postfix
+updates, and `delete` become explicit make/load/store/delete sequences; target
+evaluation precedes the right-hand side and occurs exactly once. Logical
+assignments use nullish or boolean branches and store only on the selected arm.
+Unary and binary operations retain their typed semantic modes. Logical,
+conditional, and optional-chain expressions lower to explicit branches and
+typed block-parameter merges, so unselected computed keys and arguments do not
+evaluate.
+Property reads use places plus `load_place`. Ordinary calls, receiver-preserving
+method and super calls, super-constructor calls, and construction remain
+distinct operations. Callees, bases, computed keys, and arguments preserve
+source order and single evaluation, including optional method calls whose
+property value is tested before their arguments. `import.meta` and `new.target`
+remain explicit meta loads. Dynamic import retains its runtime source, options,
+and attributes in HIR; HIR performs no specifier resolution.
+Aggregate lowering preserves object member and array element source order,
+distinguishes array holes from values and iterable spread, and keeps call spread
+context-specific. Untagged templates perform ordered string conversion; tagged
+templates retain receiver semantics, raw/optional-cooked segments, and stable
+source-site identity. Regexp creation retains canonical flags and stable
+source-site identity while creating a fresh value for every evaluation.
+Function declarations, expressions, arrows, object methods/accessors, and
+async/generator variants lower through one canonical function-body path.
+Parameter plans explicitly read arguments, branch for ordered per-call default
+initializers, and collect rest values from their ordinary argument index.
+Optional syntax erases, while parameter-property metadata remains available for
+class initialization. Closure captures use already resolved semantic identities
+and distinguish live bindings from lexical receiver state without choosing an
+environment layout.
+Conditional statements and synchronous loops lower to explicit blocks and
+terminators. Classic `for` retains a distinct update block, `do...while` enters
+its body before testing, and `for...in` uses semantic property-enumeration
+operations rather than a library-call approximation. `for...of` uses explicit
+iterator next/done/value operations; normal exhaustion reaches the exit
+directly, while abrupt completion crosses an iterator-close cleanup region.
+`switch` evaluates its discriminant once, tests non-default cases lazily in
+source order with strict equality, and represents case fallthrough only with
+block edges. Break and continue targets are resolved to exact block identities;
+label spellings do not survive in executable HIR, including across nested loops,
+switches, and iterator-close regions.
+Exception control flow uses target-independent catch and cleanup regions.
+`finally` has one shared handler and resumes an explicit pending normal, return,
+throw, break, or continue completion; an abrupt completion created by the
+handler replaces that pending completion. Catch parameters initialize only on
+handler entry. Region ownership, nesting, protected-entry edges, cleanup exits,
+and resume sites are structurally validated without selecting an exception ABI.
+Async and generator functions retain their semantic flags. `await`, `yield`,
+and delegated `yield*` lower to typed suspension operations with owned source
+origins. `for await...of` explicitly acquires an async iterator, awaits each
+next result, and reuses the iterator-close cleanup-region contract for abrupt
+completion. HIR does not synthesize state-machine blocks, resume dispatch,
+runtime frame layout, or promise machinery.
+Class declarations and expressions lower to one runtime class entity with one
+canonical constructor, method/accessor functions, and source-ordered instance
+and static field-initialization plans. `extends` evaluates once; explicit
+derived-constructor `super()` calls remain distinct operations, and parameter
+properties initialize after that call. Class bindings retain temporal-dead-zone
+state. Enums lower to ordered runtime objects: numeric members add reverse
+mappings while string members do not. Module initialization preserves source
+order, deterministic cyclic dependencies, live import/export bindings, named
+and star re-export identity, without choosing prototype, object-layout, or
+constructor ABI policy.
+Every eligible lowering then runs the same mandatory HIR canonicalization,
+independent of optimization mode. Its deterministic fixed-order worklist folds
+safe primitive literals, replaces literal branches, eliminates trivial copies,
+collapses identical merge values, removes unreachable blocks and unused
+proven-pure instructions, merges legal empty jump blocks, and normalizes
+`return undefined` to an empty return. Rewrites retain surviving instruction
+origins, never discard observable effects or identity creation, and consume the
+bounded `rewrites` budget; exhaustion fails lowering with `VZG7009` and no
+partial result. This stage only establishes canonical HIR shape and performs no
+MIR or target-dependent optimization.
+HIR debug metadata is result-owned side-table data selected independently from
+executable lowering. `none` leaves every executable origin invalid and records
+no trace; `minimal` gives every instruction and block terminator a valid origin
+(the block origin is the terminator origin) with the exact opaque host
+`ModuleId`, primary span, AST contributors, syntax kind, semantic declaration,
+type, parent, lowering rule, and synthetic reason where applicable. `full`
+retains the same origins and adds transformation events for source lowering,
+erased syntax, and canonical rewrites. Trace events may therefore describe an
+interface or type alias with no executable output. Paths and logical module
+names are never used to reconstruct module identity, and selecting a debug
+level cannot change executable HIR shape.
+HIR also has a deterministic text printer for debugging and tests. Canonical
+output walks only stable project-owned slices and renders checked numeric IDs,
+never pointer values or hash-table order. Brief, typed, provenance, and full
+trace views are projections of the same immutable HIR; type and origin
+annotations can be selected independently. Invalid or foreign IDs produce
+controlled markers instead of indexing project storage. Reference snapshot
+tests exercise every supported lowering family.
+
+The Zig project/session layer is the canonical HIR entry point. Once
+`Project.finish` has produced complete project semantics, `hir.deriveProject`
+performs eligibility checking, lowering, canonicalization, verification, and
+project ownership transfer. Repeated calls are idempotent and return the same
+immutable result. Project mutation destroys HIR before the semantic result it
+borrows, and project teardown destroys each exactly once. This integration is
+intentionally absent from the frozen C ABI v1.
+
+HIR construction is bounded under adversarial input. Every generic arena,
+nesting, provenance, and project-growth limit is checked before mutating the
+owned result and reports `VZG7010`; this includes active cleanup-region nesting.
+Canonical rewrite convergence is the deliberate exception: exhausting that
+stage's dedicated rewrite budget reports `VZG7009`. Deep and wide control flow,
+cyclic modules, abrupt iterator cleanup, large traces, deterministic mutation
+corpora, and corrupted-HIR verifier fixtures exercise these contracts in every
+optimization mode without introducing target-dependent behavior.
+
+Later layers remain intentionally separate:
 
 - Expanded module layer: package lookup, configuration-aware resolution, and richer import/export forms.
 - Type checker expansion: add advanced TypeScript forms beyond the supported Typed Semantics v2 subset.
-- HIR/lowering: lower AST or typed AST into a more compiler-friendly intermediate form.
-- Runtime/compiler layers: execute, interpret, compile, or emit code from lowered forms.
+- MIR/runtime/compiler layers: own global optimization, representation, memory
+  management, execution, interpretation, compilation, or code emission.
 
 ## Non-Goals For Current Milestone
 
 The current milestone does not implement:
 
 - Package, `node_modules`, `package.json`, or `tsconfig` resolution.
-- Dynamic imports or CommonJS.
+- Dynamic-import runtime loading or CommonJS execution.
 - Bundling, tree shaking, or runtime module loading.
 - Complete TypeScript type checking.
 - JavaScript runtime behavior.

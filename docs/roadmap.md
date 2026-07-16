@@ -61,7 +61,8 @@ Complete TypeScript compatibility and advanced annotation forms remain out of sc
 
 ## Active Milestone: Canonical Typed HIR v1
 
-Goals 208–231 are the active strict implementation chain. The normative
+Goals 208–230 are implemented; Goal 231 remains in the active strict
+implementation chain. The normative
 contracts are:
 
 - [`hir-v1-design.md`](hir-v1-design.md) — typed ANF-like, block-based HIR,
@@ -71,7 +72,7 @@ contracts are:
 - [`../VIZG_PLAN.md`](../VIZG_PLAN.md) — ordered Goals 208–231 and acceptance
   gates.
 
-HIR v1 will:
+HIR v1 now:
 
 - consume the immutable complete project semantic result;
 - erase type-only and syntax-only forms;
@@ -82,7 +83,7 @@ HIR v1 will:
 - apply only mandatory local canonicalization;
 - expose only a verified immutable project-owned result.
 
-HIR v1 will not implement MIR, global optimization, object/closure layout,
+HIR v1 does not implement MIR, global optimization, object/closure layout,
 async state machines, exception ABI, memory management, GC, bytecode or native
 code generation. Those belong to a separate future MIR/runtime project.
 

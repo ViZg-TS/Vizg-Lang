@@ -8,6 +8,91 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Froze the normative HIR v1 architecture and exhaustive lowering matrix:
+  typed ANF-like values, explicit bindings and block control flow; project-local
+  semantic identities and ownership; mandatory canonicalization; and a strict
+  boundary excluding MIR, backend, runtime, and memory-management policy.
+- Established the portable `src/hir/` package, explicit `HirResult` ownership,
+  semantic-result borrowing, and result-local checked identities for every HIR
+  entity kind without changing C ABI v1.
+- Added the target-independent HIR v1 core schema, closed legal operation set,
+  semantic places and block-parameter control flow, with validated payload
+  shapes and conservative per-operation effects.
+- Added the pre-lowering HIR eligibility gate, stable `VZG7001`–`VZG7011`
+  diagnostics, semantic identity validation, and canonical pre-growth resource
+  limits; ineligible or partial semantic projects cannot produce `HirResult`.
+- Added deterministic HIR project/module shell lowering: exact host `ModuleId`s,
+  module-initialization functions, graph-derived initialization dependencies,
+  and live linked import/export identities, including external metadata without
+  fabricated executable bodies.
+- Added semantic-identity-driven declaration lowering for module and block
+  shells: exact symbol bindings, JavaScript hoisting and temporal-dead-zone
+  states, value-preserving literals, function shells, and fully erased
+  type-only declarations and assertion wrappers.
+- Added block-aware ANF expression lowering with deterministic left-to-right
+  calls and sequences, typed block-parameter merges for conditional values,
+  and construction-time rejection of undefined temporary operands.
+- Added semantic place lowering for bindings, static properties, computed
+  elements, and super properties; simple and non-logical compound assignment,
+  prefix/postfix update, and delete now preserve single target evaluation and
+  source-order effects without exposing storage layout.
+- Added semantic-mode-aware operator lowering and explicit control flow for
+  logical, conditional, logical-assignment, and optional-chain expressions,
+  preserving selected-arm evaluation and typed block-parameter merges.
+- Added receiver-preserving ordinary, method, super, and constructor calls;
+  ordered property/element access; explicit meta loads; and runtime dynamic
+  import HIR that retains source, options, and attributes without resolving
+  specifiers.
+- Added source-ordered object and array HIR, including distinct methods,
+  accessors, holes, and context-specific spread; untagged and tagged template
+  lowering now retains conversion order, receiver semantics, raw/cooked data,
+  and stable sites, while regexp creation retains canonical flags and sites.
+- Unified function declarations, expressions, arrows, object methods and
+  accessors, and async/generator forms behind canonical HIR bodies with explicit
+  ordered argument/default/rest parameter plans and resolved semantic captures,
+  while deferring closure environment layout.
+- Lowered conditional and loop syntax to explicit HIR blocks: `for...in` uses
+  semantic property enumeration, while `for...of` uses iterator protocol
+  operations with close-on-abrupt cleanup regions and direct normal exhaustion.
+- Added canonical `switch` lowering with one discriminant evaluation, lazy
+  source-ordered strict-equality tests, explicit default routing, and CFG-only
+  fallthrough; break and continue labels now erase after resolving to exact HIR
+  block targets, including iterator-close transfers.
+- Added canonical exception-region lowering for `try`, `catch`, and `finally`:
+  catch bindings initialize only at handler entry, every pending completion
+  crosses one shared cleanup body, completion inside `finally` replaces it, and
+  structural validation rejects illegal region entries and exits.
+- Added target-independent async and generator suspension lowering: `await`,
+  `yield`, delegated `yield*`, async generators, and `for await...of` retain
+  typed suspension operations, async iterator acquisition/await/close semantics,
+  and owned source origins without selecting a state machine or runtime frame.
+- Added canonical class, enum, and module-initialization lowering: class syntax
+  produces one entity with ordered constructor/method/field plans, derived
+  parameter properties follow `super()`, numeric enums retain reverse mappings,
+  and cyclic modules preserve deterministic live import/export identities.
+- Added mandatory deterministic HIR canonicalization in every lowering mode,
+  including safe literal folding, branch/copy/merge simplification,
+  effect-aware dead-code and unreachable-block removal, empty returns, and the
+  bounded `VZG7009` rewrite-failure contract.
+- Added optional HIR source provenance side tables with `none`, `minimal`, and
+  `full` modes. Minimal mode owns opaque module identities, spans, AST
+  contributors, semantic identities, and lowering reasons; full mode also
+  records deterministic lowering and canonicalization events, including erased
+  syntax, without changing executable HIR.
+- Added a deterministic HIR debug printer with canonical, brief, typed, origin,
+  and full-trace views, controlled invalid-ID rendering, and stable reference
+  snapshots spanning every supported lowering family.
+- Integrated canonical HIR derivation with the Zig project/session lifecycle:
+  one verified immutable result is project-owned, repeated derivation is
+  idempotent, and source invalidation destroys HIR before borrowed semantics,
+  without changing frozen C ABI v1.
+- Added adversarial HIR closure coverage for deeply nested and wide control
+  flow, cyclic modules, large provenance traces, mutation/property corpora,
+  verifier corruption, and canonical rewrite stress. The previously unwired
+  region-nesting limit is now enforced before allocation; generic resource
+  violations report `VZG7010`, while canonical rewrite exhaustion retains its
+  dedicated `VZG7009` contract.
+
 - Closed the Goal 188 adversarial audit with no unresolved in-scope finding:
   hardened ABI range, alias, stale-handle, and scratch-lifetime validation;
   removed the native filesystem path-reopen race; added mutation, replacement,
