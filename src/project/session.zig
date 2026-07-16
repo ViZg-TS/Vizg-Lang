@@ -5,6 +5,7 @@ const ast = @import("../frontend/ast.zig");
 const binder = @import("../frontend/binder.zig");
 const contracts = @import("contracts.zig");
 const frontend = @import("../frontend/frontend.zig");
+const hir_result = @import("../hir/result.zig");
 const modules_mod = @import("../modules/root.zig");
 const semantics = @import("../semantics/root.zig");
 const types = @import("../types/root.zig");
@@ -56,6 +57,7 @@ pub const Project = struct {
     requests: state_machine.StateMachine,
     graph: project_graph.Graph,
     project_semantics: ?*semantics.BorrowedProjectSemanticResult = null,
+    project_hir: ?*hir_result.HirResult = null,
     external_modules: std.ArrayList(OwnedExternalModule) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Project {
@@ -127,6 +129,21 @@ pub const Project = struct {
 
     pub fn semanticResult(self: *const Project) ?*const semantics.BorrowedProjectSemanticResult {
         return self.project_semantics;
+    }
+
+    /// Immutable canonical HIR owned by this completed project, when derived.
+    pub fn hirResult(self: *const Project) ?*const hir_result.HirResult {
+        return self.project_hir;
+    }
+
+    /// Transfers one successfully lowered result into project ownership.
+    /// Intended for the HIR project-session bridge; a second install is rejected.
+    pub fn installHirResult(self: *Project, result: hir_result.HirResult) !*const hir_result.HirResult {
+        if (self.project_hir != null) return error.HirAlreadyDerived;
+        const owned = try self.allocator.create(hir_result.HirResult);
+        owned.* = result;
+        self.project_hir = owned;
+        return owned;
     }
 
     pub fn lookupRequest(self: *const Project, id: contracts.RequestId) ?state_machine.RequestRecord {
@@ -293,10 +310,19 @@ pub const Project = struct {
     }
 
     fn clearProjectSemantics(self: *Project) void {
+        self.clearProjectHir();
         if (self.project_semantics) |result| {
             result.deinit();
             self.allocator.destroy(result);
             self.project_semantics = null;
+        }
+    }
+
+    fn clearProjectHir(self: *Project) void {
+        if (self.project_hir) |result| {
+            result.deinit();
+            self.allocator.destroy(result);
+            self.project_hir = null;
         }
     }
 
