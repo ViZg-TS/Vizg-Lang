@@ -31,8 +31,19 @@ pub fn checkFile(
         switch (node.data) {
             .VariableDeclarator => |declaration| try checkInitializer(allocator, result, type_info, store, node_id, declaration, &out),
             .AssignmentExpression => |assignment| try checkAssignment(allocator, tree, type_info, store, node_id, assignment, &out),
-            .CallExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, false, &out),
-            .NewExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, true, &out),
+            .CallExpression => |call| try checkCall(
+                allocator,
+                tree,
+                type_info,
+                store,
+                node_id,
+                call.callee,
+                call.arguments,
+                tree.node(call.callee).data == .SuperExpression,
+                tree.node(call.callee).data == .SuperExpression,
+                &out,
+            ),
+            .NewExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, true, false, &out),
             .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassMethod => try checkFunctionReturns(allocator, result, type_info, store, node_id, &out),
             else => try emitInferenceIssue(allocator, tree, type_info, node_id, &out),
         }
@@ -119,6 +130,7 @@ fn checkCall(
     callee_id: ast_mod.NodeId,
     arguments: []const ast_mod.NodeId,
     construct: bool,
+    super_call: bool,
     out: *std.ArrayList(diagnostics.Diagnostic),
 ) !void {
     const info = type_info.lookupNodeInfo(call_id) orelse return;
@@ -138,7 +150,7 @@ fn checkCall(
         return;
     }
 
-    const signature = callSignature(callee_type, construct, store) orelse return;
+    const signature = callSignature(callee_type, construct, super_call, store) orelse return;
     for (arguments, 0..) |argument, index| {
         const actual = resolvedNode(type_info, argument, store) orelse continue;
         const parameter = parameterForArgument(signature, index) orelse continue;
@@ -150,7 +162,7 @@ fn checkCall(
     try appendDiagnostic(allocator, out, .invalid_argument_type, "argument is not accepted by every callable union member", "invalid argument type", tree.node(call_id).span, tree.node(callee_id).span, "callable union is here");
 }
 
-fn callSignature(callee_type: types.TypeId, construct: bool, store: *const types.TypeStore) ?types.FunctionSignature {
+fn callSignature(callee_type: types.TypeId, construct: bool, super_call: bool, store: *const types.TypeStore) ?types.FunctionSignature {
     if (!construct) {
         if (store.lookupFunction(callee_type)) |signature| return signature;
         const callee = store.lookup(callee_type) orelse return null;
@@ -159,8 +171,12 @@ fn callSignature(callee_type: types.TypeId, construct: bool, store: *const types
         return null;
     }
     const callee = store.lookup(callee_type) orelse return null;
-    if (callee.kind != .class_constructor) return null;
-    const class = store.lookupClassSemanticType(callee.kind.class_constructor.identity) orelse return null;
+    const identity = switch (callee.kind) {
+        .class_constructor => |constructor| constructor.identity,
+        .class => |instance| if (super_call) instance.identity else return null,
+        else => return null,
+    };
+    const class = store.lookupClassSemanticType(identity) orelse return null;
     return store.lookupFunction(class.constructor_signature orelse return null);
 }
 
