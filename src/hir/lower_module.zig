@@ -16,7 +16,7 @@ pub fn lower(builder: *builder_mod.Builder, project: *const project_mod.Project,
     var dependency_ids: std.ArrayList(project_mod.ModuleId) = .empty;
     for (project.edges()) |edge| {
         if (edge.importer != module.id or edge.state != .resolved) continue;
-        if (edge.kind == .dynamic or edge.kind == .type_only) continue;
+        if (edge.operation == .dynamic_import or edge.type_only) continue;
         const target = edge.target orelse continue;
         if (!containsModule(dependency_ids.items, target)) try dependency_ids.append(builder.allocator, target);
     }

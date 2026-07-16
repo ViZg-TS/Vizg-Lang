@@ -27,6 +27,7 @@ pub const ModuleRequest = project.ModuleRequest;
 pub const ModuleRequestInput = project.ModuleRequestInput;
 pub const ExternalExportKind = project.ExternalExportKind;
 pub const ExternalType = project.ExternalType;
+pub const ExternalNamespace = project.ExternalNamespace;
 pub const ExternalDeclarationKind = project.ExternalDeclarationKind;
 pub const ExternalParameterDescriptor = project.ExternalParameterDescriptor;
 pub const ExternalFunctionDescriptor = project.ExternalFunctionDescriptor;
@@ -35,8 +36,11 @@ pub const ExternalExportDescriptor = project.ExternalExportDescriptor;
 pub const ExternalModuleDescriptor = project.ExternalModuleDescriptor;
 pub const ModuleState = project.ModuleState;
 pub const Project = project.Project;
+pub const ProjectLimits = project.ProjectLimits;
 pub const ProjectStep = project.ProjectStep;
 pub const ProjectFinishResult = project.ProjectFinishResult;
+pub const ProjectDiagnosticPhase = project.ProjectDiagnosticPhase;
+pub const ProjectDiagnostic = project.ProjectDiagnostic;
 
 // Moved: type model now lives under `types/` so the frontend stays focused on
 // syntax and single-file structural analysis. Callers can reach the same

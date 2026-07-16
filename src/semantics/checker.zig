@@ -23,7 +23,17 @@ pub fn checkFile(
     type_info: type_info_mod.TypeInfo,
     store: *types.TypeStore,
 ) ![]const diagnostics.Diagnostic {
-    var out: std.ArrayList(diagnostics.Diagnostic) = .empty;
+    return checkFileWithLimit(allocator, result, type_info, store, std.math.maxInt(usize));
+}
+
+pub fn checkFileWithLimit(
+    allocator: std.mem.Allocator,
+    result: frontend.FrontendResult,
+    type_info: type_info_mod.TypeInfo,
+    store: *types.TypeStore,
+    max_diagnostics: usize,
+) ![]const diagnostics.Diagnostic {
+    var out = diagnostics.LimitedList.init(max_diagnostics);
     const tree = &result.ast;
 
     for (tree.nodes, 0..) |node, raw_id| {
@@ -31,25 +41,14 @@ pub fn checkFile(
         switch (node.data) {
             .VariableDeclarator => |declaration| try checkInitializer(allocator, result, type_info, store, node_id, declaration, &out),
             .AssignmentExpression => |assignment| try checkAssignment(allocator, tree, type_info, store, node_id, assignment, &out),
-            .CallExpression => |call| try checkCall(
-                allocator,
-                tree,
-                type_info,
-                store,
-                node_id,
-                call.callee,
-                call.arguments,
-                tree.node(call.callee).data == .SuperExpression,
-                tree.node(call.callee).data == .SuperExpression,
-                &out,
-            ),
-            .NewExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, true, false, &out),
+            .CallExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, false, &out),
+            .NewExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, true, &out),
             .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassMethod => try checkFunctionReturns(allocator, result, type_info, store, node_id, &out),
             else => try emitInferenceIssue(allocator, tree, type_info, node_id, &out),
         }
     }
 
-    sortDiagnostics(out.items);
+    sortDiagnostics(out.mutableItems());
     return out.toOwnedSlice(allocator);
 }
 
@@ -60,7 +59,7 @@ fn checkInitializer(
     store: *types.TypeStore,
     declaration_id: ast_mod.NodeId,
     declaration: ast_mod.VariableDeclarator,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
 ) !void {
     const initializer = declaration.init orelse return;
     const symbol = symbolForDeclaration(result.bind, declaration_id) orelse return;
@@ -76,6 +75,7 @@ fn checkInitializer(
     // meaningfully compared side-by-side so we do not silence real errors.
     const emitted = try checkAggregateElementMismatch(allocator, result.ast, type_info, store, result.ast.node(declaration_id).span, initializer, expected, actual, out);
     if (emitted) return;
+    try out.ensureUnusedCapacity(1);
     const message = try compatibilityMessage(allocator, compatibility);
     try appendDiagnostic(allocator, out, .type_mismatch, message, "incompatible initializer", result.ast.node(initializer).span, symbol.span, "declared type is here");
 }
@@ -108,7 +108,7 @@ fn checkAssignment(
     store: *types.TypeStore,
     assignment_id: ast_mod.NodeId,
     assignment: ast_mod.AssignmentExpression,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
 ) !void {
     const expected = resolvedNode(type_info, assignment.left, store) orelse return;
     const actual_node = if (assignment.operator == .Equal) assignment.right else assignment_id;
@@ -130,8 +130,7 @@ fn checkCall(
     callee_id: ast_mod.NodeId,
     arguments: []const ast_mod.NodeId,
     construct: bool,
-    super_call: bool,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
 ) !void {
     const info = type_info.lookupNodeInfo(call_id) orelse return;
     if (info.issue == .invalid_constructor) {
@@ -150,7 +149,7 @@ fn checkCall(
         return;
     }
 
-    const signature = callSignature(callee_type, construct, super_call, store) orelse return;
+    const signature = callSignature(callee_type, construct, store) orelse return;
     for (arguments, 0..) |argument, index| {
         const actual = resolvedNode(type_info, argument, store) orelse continue;
         const parameter = parameterForArgument(signature, index) orelse continue;
@@ -162,7 +161,7 @@ fn checkCall(
     try appendDiagnostic(allocator, out, .invalid_argument_type, "argument is not accepted by every callable union member", "invalid argument type", tree.node(call_id).span, tree.node(callee_id).span, "callable union is here");
 }
 
-fn callSignature(callee_type: types.TypeId, construct: bool, super_call: bool, store: *const types.TypeStore) ?types.FunctionSignature {
+fn callSignature(callee_type: types.TypeId, construct: bool, store: *const types.TypeStore) ?types.FunctionSignature {
     if (!construct) {
         if (store.lookupFunction(callee_type)) |signature| return signature;
         const callee = store.lookup(callee_type) orelse return null;
@@ -171,12 +170,8 @@ fn callSignature(callee_type: types.TypeId, construct: bool, super_call: bool, s
         return null;
     }
     const callee = store.lookup(callee_type) orelse return null;
-    const identity = switch (callee.kind) {
-        .class_constructor => |constructor| constructor.identity,
-        .class => |instance| if (super_call) instance.identity else return null,
-        else => return null,
-    };
-    const class = store.lookupClassSemanticType(identity) orelse return null;
+    if (callee.kind != .class_constructor) return null;
+    const class = store.lookupClassSemanticType(callee.kind.class_constructor.identity) orelse return null;
     return store.lookupFunction(class.constructor_signature orelse return null);
 }
 
@@ -185,7 +180,7 @@ fn emitInferenceIssue(
     tree: *const ast_mod.Ast,
     type_info: type_info_mod.TypeInfo,
     node_id: ast_mod.NodeId,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
 ) !void {
     const info = type_info.lookupNodeInfo(node_id) orelse return;
     const detail: struct { code: diagnostics.DiagnosticCode, message: []const u8, label: []const u8 } = switch (info.issue) {
@@ -205,7 +200,7 @@ fn checkFunctionReturns(
     type_info: type_info_mod.TypeInfo,
     store: *types.TypeStore,
     function_id: ast_mod.NodeId,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
 ) !void {
     const node = result.ast.node(function_id);
     const function = function_like.describe(result.ast, function_id) orelse return;
@@ -236,7 +231,7 @@ fn checkFunctionLikeRules(
     allocator: std.mem.Allocator,
     tree: *const ast_mod.Ast,
     function: function_like.Descriptor,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
 ) !void {
     const span = tree.node(function.node).span;
     if ((function.kind == .constructor or function.isAccessor()) and
@@ -267,7 +262,7 @@ fn checkForbiddenReturnValues(
     node_id: ast_mod.NodeId,
     kind: function_like.Kind,
     function_span: tokens.Span,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
 ) !void {
     if (!isValidNode(tree, node_id)) return;
     const node = tree.node(node_id);
@@ -309,7 +304,7 @@ fn checkReturnsIn(
     node_id: ast_mod.NodeId,
     expected: types.TypeId,
     function_span: tokens.Span,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
 ) !void {
     if (!isValidNode(tree, node_id)) return;
     const node = tree.node(node_id);
@@ -370,7 +365,7 @@ fn checkAggregateElementMismatch(
     initializer_id: ast_mod.NodeId,
     expected: types.TypeId,
     actual: types.TypeId,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
 ) !bool {
     const expected_ty = store.lookup(expected) orelse return false;
     const actual_ty = store.lookup(actual) orelse return false;
@@ -394,6 +389,7 @@ fn checkAggregateElementMismatch(
                     const act_elem = actual_tuple.elements[i];
                     if (act_elem.hole) continue;
                     if (type_compat.check(act_elem.type_id, expected_element.type_id, store).isCompatible()) continue;
+                    try out.ensureUnusedCapacity(1);
                     const msg = try std.fmt.allocPrint(allocator, "tuple element at index {} is not assignable to the declared type", .{i});
                     const related = try std.fmt.allocPrint(allocator, "declared tuple element at index {} is here", .{i});
                     try appendDiagnostic(allocator, out, .type_mismatch, msg, "element type mismatch", arrayElementSpan(tree, initializer_id, i), expected_span, related);
@@ -415,6 +411,7 @@ fn checkAggregateElementMismatch(
                     if (eff_act == null or eff_act.? == types.invalid_type) eff_act = arr_type.element_type;
                     if (eff_act == null) continue;
                     if (type_compat.check(eff_act.?, decl_elem.type_id, store).isCompatible()) continue;
+                    try out.ensureUnusedCapacity(1);
                     const msg = try std.fmt.allocPrint(allocator, "tuple element at index {} is not assignable to the declared type", .{i});
                     const related = try std.fmt.allocPrint(allocator, "declared tuple element at index {} is here", .{i});
                     try appendDiagnostic(allocator, out, .type_mismatch, msg, "element type mismatch", tree.node(elem_id).span, expected_span, related);
@@ -505,7 +502,7 @@ fn issueRelated(tree: *const ast_mod.Ast, node_id: ast_mod.NodeId) tokens.Span {
 
 fn appendDiagnostic(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(diagnostics.Diagnostic),
+    out: *diagnostics.LimitedList,
     code: diagnostics.DiagnosticCode,
     message: []const u8,
     label: []const u8,
@@ -513,6 +510,7 @@ fn appendDiagnostic(
     related_span: tokens.Span,
     related_message: []const u8,
 ) !void {
+    try out.ensureUnusedCapacity(1);
     const related = try allocator.alloc(diagnostics.RelatedSpan, 1);
     related[0] = .{ .span = related_span, .message = related_message };
     try out.append(allocator, .{ .severity = .@"error", .code = code, .phase = .type_checker, .message = message, .span = span, .label = label, .related = related });

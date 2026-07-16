@@ -143,7 +143,7 @@ fn validateProjectIdentities(
             try appendUnique(output, allocator, .{ .code = .missing_semantic_identity, .module_id = item.module_id, .span = item.span });
             continue;
         };
-        if (!validIdentity(project, result, target, item.state == .external)) {
+        if (!validIdentity(project, result, target, target.external_module_id != null)) {
             try appendUnique(output, allocator, .{ .code = .invalid_semantic_reference, .module_id = item.module_id, .span = item.span });
         }
     }

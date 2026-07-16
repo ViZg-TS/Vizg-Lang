@@ -70,23 +70,29 @@ pub const TupleType = struct {
 
 // ---------------------------------------------------------------------------
 // SemanticDeclId — module-qualified identity for a nominal declaration.
-// Pair of (module_id, declaration_id) where declaration_id is local to one AST;
-// the pair forms a globally unique key across modules in one project result.
-// Struct equality on integer fields gives cheap cross-module comparison without
-// allocations and matches the "never equal merely because local NodeIds match"
-// invariant — two declarations share identity only when both components match.
+// Source declaration IDs are local to one AST. External descriptor indexes use
+// a separate identity domain so an equal numeric module/declaration pair cannot
+// collide with a source declaration. Struct equality gives cheap cross-module
+// comparison without allocations.
 // ---------------------------------------------------------------------------
 
 pub const SemanticDeclId = struct {
     module_id: u64,
     declaration_id: u32,
+    external: bool = false,
 
     pub fn init(module_id_: u64, decl_id_: u32) SemanticDeclId {
         return .{ .module_id = module_id_, .declaration_id = decl_id_ };
     }
 
+    pub fn initExternal(module_id_: u64, export_index: u32) SemanticDeclId {
+        return .{ .module_id = module_id_, .declaration_id = export_index, .external = true };
+    }
+
     pub fn eql(left: SemanticDeclId, right: SemanticDeclId) bool {
-        return left.module_id == right.module_id and left.declaration_id == right.declaration_id;
+        return left.module_id == right.module_id and
+            left.declaration_id == right.declaration_id and
+            left.external == right.external;
     }
 };
 

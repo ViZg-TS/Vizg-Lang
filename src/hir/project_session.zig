@@ -58,7 +58,6 @@ test "project derives exactly one owned canonical HIR result" {
         .logical_name = "goal229.ts",
         .bytes = "export const answer: number = 42;",
         .kind = .module,
-        .revision = 1,
     });
     while (switch (try project.step()) {
         .request => true,
@@ -76,7 +75,7 @@ test "project derives exactly one owned canonical HIR result" {
     try std.testing.expectEqual(@as(usize, 1), second.result.project.modules.len);
 }
 
-test "project revision invalidates owned HIR before borrowed semantics" {
+test "finished project retains owned HIR and borrowed semantics" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
 
@@ -85,7 +84,6 @@ test "project revision invalidates owned HIR before borrowed semantics" {
         .logical_name = "goal230.ts",
         .bytes = "export const value = 1;",
         .kind = .module,
-        .revision = 1,
     });
     while (try project.step() != .complete) {}
 
@@ -94,13 +92,12 @@ test "project revision invalidates owned HIR before borrowed semantics" {
     try std.testing.expect(project.hirResult() != null);
     try std.testing.expect(project.semanticResult() != null);
 
-    try project.supplySource(.{
-        .id = .init(230),
-        .logical_name = "goal230.ts",
-        .bytes = "export const value = 2;",
+    try std.testing.expectError(error.ProjectFinished, project.supplySource(.{
+        .id = .init(231),
+        .logical_name = "other.ts",
+        .bytes = "export const other = 2;",
         .kind = .module,
-        .revision = 2,
-    });
-    try std.testing.expect(project.hirResult() == null);
-    try std.testing.expect(project.semanticResult() == null);
+    }));
+    try std.testing.expect(project.hirResult() != null);
+    try std.testing.expect(project.semanticResult() != null);
 }

@@ -259,58 +259,39 @@ The type model and semantic mapping do **not** live inside `src/frontend/`. They
 The frontend pipeline (`frontend.analyze`) produces syntax-level output only. Type annotations are a structured, span-preserving syntax tree with dedicated union, intersection, function, and array precedence. This syntax tree is distinct from semantic `TypeId` values. The semantics layer above the module graph lowers supported named, structural, generic, and cross-module annotations into one canonical `TypeStore` per result or project.
 
 
-## Module Graph And Linker (Cross-File Resolution)
+## Module Graph And Linker (Host-Resolved Cross-File Analysis)
 
-The multi-file flow lives in `src/modules/`:
-
-```txt
-entry path
-  -> read source
-  -> frontend.analyze per file (single-file pipeline above)
-  -> collect static imports and re-export sources from each file's AST
-  -> resolve relative imports by canonical path
-  -> recursively analyze imported and re-exported files
-  -> cache by canonical path
-  -> build import edges
-  -> link named/default/namespace imports to target symbols via linker.Linker
-  -> validate named imports against exports
-  -> module diagnostics (VZG5xxx)
-```
-
-The module graph layer exposes `ModuleGraph.linked_imports`, which is a snapshot of all per-build cross-file import links. Each link captures:
-
-- the local name and imported name in the source file
-- the kind (`named`, `default`, `namespace`, `external`, or `unresolved`)
-- the target module id (for resolved imports) and symbol id (when exported by the target)
-
-Each import edge also preserves source specifier, declaration kind (`named`, `default`, `namespace`, `side_effect`, or `mixed`), and declaration-level `type_only` marker. Mixed imports retain per-specifier default/named kinds in AST and binder records.
-
-`vizg modules <file>` renders these links as a "Links" section after Imports in CLI output:
+`frontend.analyze` remains single-file. The portable project layer composes
+multiple frontend results without resolving specifiers itself:
 
 ```txt
-Modules
-  module 0 path="..."
-  module 1 path="..."
-
-Imports
-  module 0 -> module 1 specifier="./dep" kind=named type_only=false status=local
-
-Links
-  link 0 local="value" imported="value" from="./dep" status=local -> module 1 name="value"
-  link 1 local="readFile" imported="readFile" from="node:fs" status=external -> unresolved
-
-Diagnostics
-  none
+host submits root source and ModuleId
+  -> frontend.analyze
+  -> collect raw import/re-export/dynamic requests
+  -> Project.step returns ModuleRequest
+  -> host supplies source/external/failure response
+  -> project records host-resolved edge
+  -> linker connects binder imports to target exports
+  -> project semantics and diagnostics
 ```
+
+Each edge preserves importer `ModuleId`, raw specifier, operation, `type_only`,
+attributes, source span, host-selected target identity, and terminal state.
+Paths and URLs are not graph keys.
+
+The resulting semantic import links capture local/imported names, binding kind,
+target module/symbol when available, type-only/runtime status, and source span.
 
 ### Module Layer Files
 
-- `src/modules/root.zig`: public API re-export.
-- `src/modules/graph.zig`: graph structure, recursive traversal, import edges, export validation, module diagnostics (`VZG5xxx`).
-- `src/modules/loader.zig`: source loading and single-file frontend analysis.
-- `src/modules/resolver.zig`: relative import resolution and path canonicalization.
-- `src/modules/linker.zig`: cross-file import link construction (named/default/namespace imports resolve to exported symbols; external imports preserved as `.external`).
+- `src/project/`: owned host-driven project session, requests, and graph.
+- `src/modules/root.zig`: borrowed semantic graph API.
+- `src/modules/graph.zig`: module/edge/link records and graph diagnostics.
+- `src/modules/linker.zig`: cross-module import/export symbol linking.
+- `src/modules/externals.zig`: external metadata helpers only.
 
 ### Diagnostics Scope
 
-Module graph validates named imports against target value-space exports, reports missing local modules as `VZG5001`, missing named exports as `VZG5002`, and simple cycles as `VZG5003`. The linker does not emit diagnostics itself — unresolved links surface through the importer's status tag only.
+ViZG reports unresolved host responses, missing exports, source diagnostics, and
+semantic link failures. It does not diagnose runtime-specific path, package,
+filesystem, or URL resolution policy.

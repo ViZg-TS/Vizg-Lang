@@ -10,6 +10,7 @@ pub const TypeStore = struct {
 
     allocator: std.mem.Allocator,
     builtins: model.Builtins,
+    max_types: usize,
     records: std.ArrayList(StoredType),
     signatures: std.ArrayList(model.FunctionSignature),
 
@@ -25,9 +26,14 @@ pub const TypeStore = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator) TypeStore {
+        return initWithLimit(allocator, std.math.maxInt(usize));
+    }
+
+    pub fn initWithLimit(allocator: std.mem.Allocator, max_types: usize) TypeStore {
         return .{
             .allocator = allocator,
             .builtins = model.Builtins.init(),
+            .max_types = max_types,
             .records = .empty,
             .signatures = .empty,
             .class_types = std.AutoHashMap(model.SemanticDeclId, model.ClassSemanticType).init(allocator),
@@ -387,6 +393,7 @@ pub const TypeStore = struct {
     /// Reserve identity before its definition is available. References may safely
     /// point at this id; lookup starts succeeding only after defineReserved.
     pub fn reserve(self: *TypeStore) !model.TypeId {
+        if (self.count() >= self.max_types) return error.SemanticTypeLimitExceeded;
         const id = model.next_user_type_id + @as(model.TypeId, @intCast(self.records.items.len));
         try self.records.append(self.allocator, .{ .id = id, .kind = null });
         return id;
@@ -1114,6 +1121,18 @@ test "TypeStore recursive references use reserve then define without loops" {
     const rendered = try store.formatDebugAlloc(arena.allocator(), recursive);
     try std.testing.expect(std.mem.startsWith(u8, rendered, "object#"));
     try std.testing.expect(std.mem.indexOf(u8, rendered, "next?: <recursive#") != null);
+}
+
+test "semantic type limit holds the N boundary before reserve allocation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+    store.max_types = store.count() + 1;
+
+    _ = try store.reserve();
+    const count_at_limit = store.count();
+    try std.testing.expectError(error.SemanticTypeLimitExceeded, store.reserve());
+    try std.testing.expectEqual(count_at_limit, store.count());
 }
 
 test "Goal 152 generic applications substitute nested shapes canonically and terminate recursively" {

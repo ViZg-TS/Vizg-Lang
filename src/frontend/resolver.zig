@@ -46,7 +46,7 @@ const Resolver = struct {
     ast: ast_mod.Ast,
     bind: binder.BindResult,
     references: std.ArrayList(Reference) = .empty,
-    diagnostic_list: std.ArrayList(diagnostics.Diagnostic) = .empty,
+    diagnostic_list: diagnostics.LimitedList = .{},
     next_scope: binder.ScopeId = 1,
 
     fn resolve(self: *Resolver) !ResolveResult {
@@ -334,6 +334,7 @@ const Resolver = struct {
                 if (std.mem.eql(u8, ambient, name)) break :blk true;
             } else false;
             if (!is_ambient) {
+                try self.diagnostic_list.ensureUnusedCapacity(1);
                 const message = try std.fmt.allocPrint(self.allocator, "cannot find name '{s}'", .{name});
                 try self.diagnostic_list.append(self.allocator, .{
                     .severity = .@"error",
@@ -375,10 +376,15 @@ const Resolver = struct {
 };
 
 pub fn resolve(allocator: std.mem.Allocator, tree: ast_mod.Ast, bound: binder.BindResult) !ResolveResult {
+    return resolveWithLimit(allocator, tree, bound, std.math.maxInt(usize));
+}
+
+pub fn resolveWithLimit(allocator: std.mem.Allocator, tree: ast_mod.Ast, bound: binder.BindResult, max_diagnostics: usize) !ResolveResult {
     var resolver = Resolver{
         .allocator = allocator,
         .ast = tree,
         .bind = bound,
+        .diagnostic_list = diagnostics.LimitedList.init(max_diagnostics),
     };
     return resolver.resolve();
 }

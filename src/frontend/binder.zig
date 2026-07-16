@@ -110,7 +110,7 @@ const Binder = struct {
     node_scopes: std.ArrayList(NodeScope) = .empty,
     imports: std.ArrayList(ImportRecord) = .empty,
     exports: std.ArrayList(ExportRecord) = .empty,
-    diagnostic_list: std.ArrayList(diagnostics.Diagnostic) = .empty,
+    diagnostic_list: diagnostics.LimitedList = .{},
 
     fn bind(self: *Binder) !BindResult {
         const global_scope = try self.addScope(.global, null);
@@ -543,7 +543,11 @@ const Binder = struct {
 };
 
 pub fn bind(allocator: std.mem.Allocator, tree: ast_mod.Ast) !BindResult {
-    var binder = Binder{ .allocator = allocator, .ast = tree };
+    return bindWithLimit(allocator, tree, std.math.maxInt(usize));
+}
+
+pub fn bindWithLimit(allocator: std.mem.Allocator, tree: ast_mod.Ast, max_diagnostics: usize) !BindResult {
+    var binder = Binder{ .allocator = allocator, .ast = tree, .diagnostic_list = diagnostics.LimitedList.init(max_diagnostics) };
     return binder.bind();
 }
 

@@ -20,19 +20,17 @@ const Parser = struct {
     index: usize = 0,
     nodes: std.ArrayList(ast_mod.Node) = .empty,
     type_nodes: std.ArrayList(ast_mod.TypeNode) = .empty,
-    diagnostics: std.ArrayList(diagnostics.Diagnostic) = .empty,
+    diagnostics: diagnostics.LimitedList = .{},
     parenthesized_nodes: std.ArrayList(NodeId) = .empty,
     function_contexts: std.ArrayList(ast_mod.FunctionFlags) = .empty,
     labels: std.ArrayList(LabelContext) = .empty,
     function_label_bases: std.ArrayList(usize) = .empty,
     allow_in: bool = true,
     recover_errors: bool = true,
+    stop_requested: bool = false,
     allocation_error: ?anyerror = null,
-    // H4 — current recursion depth during descent. Bumped per recursive parse call;
-    // when it reaches max_parse_depth we abort with a diagnostic rather than recursing further.
+    // Current syntactic nesting depth across expression and type descent.
     _depth: usize = 0,
-    // H4 — recursion depth counter for parser descent. Bumped per recursive parse call;
-    // when it reaches max_parse_depth we abort with a diagnostic rather than recursing further.
     max_parse_depth: usize = 1000,
 
     fn parse(self: *Parser) anyerror!ParseResult {
@@ -63,6 +61,7 @@ const Parser = struct {
             if (try self.parseStatement()) |statement| {
                 try statements.append(self.allocator, statement);
             }
+            if (self.stop_requested) break;
             if (self.index == before) _ = self.advance();
         }
 
@@ -854,12 +853,14 @@ const Parser = struct {
         }
         const accessor_kind: ?ast_mod.ClassMethodKind = if (self.atIdentifierText("get") and
             (self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and
-            self.peek(2).kind == .LParen) blk: {
+            self.peek(2).kind == .LParen)
+        blk: {
             _ = self.advance();
             break :blk .getter;
         } else if (self.atIdentifierText("set") and
             (self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and
-            self.peek(2).kind == .LParen) blk: {
+            self.peek(2).kind == .LParen)
+        blk: {
             _ = self.advance();
             break :blk .setter;
         } else null;
@@ -919,6 +920,9 @@ const Parser = struct {
     }
 
     fn parseType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        try self.enterParseDepth();
+        defer self.leaveParseDepth();
+
         if (self.findUnsupportedTypeSyntax()) |unsupported| {
             self.reportAt(unsupported.token, unsupported.message, .unsupported_ts_syntax);
             self.recoverUnsupportedType();
@@ -962,11 +966,11 @@ const Parser = struct {
     fn parsePostfixType(self: *Parser) anyerror!ast_mod.TypeNodeId {
         var node: ast_mod.TypeNodeId = if (self.atIdentifierText("readonly")) blk: {
             const start = self.advance().span;
-            const inner = try self.parsePostfixType();
+            const inner = try self.parseNestedPostfixType();
             break :blk try self.addTypeNode(.{ .span = joinSpans(start, self.typeSpan(inner)), .data = .{ .Readonly = inner } });
         } else if (self.current().contextualKeyword() == .Contextual_keyof) blk: {
             const start = self.advance().span;
-            const inner = try self.parsePostfixType();
+            const inner = try self.parseNestedPostfixType();
             break :blk try self.addTypeNode(.{ .span = joinSpans(start, self.typeSpan(inner)), .data = .{ .KeyOf = inner } });
         } else try self.parsePrimaryType();
 
@@ -983,6 +987,12 @@ const Parser = struct {
             });
         }
         return node;
+    }
+
+    fn parseNestedPostfixType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        try self.enterParseDepth();
+        defer self.leaveParseDepth();
+        return self.parsePostfixType();
     }
 
     fn parsePrimaryType(self: *Parser) anyerror!ast_mod.TypeNodeId {
@@ -1684,23 +1694,6 @@ const Parser = struct {
     }
 
     fn parseExpression(self: *Parser) anyerror!NodeId {
-        // H4 — prevent runaway recursion on deeply nested / pathological input.
-        if (self._depth >= self.max_parse_depth) {
-            _ = try self.diagnostics.append(self.allocator, .{
-                .severity = .@"error",
-                .code = .parse_recursion_limit_reached,
-                .phase = .parser,
-                .message = "maximum parse depth exceeded: input too deeply nested",
-                .span = .{ .start = 0, .end = 0, .line = 0, .column = 0 },
-                .label = "reduce nesting or increase max_parse_depth in BuildOptions",
-            });
-            return error.ParseRecursionLimitReached;
-        }
-        self._depth += 1;
-        defer {
-            if (self._depth > 0) self._depth -= 1;
-        }
-
         const first = try self.parseAssignmentExpression();
         if (!self.eat(.Comma)) return first;
 
@@ -1739,6 +1732,9 @@ const Parser = struct {
     }
 
     fn parseAssignmentExpression(self: *Parser) anyerror!NodeId {
+        try self.enterParseDepth();
+        defer self.leaveParseDepth();
+
         if (self.at(.Keyword_yield)) return self.parseYieldExpression();
         if (self.isArrowFunctionStart()) return self.parseArrowFunctionExpression();
 
@@ -1944,7 +1940,10 @@ const Parser = struct {
 
             const operator = self.advance();
             const right_precedence = if (operator.kind == .AsteriskAsterisk) precedence else precedence + 1;
-            const right = try self.parseBinaryExpression(right_precedence);
+            const right = if (operator.kind == .AsteriskAsterisk)
+                try self.parseNestedBinaryExpression(right_precedence)
+            else
+                try self.parseBinaryExpression(right_precedence);
             if (operator.kind == .QuestionQuestion and
                 (self.isUnparenthesizedLogicalExpression(left) or self.isUnparenthesizedLogicalExpression(right)))
             {
@@ -1958,6 +1957,12 @@ const Parser = struct {
             left = try self.addBinaryExpression(operator.kind, left, right);
         }
         return left;
+    }
+
+    fn parseNestedBinaryExpression(self: *Parser, min_precedence: u8) anyerror!NodeId {
+        try self.enterParseDepth();
+        defer self.leaveParseDepth();
+        return self.parseBinaryExpression(min_precedence);
     }
 
     fn parseCoalescingExpression(self: *Parser) anyerror!NodeId {
@@ -2195,7 +2200,7 @@ const Parser = struct {
         return switch (self.current().kind) {
             .PlusPlus, .MinusMinus => blk: {
                 const operator = self.advance();
-                const argument = try self.parseUnaryExpression();
+                const argument = try self.parseNestedUnaryExpression();
                 break :blk try self.addNode(.{
                     .span = joinSpans(operator.span, self.nodes.items[@intCast(argument)].span),
                     .data = .{ .UpdateExpression = .{ .operator = operator.kind, .argument = argument, .prefix = true } },
@@ -2211,7 +2216,7 @@ const Parser = struct {
             .Keyword_await,
             => blk: {
                 const operator = self.advance();
-                const argument = try self.parseUnaryExpression();
+                const argument = try self.parseNestedUnaryExpression();
                 break :blk try self.addNode(.{
                     .span = joinSpans(operator.span, self.nodes.items[@intCast(argument)].span),
                     .data = .{ .UnaryExpression = .{ .operator = operator.kind, .argument = argument } },
@@ -2219,6 +2224,12 @@ const Parser = struct {
             },
             else => self.parsePrimary(),
         };
+    }
+
+    fn parseNestedUnaryExpression(self: *Parser) anyerror!NodeId {
+        try self.enterParseDepth();
+        defer self.leaveParseDepth();
+        return self.parseUnaryExpression();
     }
 
     fn isLogicalOrOperator(_: *const Parser, kind: TokenType) bool {
@@ -2761,6 +2772,27 @@ const Parser = struct {
         }) catch |err| {
             self.allocation_error = err;
         };
+        if (!self.recover_errors) self.stop_requested = true;
+    }
+
+    fn enterParseDepth(self: *Parser) anyerror!void {
+        if (self._depth >= self.max_parse_depth) {
+            try self.diagnostics.append(self.allocator, .{
+                .severity = .@"error",
+                .code = .parse_recursion_limit_reached,
+                .phase = .parser,
+                .message = "maximum parse depth exceeded: input too deeply nested",
+                .span = self.current().span,
+                .label = "reduce nesting or increase max_parse_depth in ParseOptions",
+            });
+            return error.ParseRecursionLimitReached;
+        }
+        self._depth += 1;
+    }
+
+    fn leaveParseDepth(self: *Parser) void {
+        std.debug.assert(self._depth != 0);
+        self._depth -= 1;
     }
 
     fn isVariableKeyword(_: *const Parser, kind: TokenType) bool {
@@ -2799,21 +2831,70 @@ const Parser = struct {
 };
 
 pub const ParseOptions = struct {
-    // Whether to recover from unexpected tokens rather than abort. Default: true (error recovery on).
+    // Whether top-level parsing continues after a statement reports an error.
     recover_errors: bool = true,
     // Maximum recursive descent depth before rejecting with diagnostic; protects against pathological
     // nesting DoS (H4). Defaults to 1024 which is plenty for real code but stops runaway builds.
     max_parse_depth: usize = 1024,
+    max_diagnostics: usize = std.math.maxInt(usize),
 };
 
 pub fn parse(allocator: std.mem.Allocator, token_list: []const Token, options: ParseOptions) anyerror!ParseResult {
+    if (token_list.len == 0 or token_list[token_list.len - 1].kind != .EOF) return error.InvalidTokenStream;
+    for (token_list[0 .. token_list.len - 1]) |token| {
+        if (token.kind == .EOF) return error.InvalidTokenStream;
+    }
     var parser = Parser{
         .allocator = allocator,
         .tokens = token_list,
         .recover_errors = options.recover_errors,
         .max_parse_depth = options.max_parse_depth,
+        .diagnostics = diagnostics.LimitedList.init(options.max_diagnostics),
     };
     return parser.parse();
+}
+
+test "parser rejects token streams without exactly one terminal EOF" {
+    try std.testing.expectError(error.InvalidTokenStream, parse(std.testing.allocator, &.{}, .{}));
+
+    const token: Token = .{
+        .kind = .Identifier,
+        .lexeme = "value",
+        .span = .{ .start = 0, .end = 5, .line = 1, .column = 1 },
+    };
+    try std.testing.expectError(error.InvalidTokenStream, parse(std.testing.allocator, &.{token}, .{}));
+}
+
+test "parser recovery option controls top-level continuation" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const scanned = try scanner.scanAll(allocator, "@first; @second;", true);
+
+    const recovered = try parse(allocator, scanned.tokens, .{ .recover_errors = true });
+    const stopped = try parse(allocator, scanned.tokens, .{ .recover_errors = false });
+    try std.testing.expectEqual(@as(usize, 2), recovered.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), stopped.diagnostics.len);
+    try std.testing.expect(stopped.consumed_tokens < recovered.consumed_tokens);
+}
+
+test "parser depth limit covers recursive expression and type paths" {
+    const scanner = @import("scanner.zig");
+    const cases = [_][]const u8{
+        "a = b = c;",
+        "const x = !!!value;",
+        "const x = a ** b ** c;",
+        "type T = readonly readonly number[];",
+        "type T = Box<Box<number>>;",
+    };
+    for (cases) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const scanned = try scanner.scanAll(allocator, source, true);
+        try std.testing.expectError(error.ParseRecursionLimitReached, parse(allocator, scanned.tokens, .{ .max_parse_depth = 2 }));
+    }
 }
 
 test "parser preserves logical assignments and right associativity" {

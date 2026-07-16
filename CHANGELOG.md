@@ -8,145 +8,76 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
-- Completed the implementation and validation gates for Goals 208–237,
-  establishing verified immutable HIR v1 as ViZG's final product. The final
-  audit records consumer, ownership, stable external, cross-mode,
-  verifier/printer, lowering-matrix, native/Android/WASM, and ABI evidence with
-  zero unresolved HIR P0/P1/P2 findings; the immutable freeze SHA remains
-  pending the intentional freeze commit.
-- Stabilized semantic-result arena ownership across value returns, preventing
-  optimized-build crashes when HIR/project consumers extend the retained type
-  store after analysis.
-- Bundled Zig compiler runtime support into the installed native archive so the
-  documented plain C linker invocation also succeeds in `ReleaseSafe`.
-- Froze the normative HIR v1 architecture and exhaustive lowering matrix:
-  typed ANF-like values, explicit bindings and block control flow; project-local
-  semantic identities and ownership; mandatory canonicalization; and a strict
-  boundary excluding MIR, backend, runtime, and memory-management policy.
-- Established the portable `src/hir/` package, sealed `HirResult` ownership,
-  an owned read-only type snapshot, and result-local checked identities for
-  every HIR entity kind; owned HIR now survives semantic/project teardown.
-- Added the official immutable HIR consumer contract: deterministic Zig
-  lookup/iteration plus separately versioned C summary/record access through
-  opaque result ownership, with controlled invalid/foreign handles and a
-  runnable standalone C consumer.
-- Added stable host-supplied `ExternalSymbolId` declarations independent of
-  descriptor order, distinct identity domains, function/global/constant/type
-  kinds, complete function semantic types, conservative effects, provenance,
-  canonical body-less lowering, and malformed-metadata rejection.
-- Added the target-independent HIR v1 core schema, closed legal operation set,
-  semantic places and block-parameter control flow, with validated payload
-  shapes and conservative per-operation effects.
-- Added the pre-lowering HIR eligibility gate, stable `VZG7001`–`VZG7011`
-  diagnostics, semantic identity validation, and canonical pre-growth resource
-  limits; ineligible or partial semantic projects cannot produce `HirResult`.
-- Added deterministic HIR project/module shell lowering: exact host `ModuleId`s,
-  module-initialization functions, graph-derived initialization dependencies,
-  and live linked import/export identities, including external metadata without
-  fabricated executable bodies.
-- Added semantic-identity-driven declaration lowering for module and block
-  shells: exact symbol bindings, JavaScript hoisting and temporal-dead-zone
-  states, value-preserving literals, function shells, and fully erased
-  type-only declarations and assertion wrappers.
-- Added block-aware ANF expression lowering with deterministic left-to-right
-  calls and sequences, typed block-parameter merges for conditional values,
-  and construction-time rejection of undefined temporary operands.
-- Added semantic place lowering for bindings, static properties, computed
-  elements, and super properties; simple and non-logical compound assignment,
-  prefix/postfix update, and delete now preserve single target evaluation and
-  source-order effects without exposing storage layout.
-- Added semantic-mode-aware operator lowering and explicit control flow for
-  logical, conditional, logical-assignment, and optional-chain expressions,
-  preserving selected-arm evaluation and typed block-parameter merges.
-- Added receiver-preserving ordinary, method, super, and constructor calls;
-  ordered property/element access; explicit meta loads; and runtime dynamic
-  import HIR that retains source, options, and attributes without resolving
-  specifiers.
-- Added source-ordered object and array HIR, including distinct methods,
-  accessors, holes, and context-specific spread; untagged and tagged template
-  lowering now retains conversion order, receiver semantics, raw/cooked data,
-  and stable sites, while regexp creation retains canonical flags and sites.
-- Unified function declarations, expressions, arrows, object methods and
-  accessors, and async/generator forms behind canonical HIR bodies with explicit
-  ordered argument/default/rest parameter plans and resolved semantic captures,
-  while deferring closure environment layout.
-- Lowered conditional and loop syntax to explicit HIR blocks: `for...in` uses
-  semantic property enumeration, while `for...of` uses iterator protocol
-  operations with close-on-abrupt cleanup regions and direct normal exhaustion.
-- Added canonical `switch` lowering with one discriminant evaluation, lazy
-  source-ordered strict-equality tests, explicit default routing, and CFG-only
-  fallthrough; break and continue labels now erase after resolving to exact HIR
-  block targets, including iterator-close transfers.
-- Added canonical exception-region lowering for `try`, `catch`, and `finally`:
-  catch bindings initialize only at handler entry, every pending completion
-  crosses one shared cleanup body, completion inside `finally` replaces it, and
-  structural validation rejects illegal region entries and exits.
-- Added target-independent async and generator suspension lowering: `await`,
-  `yield`, delegated `yield*`, async generators, and `for await...of` retain
-  typed suspension operations, async iterator acquisition/await/close semantics,
-  and owned source origins without selecting a state machine or runtime frame.
-- Added canonical class, enum, and module-initialization lowering: class syntax
-  produces one entity with ordered constructor/method/field plans, derived
-  parameter properties follow `super()`, numeric enums retain reverse mappings,
-  and cyclic modules preserve deterministic live import/export identities.
-- Added mandatory deterministic HIR canonicalization in every lowering mode,
-  including safe literal folding, branch/copy/merge simplification,
-  effect-aware dead-code and unreachable-block removal, empty returns, and the
-  bounded `VZG7009` rewrite-failure contract.
-- Added optional HIR source provenance side tables with `none`, `minimal`, and
-  `full` modes. Minimal mode owns opaque module identities, spans, AST
-  contributors, semantic identities, and lowering reasons; full mode also
-  records deterministic lowering and canonicalization events, including erased
-  syntax, without changing executable HIR.
-- Added a deterministic HIR debug printer with canonical, brief, typed, origin,
-  and full-trace views, controlled invalid-ID rendering, and stable reference
-  snapshots spanning every supported lowering family.
-- Integrated canonical HIR derivation with the Zig project/session lifecycle:
-  one verified immutable result is project-owned, repeated derivation is
-  idempotent, and sealing removes semantic-storage lifetime dependence. The
-  project-input C ABI v1 remains unchanged while HIR access has its own version.
-- Added adversarial HIR closure coverage for deeply nested and wide control
-  flow, cyclic modules, large provenance traces, mutation/property corpora,
-  verifier corruption, and canonical rewrite stress. The previously unwired
-  region-nesting limit is now enforced before allocation; generic resource
-  violations report `VZG7010`, while canonical rewrite exhaustion retains its
-  dedicated `VZG7009` contract.
-
-- Closed the Goal 188 adversarial audit with no unresolved in-scope finding:
-  hardened ABI range, alias, stale-handle, and scratch-lifetime validation;
-  removed the native filesystem path-reopen race; added mutation, replacement,
-  lifecycle, parallel-workspace, and executable-stack regressions; and opened
-  HIR planning while leaving implementation to a separate executable goal.
-- Closed the portable-core ABI v1 release candidate: audited public ownership,
-  identity, host-resolution, recovery, partial-result, and limit contracts;
-  recorded exact native/WebAssembly symbol tables; made the native archive PIC
-  and libc-allocation-free; added a real default-PIE C link/run regression gate;
-  and removed the last dead prototype option and legacy internal terminology.
-- Replaced the WASI reactor package with an import-free
-  `wasm32-freestanding` official ABI v1 module. It exports only linear memory
-  and the official ABI allowlist; a JavaScript host validates the module table
-  and drives single, multi, missing, and external module flows through the same
-  project engine.
-- Promoted the memory-first host-driven project API to official ABI v1 with
-  `VIZG_ABI_VERSION = 1`, one caller-owned bounded workspace, fixed-width
-  layouts, and an exact exported-symbol allowlist. Removed every unpublished
-  pre-release ABI entry point, wrapper, filesystem status, alias, macro, test,
-  and example without a compatibility shim.
-- Migrated the CLI to memory-first APIs: single-file commands now call
-  source-only semantics after executable-owned reads, and `modules` drives the
-  portable project through `FsModuleHost` for local, missing, cyclic, and
-  registered external modules while preserving logical paths and import spans.
-- Added an optional native filesystem host for the portable project API with
-  canonical per-session module IDs, relative extension/index resolution,
-  root-directory traversal and symlink confinement, pre-read size/module
-  limits, and explicit portable responses for filesystem outcomes.
-- Added the memory-first C ABI engine with opaque project/result handles, host-driven source/external/failure responses, deterministic stepping, independent result ownership, platform-identical fixed-width layouts, no filesystem behavior, caller-owned workspace storage, and explicit resource limits.
-- Added copied external-module descriptors with distinct opaque identities, named/default/namespace/type-only export validation, portable builtin type metadata, explicit untyped-as-`unknown` and opt-in `any` policy, and missing-member diagnostics.
-- Added a deterministic pull-based project request state machine: project-local request IDs, FIFO single-request dispatch, equivalent-request deduplication, explicit source/external/not-found/denied/failed responses, stale/foreign/duplicate rejection, cycle-safe host driving, and guarded project finish.
-- Added the owned portable `Project` session with copied host sources, explicit module states, revision conflict rules, idempotent repeated analysis, independently inspectable partial results, and deterministic teardown.
-- Added the portable project identity/source/request contracts: host-assigned opaque module IDs, core-assigned request IDs, borrowed source and import metadata, explicit static/type-only/dynamic/re-export kinds, and logical names that never define identity.
-- Established `src/root.zig` as a freestanding-compilable portable core, moved native filesystem module loading under `src/adapters/native_fs/`, separated executable and ABI roots from the core, and registered `zig build lint-portable-core` in validation.
-- Superseded the old portability/ABI roadmap with the serial portable-core program: the memory-first host-driven API is official ABI v1, compatibility layers are forbidden, and HIR is blocked through the final Goal 188 audit.
+- Capped every source at the public `VIZG_MAX_SOURCE_LENGTH` (`UINT32_MAX`)
+  representation boundary, rejecting oversized configuration and source
+  descriptors before pointer access, copying, or scanning while keeping
+  aggregate byte accounting overflow-safe.
+- Made official ABI result summaries cover every canonical error phase with an
+  explicit project-error flag and an `is_partial` OR across syntax, semantic,
+  project, and module-host failures. Parser recursion now reports its own exact
+  limit kind, and non-limit project calls clear the previous limit category.
+- Enforced semantic-type and diagnostic limits from the first project module,
+  bounded diagnostic collection before retained allocation, and made
+  over-depth source responses transactional so rejected responses leave the
+  pending request and graph unchanged.
+- Moved external-module metadata into the project semantic graph before import
+  and re-export propagation. External value/type identities now participate in
+  the single bounded fixed point and reach the checker, so value-only names are
+  rejected as types, combined class exports retain constructor/instance
+  identities, and downstream external re-exports preserve canonical `TypeId`s.
+- Froze official ABI v1 only after the repeated Goal 207 audit closed Goals
+  203–206, fixed the newly found oversized-configuration limit-kind lifecycle
+  gap with a regression, and passed 448 tests plus the validation,
+  cross-target, native/Android, layout, symbol, hostile-host,
+  allocation-failure, and import-free freestanding WASM gates. HIR planning is
+  now authorized against this frozen contract.
+- Hardened scanner/parser boundaries found by the final audit: `\\0` is accepted
+  only as the complete legacy-free null escape, parser depth limits cover all
+  recursive expression/type paths, disabled recovery stops after the first
+  parser error, and malformed caller-supplied token streams fail safely.
+- Fixed named and star external re-exports to preserve external module/edge
+  provenance and value/type/both namespace availability, including type-only
+  star exports and default exclusion.
+- External export descriptors now declare value, type, or combined namespace
+  availability across the portable API and official C ABI. Zero/unknown flags
+  are rejected, while combined class exports link in constructor expressions
+  and type annotations.
+- Added exhaustive allocation-failure injection across project creation, source
+  and frontend processing, semantic metadata, request/edge construction,
+  external descriptors/linking, project results, canonical diagnostics, and ABI
+  snapshot publication. Every injected failure tears down without leaks or
+  publishing an uncommitted result pointer.
+- Project limits are now enforced by their owning collections before retained
+  copies or capacity growth, including an aggregate source-byte cap and exact
+  stable C ABI limit categories. Graph depth now uses the canonical shortest
+  resolved path from any root, independent of discovery order and cycles.
+- Final project results now retain only the root-reachable module closure,
+  include reachable module-host failures in `is_partial`, and expose exact
+  external-import and re-export provenance through explicit presence flags and
+  graph edge indexes.
+- Hardened every official ABI v1 host-memory boundary on native and WASM:
+  typed inputs and outputs require C alignment and complete overflow-safe
+  ranges, nested arrays and strings are checked before use, and project
+  creation rejects config/output/workspace aliasing without mutating state or
+  output on invalid input.
+- Added one project-owned canonical diagnostic table shared by the Zig and C
+  result APIs, with explicit module identities, fixed public phases,
+  deterministic exact-row deduplication, and distinct not-found, access-denied,
+  and other module-host failure codes.
+- Added the Goals 189–196 portable-core completion changes: complete project
+  result accessors, runtime ABI version reporting, hostile host/WASM range
+  validation, transactional project rollback, a bounded one-shot lifecycle,
+  orthogonal request operation/type-only metadata, canonical limits, and
+  source-derived module results.
+- Removed source revisions, stale request/edge states, independent result
+  destruction, the convenience source-analysis ABI, and all legacy ABI symbols.
+  `finish()` is terminal and returns a project-owned immutable view.
+- Isolated all concrete module hosts as validation fixtures. ViZG does not
+  resolve filesystem, package, URL, or virtual-module specifiers; runtimes own
+  that policy.
+- Added `lint-module-host-boundary` and an explicit local Goal 196 audit
+  checklist. The changelog does not claim the local Zig matrix passed until the
+  repository owner records those results.
 - Closed the adversarial Typed Semantics v2 audit: module parser-depth options now propagate, malformed recovered function bodies cannot trigger invalid-node dereferences, canonical composite/generic growth has controlled limits, and Debug safety mutation, lifecycle, parallel, ABI, cross-target, and validation gates are documented.
 - Closed Typed Semantics v2 for the supported subset: canonical structural and nominal CLI formatting, cross-module class/interface shape preservation, one inference/store ownership path, and removal of the obsolete alternative inference implementation. No HIR or backend layer was introduced.
 - Added the owned Zig `SemanticResult` API with single-pass analysis, explicit teardown, stable ID lookups, partial-result metadata, and deterministic syntax/semantic diagnostic views.
@@ -180,6 +111,7 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 - Closed Checker v2 over canonical semantic inference and compatibility data, covering initialization, assignment, returns, calls, access, operators, and `satisfies`; interfaces and anonymous objects compare structurally with inherited-property failure paths, while classes and enums remain nominal.
 - Added owned project semantics with one shared canonical type context, qualified export identities, named/default/namespace/type-only import and re-export propagation, bounded cycle recovery, and inspectable partial links.
 - Integrated TypeScript `as` and `satisfies` into general binary precedence, including multiplicative, exponentiation, logical, coalescing, and relational grouping with full-token matrix coverage.
+
 
 ## [0.0.3] — 2026-07-13
 

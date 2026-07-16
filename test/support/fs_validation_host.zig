@@ -1,5 +1,7 @@
-//! Reference native filesystem host for the portable Project request/response API.
+//! Filesystem validation fixture for the portable Project request/response API.
 //!
+//! This module is not part of ViZG's public API and is not a runtime resolver.
+//! It exists only to prove that an external host can implement module loading.
 //! Policy: only relative specifiers are loaded. Canonical targets must remain
 //! inside the root file's directory. Symlinks are followed only when their
 //! canonical target remains inside that boundary. Supported extensions are
@@ -50,7 +52,7 @@ const ResolvedSource = struct {
     file: Io.File,
 };
 
-pub const FsModuleHost = struct {
+pub const FsValidationHost = struct {
     allocator: std.mem.Allocator,
     io: Io,
     options: Options,
@@ -62,7 +64,7 @@ pub const FsModuleHost = struct {
     next_id: u64 = 1,
     responses: ResponseCounts = .{},
 
-    pub fn init(allocator: std.mem.Allocator, io: Io, options: Options) !FsModuleHost {
+    pub fn init(allocator: std.mem.Allocator, io: Io, options: Options) !FsValidationHost {
         if (options.max_source_bytes == 0 or options.max_modules == 0 or options.extensions.len == 0)
             return error.InvalidOptions;
         for (options.extensions) |extension| {
@@ -83,7 +85,7 @@ pub const FsModuleHost = struct {
         };
     }
 
-    pub fn deinit(self: *FsModuleHost) void {
+    pub fn deinit(self: *FsValidationHost) void {
         self.project.deinit();
         self.ids_by_path.deinit();
         for (self.paths.items) |record| self.allocator.free(record.canonical);
@@ -94,7 +96,7 @@ pub const FsModuleHost = struct {
     }
 
     /// Canonicalizes, bounds, reads, and submits the root file.
-    pub fn loadRoot(self: *FsModuleHost, root_path: []const u8) !core.ModuleId {
+    pub fn loadRoot(self: *FsValidationHost, root_path: []const u8) !core.ModuleId {
         if (self.root_directory != null) return error.RootAlreadyLoaded;
         const canonical_z = try Io.Dir.cwd().realPathFileAlloc(self.io, root_path, self.allocator);
         const canonical: []u8 = canonical_z[0..canonical_z.len];
@@ -131,7 +133,7 @@ pub const FsModuleHost = struct {
     }
 
     /// Drives requests until the portable project reaches its terminal state.
-    pub fn drive(self: *FsModuleHost) !core.ProjectFinishResult {
+    pub fn drive(self: *FsValidationHost) !core.ProjectFinishResult {
         if (self.root_directory == null) return error.RootNotLoaded;
         while (true) switch (try self.project.step()) {
             .complete => return self.project.finish(),
@@ -140,13 +142,13 @@ pub const FsModuleHost = struct {
     }
 
     /// Returns an existing session identity for any spelling of a loaded file.
-    pub fn moduleIdForPath(self: *FsModuleHost, path: []const u8) !?core.ModuleId {
+    pub fn moduleIdForPath(self: *FsValidationHost, path: []const u8) !?core.ModuleId {
         const canonical_z = try Io.Dir.cwd().realPathFileAlloc(self.io, path, self.allocator);
         defer self.allocator.free(canonical_z);
         return self.ids_by_path.get(canonical_z[0..canonical_z.len]);
     }
 
-    fn answer(self: *FsModuleHost, request: core.ModuleRequest) !void {
+    fn answer(self: *FsValidationHost, request: core.ModuleRequest) !void {
         switch (try self.resolve(request)) {
             .source => |resolved| {
                 defer self.allocator.free(resolved.canonical);
@@ -192,7 +194,7 @@ pub const FsModuleHost = struct {
         }
     }
 
-    fn resolve(self: *FsModuleHost, request: core.ModuleRequest) !Resolution {
+    fn resolve(self: *FsValidationHost, request: core.ModuleRequest) !Resolution {
         if (!isRelative(request.raw_specifier)) {
             for (self.options.externals) |binding| {
                 if (std.mem.eql(u8, request.raw_specifier, binding.specifier)) return .{ .external = binding.descriptor };
@@ -233,7 +235,7 @@ pub const FsModuleHost = struct {
         return .not_found;
     }
 
-    fn canonicalCandidate(self: *FsModuleHost, candidate: []const u8) !Resolution {
+    fn canonicalCandidate(self: *FsValidationHost, candidate: []const u8) !Resolution {
         if (!self.insideRoot(candidate)) return .denied;
         const canonical_z = Io.Dir.cwd().realPathFileAlloc(self.io, candidate, self.allocator) catch |err| return switch (err) {
             error.FileNotFound, error.NotDir => .not_found,
@@ -263,7 +265,7 @@ pub const FsModuleHost = struct {
         return .{ .source = .{ .canonical = canonical_z, .file = file } };
     }
 
-    fn openAnchoredFile(self: *FsModuleHost, relative: []const u8) !Io.File {
+    fn openAnchoredFile(self: *FsValidationHost, relative: []const u8) !Io.File {
         if (std.fs.path.isAbsolute(relative)) return error.AccessDenied;
         const file_name = std.fs.path.basename(relative);
         if (file_name.len == 0 or std.mem.eql(u8, file_name, ".") or std.mem.eql(u8, file_name, ".."))
@@ -289,7 +291,7 @@ pub const FsModuleHost = struct {
         });
     }
 
-    fn readOpenedFile(self: *FsModuleHost, file: Io.File) ![]u8 {
+    fn readOpenedFile(self: *FsValidationHost, file: Io.File) ![]u8 {
         const stat = try file.stat(self.io);
         if (stat.kind != .file) return error.NotAFile;
         if (stat.size > self.options.max_source_bytes) return error.SourceTooLarge;
@@ -301,14 +303,14 @@ pub const FsModuleHost = struct {
         };
     }
 
-    fn supportsExtension(self: *const FsModuleHost, extension: []const u8) bool {
+    fn supportsExtension(self: *const FsValidationHost, extension: []const u8) bool {
         for (self.options.extensions) |supported| {
             if (std.mem.eql(u8, extension, supported)) return true;
         }
         return false;
     }
 
-    fn insideRoot(self: *const FsModuleHost, path: []const u8) bool {
+    fn insideRoot(self: *const FsValidationHost, path: []const u8) bool {
         const root = self.root_directory orelse return false;
         if (std.mem.eql(u8, root, path)) return true;
         if (!std.mem.startsWith(u8, path, root)) return false;
@@ -316,7 +318,7 @@ pub const FsModuleHost = struct {
         return path.len > root.len and std.fs.path.isSep(path[root.len]);
     }
 
-    fn registerCanonical(self: *FsModuleHost, canonical: []const u8) !core.ModuleId {
+    fn registerCanonical(self: *FsValidationHost, canonical: []const u8) !core.ModuleId {
         if (self.ids_by_path.get(canonical)) |id| return id;
         if (self.paths.items.len >= self.options.max_modules) return error.ModuleLimitExceeded;
         const owned = try self.allocator.dupe(u8, canonical);
@@ -329,7 +331,7 @@ pub const FsModuleHost = struct {
         return id;
     }
 
-    fn pathForId(self: *const FsModuleHost, id: core.ModuleId) ?[]const u8 {
+    fn pathForId(self: *const FsValidationHost, id: core.ModuleId) ?[]const u8 {
         for (self.paths.items) |record| if (record.id == id) return record.canonical;
         return null;
     }
@@ -352,7 +354,7 @@ test "filesystem host drives multiple files and assigns canonical session IDs" {
     const dep = try tmp.dir.realPathFileAlloc(io, "dep.ts", std.testing.allocator);
     defer std.testing.allocator.free(dep);
 
-    var host = try FsModuleHost.init(std.testing.allocator, io, .{});
+    var host = try FsValidationHost.init(std.testing.allocator, io, .{});
     defer host.deinit();
     _ = try host.loadRoot(root);
     const result = try host.drive();
@@ -377,7 +379,7 @@ test "filesystem host denies traversal and escaping symlinks" {
     const root = try tmp.dir.realPathFileAlloc(io, "project/main.ts", std.testing.allocator);
     defer std.testing.allocator.free(root);
 
-    var host = try FsModuleHost.init(std.testing.allocator, io, .{});
+    var host = try FsValidationHost.init(std.testing.allocator, io, .{});
     defer host.deinit();
     _ = try host.loadRoot(root);
     const result = try host.drive();
@@ -399,14 +401,14 @@ test "filesystem host reads the opened file across a path replacement" {
     const root = try tmp.dir.realPathFileAlloc(io, "project/main.ts", std.testing.allocator);
     defer std.testing.allocator.free(root);
 
-    var host = try FsModuleHost.init(std.testing.allocator, io, .{});
+    var host = try FsValidationHost.init(std.testing.allocator, io, .{});
     defer host.deinit();
     const root_id = try host.loadRoot(root);
     const resolution = try host.resolve(.{
         .id = .init(1),
         .importer = root_id,
         .raw_specifier = "./dep.ts",
-        .kind = .static,
+        .operation = .static_import,
         .span = .{ .start = 0, .end = 0, .line = 0, .column = 0 },
     });
     switch (resolution) {
@@ -430,7 +432,7 @@ test "filesystem host applies root size and module limits before source allocati
     try tmp.dir.writeFile(io, .{ .sub_path = "large.ts", .data = "export const value = 123456789;" });
     const large = try tmp.dir.realPathFileAlloc(io, "large.ts", std.testing.allocator);
     defer std.testing.allocator.free(large);
-    var small_host = try FsModuleHost.init(std.testing.allocator, io, .{ .max_source_bytes = 4 });
+    var small_host = try FsValidationHost.init(std.testing.allocator, io, .{ .max_source_bytes = 4 });
     defer small_host.deinit();
     try std.testing.expectError(error.SourceTooLarge, small_host.loadRoot(large));
 
@@ -438,7 +440,7 @@ test "filesystem host applies root size and module limits before source allocati
     try tmp.dir.writeFile(io, .{ .sub_path = "dep.ts", .data = "export {};" });
     const root = try tmp.dir.realPathFileAlloc(io, "main.ts", std.testing.allocator);
     defer std.testing.allocator.free(root);
-    var bounded = try FsModuleHost.init(std.testing.allocator, io, .{ .max_modules = 1 });
+    var bounded = try FsValidationHost.init(std.testing.allocator, io, .{ .max_modules = 1 });
     defer bounded.deinit();
     _ = try bounded.loadRoot(root);
     const result = try bounded.drive();
@@ -460,7 +462,7 @@ test "filesystem host resolves registered source-less external modules" {
         .descriptor = .{ .id = .init(1), .logical_name = "runtime", .exports = &exports },
     }};
 
-    var host = try FsModuleHost.init(std.testing.allocator, io, .{ .externals = &bindings });
+    var host = try FsValidationHost.init(std.testing.allocator, io, .{ .externals = &bindings });
     defer host.deinit();
     _ = try host.loadRoot(root);
     const result = try host.drive();

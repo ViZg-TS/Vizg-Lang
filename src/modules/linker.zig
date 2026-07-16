@@ -59,9 +59,10 @@ pub const Linker = struct {
 test "linked import model compiles" {
     const allocator = std.testing.allocator;
 
-
     var imports_list: std.ArrayListUnmanaged(LinkedImport) = .empty;
-    errdefer { _ = imports_list.deinit(allocator); }
+    errdefer {
+        _ = imports_list.deinit(allocator);
+    }
     try imports_list.append(allocator, .{
         .id = @intCast(@as(u32, 0)),
         .from_module = @intCast(@as(u32, 0)),
@@ -97,7 +98,6 @@ test "linked import model compiles" {
 }
 
 const ImportEdgeStub = struct { id: graph.ImportEdgeId };
-
 
 // ---------------------------------------------------------------------------
 // Export -> SymbolId lookup

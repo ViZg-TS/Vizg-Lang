@@ -153,6 +153,9 @@ pub const TokenType = enum {
     EOF,
 };
 
+/// Largest source that can be represented by the public `u32` byte offsets.
+pub const MAX_SOURCE_LENGTH: usize = std.math.maxInt(u32);
+
 pub const Span = struct {
     start: u32,
     end: u32,
