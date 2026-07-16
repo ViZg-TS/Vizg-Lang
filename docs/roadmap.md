@@ -12,13 +12,13 @@ compatibility shims. The final repeated audit and exact command evidence are in
 The responsibility split is fixed:
 
 - ViZG discovers and links modules but does not resolve specifiers.
-- A runtime/consumer assigns `ModuleId` values and supplies source/external data.
+- A host/consumer assigns `ModuleId` values and supplies source/external data.
 - Concrete filesystem hosts in this repository are validation fixtures only.
 - The project ABI is one-shot; changed source requires a new project.
 
-ABI v1 is frozen. Goal 207 passed the repeated complete local validation matrix with no
-unresolved in-scope finding, so HIR planning is authorized. HIR remains
-unimplemented and cannot retroactively change the frozen ABI v1 contract.
+The project-input ABI v1 remains frozen. Goal 207 passed its validation matrix.
+HIR is now implemented as ViZG's final product and adds a separately versioned
+read-only HIR access contract without changing project input structures.
 
 ## Current Implementation Snapshot: Frontend And Host-Resolved Module Graph
 
@@ -39,12 +39,12 @@ Implemented:
 - in-memory project tests plus optional test-only host fixtures;
 - exact ABI symbol/layout gates and portable-core/module-boundary lints.
 
-## Runtime-Owned Module Resolution — Explicit Non-Goal
+## Host-Owned Module Resolution — Explicit Non-Goal
 
 ViZG will not implement package lookup, `node_modules`, `package.json`,
 `tsconfig` path mapping, URL fetching, filesystem canonicalization, import maps,
-or CommonJS resolution. Those policies belong to the future runtime or another
-consumer of the module-provider API.
+or CommonJS resolution. Those policies belong to the host or another consumer
+of the module-provider API.
 
 ## Type Checker Milestone
 
@@ -59,33 +59,41 @@ Implemented for the supported syntax subset:
 
 Complete TypeScript compatibility and advanced annotation forms remain out of scope.
 
-## Active Milestone: Canonical Typed HIR v1
+## Completed Final Product: Canonical Typed HIR v1
 
-Goals 208–230 are implemented; Goal 231 remains in the active strict
-implementation chain. The normative
-contracts are:
+Goals 208–237 are implementation-complete. Final validation evidence is
+recorded in
+[`HIR_V1_AUDIT.md`](HIR_V1_AUDIT.md). The normative contracts are:
 
 - [`hir-v1-design.md`](hir-v1-design.md) — typed ANF-like, block-based HIR,
   ownership, invariants, examples and the HIR/MIR boundary;
 - [`hir-v1-lowering-matrix.md`](hir-v1-lowering-matrix.md) — exhaustive
   TypeScript/AST/operator/module equivalence and coverage table;
-- [`../VIZG_PLAN.md`](../VIZG_PLAN.md) — ordered Goals 208–231 and acceptance
+- [`../VIZG_PLAN.md`](../VIZG_PLAN.md) — ordered Goals 208–237 and acceptance
   gates.
 
-HIR v1 now:
+HIR v1:
 
-- consume the immutable complete project semantic result;
+- consumes the immutable complete project semantic result;
 - erase type-only and syntax-only forms;
 - make evaluation order explicit through immutable temporary values;
 - keep mutable source bindings explicit rather than converting them to full SSA;
 - lower structured control flow into blocks and terminators;
 - preserve language-semantic operations, types and source provenance;
 - apply only mandatory local canonicalization;
-- expose only a verified immutable project-owned result.
+- expose only a verified immutable owned result;
+- remain readable after semantic/project teardown through sealed owned type and
+  provenance storage;
+- expose deterministic checked Zig lookup/iteration plus a separately
+  versioned non-Zig summary/record API;
+- preserve stable host-supplied external declaration identities, complete
+  function types, conservative effects, and body-less canonical declarations.
 
-HIR v1 does not implement MIR, global optimization, object/closure layout,
-async state machines, exception ABI, memory management, GC, bytecode or native
-code generation. Those belong to a separate future MIR/runtime project.
+ViZG ends at verified immutable HIR. MIR, global optimization, object/closure
+layout, async state machines, exception ABI, memory management, GC, bytecode,
+native code, object files, linking, and executable/library packaging are not
+ViZG roadmap items. Independent consumers may implement such concerns without
+becoming ViZG phases.
 
 ### HIR Entry Gate — Opened By Goal 207
 

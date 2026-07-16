@@ -4,8 +4,8 @@
 
 > **Mixed historical and active plan.** Goals through 207 are retained as closed
 > design and audit context. Goal 207 froze the portable project API and official
-> ABI v1. Goals 208–231 are the active executable HIR v1 plan and must be completed
-> in strict order. See `docs/FINAL_AUDIT.md`, `docs/hir-v1-design.md`, and
+> ABI v1. Goals 208–237 close the canonical HIR v1 final product. See
+> `docs/FINAL_AUDIT.md`, `docs/HIR_V1_AUDIT.md`, `docs/hir-v1-design.md`, and
 > `docs/hir-v1-lowering-matrix.md`.
 
 ## Architecture Reference
@@ -20,8 +20,8 @@ V8's compilation phases map cleanly to vizg's planned layers:
 | `Parser` | Produce AST with spans | `src/frontend/parser.zig` | ✅ Implemented |
 | `ScopeAnalyzer::Analyze()` | Determine bindings, hoisting, strict mode | `src/frontend/binder.zig` | ✅ Partially implemented (parameter scoping done; function-declaration hoisting and strict-mode resolution pending) |
 | `TypeSpecialization` | Forward-infer types on AST → typed AST, then fixpoint iterate to stabilize circular references | Canonical pipeline in `src/semantics/type_collector.zig`, `type_inference.zig`, `dataflow.zig`, `narrowing.zig`, and `checker.zig` | ✅ Implemented for the supported syntax subset, including bounded project propagation |
-| `BytecodeGenerator` (Ignition) | Lower typed AST into compact bytecode form with normalized control flow and constants pool | New `src/hir/` layer | ❌ Not started — planned Phase 2 |
-| `MacroAssembler` / TurboFan | Optimize bytecode into SSA IR → machine code | Future runtime/compiler backend | ❌ Not started (future) |
+| `BytecodeGenerator` (Ignition) | Reference for lowering typed syntax into normalized control flow | `src/hir/` | ✅ Implemented as target-independent HIR |
+| `MacroAssembler` / TurboFan | Reference only for concerns below HIR | Outside ViZG | Not a ViZG roadmap layer |
 
 **Key V8 insight:** Scope analysis *precedes* type specialization. Vizg follows that ordering: binding and module linking establish identities before annotation lowering, inference, dataflow narrowing, and checking.
 
@@ -141,7 +141,10 @@ vizg TypeChecker v2:       →     src/semantics/checker.zig
 
 ### Status
 
-**Active executable plan.** Goal 207 froze the frontend, project semantics and official ABI v1. Goals 208–231 define the first HIR implementation and must be completed in strict numerical order.
+**Completed final-product plan.** Goal 207 froze the project-input ABI v1.
+Goals 208–237 define and close canonical HIR v1, including independent
+ownership, stable externals, immutable consumers, and a separately versioned
+public HIR access API.
 
 Normative design documents:
 
@@ -189,7 +192,9 @@ memory-management policy
 GC or RC
 ```
 
-Full SSA, global optimization, layout, async state machines, exception ABI, memory management, bytecode and native lowering belong to a separate MIR/runtime project.
+Full SSA, global optimization, layout, async state machines, exception ABI,
+memory management, bytecode, native lowering, linking, and executable/library
+packaging are outside the ViZG product and roadmap.
 
 ---
 
@@ -1147,15 +1152,65 @@ git tag -a vizg-hir-v1 -m "ViZG canonical typed HIR v1"
 #### Acceptance
 
 ```txt
-[ ] Goals 208–231: PASS.
+[ ] Goals 208–237: PASS.
 [ ] Unresolved HIR P0/P1/P2 findings: 0.
 [ ] Every supported lowering-matrix row is closed.
 [ ] Every legal operation has verifier and printer coverage.
 [ ] HIR contains no MIR/backend/memory-management policy.
-[ ] Frozen official ABI v1 remains unchanged.
-[ ] Exact audited revision and tag/reference are recorded.
-[ ] MIR/runtime planning is authorized only after this freeze.
+[ ] Frozen project-input ABI v1 remains unchanged; HIR access is additive and separately versioned.
+[ ] Exact audited working-tree revision and validation state are recorded.
+[ ] No post-HIR implementation layer is assigned to ViZG.
 ```
+
+---
+
+### Goals 232–237 — Final Product Boundary, Consumers, Externals And Freeze
+
+**Depends on:** Goal 231, in strict numerical order.
+
+#### Goal 232 — Freeze ViZG at verified immutable HIR
+
+- `HirProject` is the final ViZG artifact.
+- Sealed HIR owns every type, provenance and string fact needed by consumers.
+- Semantic/project teardown cannot invalidate an owned HIR result.
+- Post-HIR optimization, representation, execution, memory management,
+  code generation, linking and packaging remain outside ViZG.
+
+#### Goal 233 — Freeze the immutable HIR consumer contract
+
+- Deterministic iteration and checked lookup cover modules, functions, blocks,
+  instructions, bindings, types, effects and provenance.
+- IDs are result-local; invalid, stale and foreign handles fail safely.
+- A standalone consumer needs no AST, binder, checker or mutable project.
+
+#### Goal 234 — Stable external declarations
+
+- Host-supplied `ExternalSymbolId` is independent of descriptor order.
+- External module, declaration, semantic and HIR identities remain distinct.
+- Function/global/constant/type declarations retain complete semantic types,
+  conservative effects and provenance without backend metadata.
+
+#### Goal 235 — Canonical external lowering
+
+- Imports, aliases and re-exports retain canonical external identity.
+- External functions remain body-less declarations and calls use ordinary HIR
+  call/binding operations.
+- Missing, duplicate or malformed external metadata is rejected.
+
+#### Goal 236 — Official versioned HIR access
+
+- Zig consumers use immutable checked views.
+- Non-Zig consumers use the additive `VIZG_HIR_API_VERSION` summary/record API
+  through opaque result ownership.
+- Borrowed strings and handles remain valid only for the owning result lifetime.
+- `example/hir_consumer.c` validates a downstream consumer.
+- HIR serialization remains out of scope.
+
+#### Goal 237 — Final implementation audit and freeze
+
+- Goals 232–236 pass with zero unresolved HIR P0/P1/P2 findings.
+- All supported access uses public APIs; VZed needs no private frontend state.
+- The complete build, test, ABI, native, Android and WebAssembly matrix passes.
 
 ---
 
@@ -1209,6 +1264,18 @@ git tag -a vizg-hir-v1 -m "ViZG canonical typed HIR v1"
 230 Robustness and reproducibility
  ↓
 231 Final audit and freeze
+ ↓
+232 Final product boundary
+ ↓
+233 Consumer contract
+ ↓
+234 Stable external identities
+ ↓
+235 External declaration lowering
+ ↓
+236 Official public HIR access
+ ↓
+237 Final implementation audit and freeze
 ```
 
 No goal may silently implement work assigned to a later goal in a way that freezes an unreviewed contract. Earlier scaffolding may reserve types/APIs, but behavioral closure occurs only in its assigned goal.
@@ -1418,24 +1485,20 @@ Document in `docs/protocol.md`:
 Goals 189–207
 └── closed portable frontend, project semantics and official ABI v1
 
-Goals 208–231
-└── active strict HIR v1 chain documented in Phase 2
+Goals 208–237
+└── closed strict HIR v1 final-product chain documented in Phase 2
 
-Future MIR/runtime project
-└── consumes frozen HIR v1 and owns global optimization, representation,
-    memory management, execution and backend lowering
-
-Runtime module resolution
-└── belongs to a separate runtime/consumer layer and is not a ViZG phase
+Host module resolution
+└── belongs to the consumer and is not a ViZG phase
 ```
 
 ### Required order
 
 1. Goals 189–207 remain closed and are not reopened without new evidence.
-2. Goals 208–231 execute in strict numerical order.
-3. HIR work must not modify frozen C ABI v1 or introduce resolver policy.
-4. MIR/runtime planning begins only after Goal 231 freezes HIR v1.
-5. Filesystem/package/URL resolution remains in the runtime or consumer that
+2. Goals 208–237 execute in strict numerical order.
+3. HIR work must not modify frozen project-input ABI v1 structures or introduce resolver policy.
+4. ViZG has no implementation phase after verified immutable HIR.
+5. Filesystem/package/URL resolution remains in the host or consumer that
    implements the module-provider contract.
 
 ---
@@ -1450,7 +1513,7 @@ Runtime module resolution
 | `VZG4xxx` | Resolver errors | Identifier/type-name resolution, not module-specifier policy |
 | `VZG5xxx` | Module-provider/graph errors | Missing, denied, failed, duplicate, invalid-response, or limit outcomes |
 | `VZG6xxx` | Type checker semantic errors | Existing semantic diagnostics |
-| `VZG7xxx` | HIR/lowering errors | Active allocation under Goals 208–231 |
+| `VZG7xxx` | HIR/lowering errors | Active allocation under Goals 208–237 |
 | `VZG8xxx` | Future protocol errors | Reserved |
 
 Module diagnostics describe the result of a host response or graph invariant.
@@ -1476,12 +1539,12 @@ They must not encode filesystem, package-manager, URL, or path-resolution policy
    but HIR must build its own typed blocks, values, places, terminators and
    regions. It must not wrap AST `NodeId` CFG blocks as the final representation.
 
-5. **Future ABI extension:** any public HIR exposure requires additive explicit
-   versioning. Context-local `TypeId`, HIR IDs and pointers must not be presented
-   as independently portable global identities.
+5. **Public HIR access:** the additive versioned HIR API exposes only
+   result-scoped records and borrowed strings. Context-local `TypeId`, HIR IDs
+   and pointers are not portable global identities.
 
-6. **Runtime provider design:** filesystem, package, URL, memory, and virtual
-   module providers belong to the runtime/consumer. Their policies must not be
+6. **Host provider design:** filesystem, package, URL, memory, and virtual
+   module providers belong to the host/consumer. Their policies must not be
    copied into ViZG.
 
 7. **Singular semantic ownership:** HIR consumes the canonical semantic result.
@@ -1498,8 +1561,8 @@ They must not encode filesystem, package-manager, URL, or path-resolution policy
 - Claiming full TypeScript or JavaScript compatibility.
 - Running or bundling imported modules.
 - Acting as a browser, Node.js replacement, or package manager.
-- Changing frozen ABI v1 structures, constants, lifecycle, or symbols from HIR
-  work instead of introducing an explicitly versioned ABI.
+- Changing frozen project-input ABI v1 structures, constants, or lifecycle.
+- Extending the separately versioned HIR access contract without a new version.
 - Emitting MIR, bytecode, objects, native code, or linking executables in this
   frontend repository.
 - Restoring the removed prototype ABI or introducing compatibility shims for it.

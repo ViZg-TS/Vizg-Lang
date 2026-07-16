@@ -26,7 +26,8 @@ Core never calls host code. Requests and responses cross the API boundary, and
 the host drives progress by calling the core again. Native filesystem support
 is an optional host adapter, not a core dependency. Goal 188 closed the final
 portable-core audit on 2026-07-14. HIR implementation is now governed by the
-strict Goals 208–231 chain without changing this frozen ABI.
+strict Goals 208–237 chain. The project-input ABI v1 remains frozen; public HIR
+access is additive and independently versioned.
 
 ## Portable Roots And ABI Boundary
 
@@ -104,7 +105,7 @@ native tables. `zig build wasm-freestanding` additionally inspects
 the WebAssembly tables: there are zero imports and the only exports are linear
 `memory` plus those official functions.
 
-The exact official function export table is:
+The project-input ABI v1 function table is:
 
 ```txt
 vizg_project_add_source
@@ -122,6 +123,22 @@ vizg_project_workspace_alignment
 vizg_project_workspace_overhead
 ```
 
+HIR access is additive and separately versioned by
+`VIZG_HIR_API_VERSION = 1`:
+
+```txt
+vizg_hir_api_version
+vizg_hir_record_at
+vizg_hir_summary
+```
+
+These functions inspect only verified immutable HIR owned by an opaque finished
+result. `Vizg_HirSummary` gives deterministic entity counts and
+`Vizg_HirRecord` iterates modules, external declarations, functions, blocks,
+instructions, bindings, types, and origins. Record strings are borrowed until
+`vizg_project_result_destroy`. Unsupported versions, invalid kinds, and
+out-of-range indices return controlled status values.
+
 On `x86_64-linux`, the exact undefined native archive table depends on the
 selected optimization mode:
 
@@ -134,7 +151,7 @@ selected optimization mode:
 These are native compiler/runtime support symbols. They do not represent
 filesystem, process, POSIX, WASI, allocator, or host-callback use by core. The
 `wasm32-freestanding` import table is exactly empty; its export table is
-`memory` followed by the 13 functions above.
+`memory` followed by the 16 functions above.
 
 For `wasm32`, every pointer and `size_t` is a 32-bit byte offset/count in the
 exported linear memory. The host grows memory, chooses a workspace satisfying
@@ -432,19 +449,21 @@ The CLI is intentionally diagnostic and exploratory. It is not a compiler driver
 
 Diagnostics are phase-tagged records with a severity, stable code, display name, message, source span, optional label, and optional path. Current diagnostics come from scanner, parser, binder, resolver, module graph, and semantic checking phases. Future phase names already exist in the enum, but their systems are not implemented yet.
 
-## Active HIR v1 Contract And Future Layers
+## Frozen HIR v1 Final Product
 
-HIR v1 is the active next layer and remains separate from the frontend and
+HIR v1 is ViZG's final product layer and remains separate from the frontend and
 module graph. Its normative contract is
 [`hir-v1-design.md`](hir-v1-design.md), its exhaustive source mapping is
 [`hir-v1-lowering-matrix.md`](hir-v1-lowering-matrix.md), and its strict
-implementation order is Goals 208–231 in [`VIZG_PLAN.md`](../VIZG_PLAN.md).
+implementation and freeze order is Goals 208–237 in [`VIZG_PLAN.md`](../VIZG_PLAN.md).
 HIR uses typed ANF-like values, explicit mutable bindings, blocks and
 terminators; it is neither SSA-lite nor MIR. Structured `if`, ternary and loop
 syntax lowers to control-flow blocks, never final syntax-shaped HIR nodes.
-The portable Zig root exports `hir`; each `HirResult` borrows the completed
-project semantic result, owns its HIR allocations, and scopes every HIR ID to
-one result-local identity domain. The core schema exposes modules, entities,
+The portable Zig root exports `hir`; each sealed `HirResult` owns its HIR
+allocations, immutable type snapshot, provenance and strings, and scopes every
+HIR ID to one result-local identity domain. Semantic/project teardown cannot
+invalidate an owned result. The core schema exposes modules, external
+declarations, entities,
 canonical functions, bindings, captures, semantic places, regions, blocks,
 instructions and terminators. Its closed operation union validates immediate
 payload shape, derives conservative effects, and contains no AST fallback,
@@ -453,7 +472,10 @@ An eligibility gate runs before HIR allocation: it requires complete local
 semantics, rejects blocking or recovered unsupported syntax, validates linked
 module/symbol/type identities, and applies canonical input and output budgets.
 Failures use stable `VZG7xxx` diagnostics and expose no partial `HirResult`;
-linked external identities remain valid metadata without fabricated bodies.
+linked external identities remain body-less typed declarations without
+fabricated bodies. Host-supplied `ExternalSymbolId` values are stable across
+descriptor order; declaration kind, complete function types, conservative
+effects, and provenance survive lowering without target or backend metadata.
 Eligible projects lower deterministically to one shell per reachable source
 module. Shell identity is the exact host-supplied `ModuleId`; logical names are
 descriptive only. Each shell owns one module-initialization function and records
@@ -569,13 +591,14 @@ annotations can be selected independently. Invalid or foreign IDs produce
 controlled markers instead of indexing project storage. Reference snapshot
 tests exercise every supported lowering family.
 
-The Zig project/session layer is the canonical HIR entry point. Once
+The Zig project/session layer is the canonical HIR construction entry point. Once
 `Project.finish` has produced complete project semantics, `hir.deriveProject`
 performs eligibility checking, lowering, canonicalization, verification, and
-project ownership transfer. Repeated calls are idempotent and return the same
-immutable result. Project mutation destroys HIR before the semantic result it
-borrows, and project teardown destroys each exactly once. This integration is
-intentionally absent from the frozen C ABI v1.
+result sealing. Repeated calls are idempotent and return the same immutable
+result. Public Zig `ConsumerView` lookup/iteration covers every HIR entity,
+type, effect, and origin with controlled invalid/foreign-ID errors. The
+project-input C ABI v1 remains unchanged; the separately versioned HIR ABI
+exposes deterministic summary/record iteration through the opaque result.
 
 HIR construction is bounded under adversarial input. Every generic arena,
 nesting, provenance, and project-growth limit is checked before mutating the
@@ -586,12 +609,13 @@ cyclic modules, abrupt iterator cleanup, large traces, deterministic mutation
 corpora, and corrupted-HIR verifier fixtures exercise these contracts in every
 optimization mode without introducing target-dependent behavior.
 
-Later layers remain intentionally separate:
+Outside-product concerns remain intentionally unassigned:
 
 - Expanded module layer: package lookup, configuration-aware resolution, and richer import/export forms.
 - Type checker expansion: add advanced TypeScript forms beyond the supported Typed Semantics v2 subset.
-- MIR/runtime/compiler layers: own global optimization, representation, memory
-  management, execution, interpretation, compilation, or code emission.
+- Global optimization, representation, memory management, execution,
+  interpretation, compilation, code emission, linking, and packaging are not
+  ViZG layers. Independent consumers may implement them.
 
 ## Non-Goals For Current Milestone
 

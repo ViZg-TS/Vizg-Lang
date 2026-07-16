@@ -1,6 +1,6 @@
 # ViZG HIR v1 — TypeScript-to-HIR Lowering Matrix
 
-**Status:** normative coverage table for Goals 208–231  
+**Status:** frozen normative coverage table for Goals 208–237
 **Companion specification:** [`hir-v1-design.md`](hir-v1-design.md)
 
 This document is the authoritative checklist connecting supported frontend forms to legal HIR v1 forms.
@@ -18,7 +18,7 @@ A row is complete only when its lowering, canonical output, diagnostics, provena
 | **Instruction** | Produces one or more legal HIR instructions. |
 | **Control flow** | Produces blocks, terminators, block parameters or region edges. |
 | **Module metadata** | Produces dependencies, live bindings, exports or initialization ordering. |
-| **Region** | Produces exception/cleanup or suspension semantics that must survive to MIR. |
+| **Region** | Produces target-independent exception/cleanup or suspension semantics visible to consumers. |
 | **Reject** | Must fail the HIR eligibility gate; no public partial HIR is emitted. |
 | **Future reduction** | Reserved documentation for a syntax feature not currently supported by the frontend. |
 
@@ -446,9 +446,9 @@ Canonicalization must not perform global program optimization.
 
 ---
 
-## 17. HIR versus MIR optimization table
+## 17. HIR versus downstream implementation boundary
 
-| Transformation | HIR v1 | MIR |
+| Transformation | HIR v1 | Outside ViZG |
 |---|---:|---:|
 | syntax erasure | Required | No |
 | structured control-flow lowering | Required | No |
@@ -457,7 +457,7 @@ Canonicalization must not perform global program optimization.
 | safe literal folding | Limited/required | Extended |
 | trivial CFG cleanup | Limited/required | Extended |
 | local unused-pure removal | Limited/required | Extended |
-| full SSA / mem2reg | Forbidden | Required/optional by MIR design |
+| full SSA / mem2reg | Forbidden | Consumer-defined |
 | Value-dominance validation for temporary legality | Required by verifier | Required/retained |
 | dominator trees for optimization and code motion | Not part of HIR canonicalization | Yes |
 | SCCP | Forbidden | Yes |
@@ -472,7 +472,7 @@ Canonicalization must not perform global program optimization.
 | object/class/closure layout | Forbidden | Yes/runtime |
 | async/generator state machine | Forbidden | Yes/runtime |
 | exception ABI lowering | Forbidden | Yes/runtime |
-| memory management / GC / RC | Forbidden | Yes/runtime project |
+| memory management / GC / RC | Forbidden | Consumer-defined |
 | target-specific lowering | Forbidden | Yes/backend |
 
 ---
@@ -503,6 +503,12 @@ Canonicalization must not perform global program optimization.
 | project integration and coverage closure | 229 |
 | limits, fuzzing and adversarial robustness | 230 |
 | final audit and HIR v1 freeze | 231 |
+| final-product boundary and independent ownership | 232 |
+| immutable consumer contract | 233 |
+| stable external declaration identity and semantics | 234 |
+| canonical external lowering | 235 |
+| official versioned public HIR API and consumer example | 236 |
+| final implementation audit and freeze | 237 |
 
 ---
 
@@ -531,7 +537,7 @@ each row in that range; split rows identify the deliberate exceptions.
 | §15 future syntax | Deliberately unsupported | forms are absent from the accepted AST/HIR operation unions |
 | §16 canonicalization | Implemented | `src/hir/canonicalize.zig`; fixed-point and rewrite-budget tests |
 | §17 HIR-required concerns | Implemented | schema, lowering, canonicalization, verifier, provenance, and printer tests |
-| §17 MIR/runtime-only concerns | Deliberately excluded | absent from `Operation` and guarded by architecture-boundary tests |
+| §17 outside-HIR concerns | Deliberately excluded | absent from `Operation` and guarded by architecture-boundary tests |
 
 Closure is exercised through the family-complete reference snapshots and the
 project/session integration tests; a supported row without implementation,
@@ -548,5 +554,5 @@ all effectful evaluation-order cases have tests
 all mandatory canonicalization rules converge
 all output is deterministic
 all configured limits fail safely
-Goals 208–231 pass in strict order
+Goals 208–237 pass in strict order
 ```

@@ -1,6 +1,6 @@
 # ViZG HIR v1 — Canonical Typed High-Level IR
 
-**Status:** normative design target for Goals 208–231  
+**Status:** frozen normative contract for Goals 208–237
 **Scope:** ViZG frontend repository  
 **Input:** immutable project semantic result  
 **Output:** immutable, canonical, typed HIR project  
@@ -65,7 +65,7 @@ source provenance and optional lowering traces
 human-readable HIR printing
 ```
 
-### A future MIR/runtime project owns
+### Outside the ViZG product boundary
 
 ```txt
 full SSA construction and variable promotion
@@ -82,6 +82,10 @@ memory management of every kind
 GC, RC, arenas, ownership, root maps and safepoints
 bytecode, native code, object files and linking
 ```
+
+ViZG does not own, schedule, package, or roadmap those concerns. Independent
+downstream consumers may interpret or lower verified HIR under their own
+contracts.
 
 ### Memory-management neutrality
 
@@ -119,12 +123,12 @@ The design deliberately combines established compiler patterns rather than copyi
 
 | Source | Adopted lesson | ViZG decision |
 |---|---|---|
-| Rust HIR/THIR/MIR | Desugar syntax before a lower optimization IR; keep HIR and MIR responsibilities distinct. | HIR preserves language semantics; MIR owns global optimization and representation decisions. |
+| Rust HIR/THIR/MIR | Desugar syntax before a lower optimization IR and keep representation decisions outside HIR. | HIR preserves language semantics; independent consumers own any lower representation. |
 | A-Normal Form | Name non-trivial intermediate results and make evaluation order explicit. | HIR instructions consume constants or `ValueId` operands; nested effectful expressions are flattened. |
 | GCC GIMPLE | Small operations and explicit control flow simplify later analyses. | Structured control statements disappear into blocks and terminators. |
 | Swift SIL | Separate mandatory canonicalization from optional performance optimization. | Every HIR result passes required canonicalization; optimize mode does not change canonical HIR semantics. |
 | MLIR legalization/canonicalization | Define legal operations, reject illegal survivors, and use bounded convergent rewrites. | Lowering must eliminate every AST-only form; canonicalization is local, deterministic and budgeted. |
-| SSA literature | SSA is powerful for global data-flow optimization. | Full SSA is intentionally deferred to MIR; only immutable temporary values and block parameters exist in HIR. |
+| SSA literature | SSA is powerful for global data-flow optimization. | Full SSA is outside ViZG; only immutable temporary values and block parameters exist in HIR. |
 
 Primary references are listed at the end of this document.
 
@@ -186,26 +190,50 @@ A smaller graph is not valid if it changes any observable behavior.
 
 ## 6. Ownership and lifetime
 
-HIR v1 is an immutable project-owned result.
+HIR v1 is an immutable owned result with project-local identity domains.
 
 ```txt
 project creates semantic result
 → project derives HIR result
-→ semantic result and HIR share the same project identity domain
+→ verification succeeds
+→ HIR seals owned type, provenance and string storage
 → host-assigned ModuleId, SemanticDeclId and TypeId remain project-context-local
-→ the semantic result outlives every HIR use
-→ the project destroys HIR exactly once before destroying semantic state
+→ semantic/project storage may be destroyed
+→ the owning HirResult remains valid until its explicit destruction
 ```
 
-`HirResult` owns all allocations created by lowering and has explicit
-deinitialization. Project ownership means the project/session calls that
-deinitialization; it does not mean HIR borrows storage from the semantic arena.
-After successful construction, consumers receive immutable views only. Failed
+`HirResult` owns all allocations created by lowering plus a sealed read-only
+type snapshot and has explicit deinitialization. Project/session and public ABI
+results may own it, but semantic storage is not required after sealing. After
+successful construction, consumers receive immutable views only. Failed
 construction frees internal allocations and exposes no partial public result.
 
 HIR v1 does not define an independently serializable binary format. A future serialized HIR must introduce explicit stable identities and versioning rather than exposing context-local `TypeId` values as portable global IDs.
 
-The frozen C ABI v1 is not modified by HIR work. Initial HIR exposure is Zig-internal/project-owned. Any future public ABI extension must be additive and explicitly versioned.
+The project-input C ABI v1 remains unchanged. HIR exposure is an additive,
+separately versioned public contract: opaque `Vizg_ProjectResult` ownership,
+version negotiation, deterministic summary/record iteration, and borrowed
+strings whose lifetime is the result lifetime. Unsupported versions and
+invalid or foreign IDs fail in a controlled way. Serialization remains
+explicitly outside HIR v1.
+
+### Consumer surface
+
+The official immutable consumer surface provides deterministic iteration and
+checked lookup for modules, external declarations, functions, blocks,
+instructions, bindings, types, effects, and source origins. All IDs are scoped
+to one `HirResult`; consumers must not compare them across results. A consumer
+requires no AST, binder, checker, or mutable project state.
+
+### Stable external declarations
+
+Host-supplied `ExternalSymbolId` is the canonical identity of an external
+declaration and is independent of descriptor order. External module,
+declaration, semantic, and HIR identity domains remain distinct. Declarations
+record function/global/constant/type kind, complete function parameter and
+result types where applicable, conservative effects, and provenance. They have
+no fabricated HIR body and carry no target, calling-convention, layout,
+link-name, runtime, or backend metadata.
 
 ---
 
@@ -884,7 +912,7 @@ bb_exit:
   return
 ```
 
-Normal iterator exhaustion does not invoke abrupt-close behavior. `break`, `return`, `throw`, or another abrupt exit from the loop must route through an iterator-close cleanup region when the ECMAScript protocol requires it. MIR decides how the iterator protocol is implemented.
+Normal iterator exhaustion does not invoke abrupt-close behavior. `break`, `return`, `throw`, or another abrupt exit from the loop must route through an iterator-close cleanup region when the ECMAScript protocol requires it. A downstream consumer decides how the iterator protocol is implemented.
 
 ### 16.12 Object and array literals
 
@@ -1066,7 +1094,7 @@ yield_delegate %3
 return
 ```
 
-State-machine construction is a MIR responsibility.
+State-machine construction is a downstream-consumer responsibility.
 
 ### 16.17 Imports and exports
 
@@ -1179,7 +1207,7 @@ Legalization may never stop with an illegal AST operation because a budget was e
 
 ## 19. Optimizations forbidden in HIR v1
 
-These transformations belong to MIR even when they appear attractive:
+These transformations are outside ViZG even when they appear attractive:
 
 ```txt
 full SSA conversion
@@ -1425,8 +1453,8 @@ Expression merges use block parameters.
 Structured control syntax is eliminated.
 Language-semantic operations remain target-independent.
 Only mandatory local canonicalization runs in ViZG.
-Full SSA and global optimization belong to MIR.
-Memory management belongs entirely to MIR/runtime.
+Full SSA and global optimization are outside ViZG.
+Memory management is outside ViZG.
 Debug provenance is optional side-table data.
 Only verified immutable HIR is exposed to consumers.
 ```
