@@ -1168,7 +1168,7 @@ git tag -a vizg-hir-v1 -m "ViZG canonical typed HIR v1"
 
 **Depends on:** Goal 231, in strict numerical order.
 
-#### Goal 232 — Freeze ViZG at verified immutable HIR
+#### Goal 232 — Freeze ViZG at verified immutable HIR — COMPLETE
 
 - `HirProject` is the final ViZG artifact.
 - Sealed HIR owns every type, provenance and string fact needed by consumers.
@@ -1176,28 +1176,28 @@ git tag -a vizg-hir-v1 -m "ViZG canonical typed HIR v1"
 - Post-HIR optimization, representation, execution, memory management,
   code generation, linking and packaging remain outside ViZG.
 
-#### Goal 233 — Freeze the immutable HIR consumer contract
+#### Goal 233 — Freeze the immutable HIR consumer contract — COMPLETE
 
 - Deterministic iteration and checked lookup cover modules, functions, blocks,
   instructions, bindings, types, effects and provenance.
 - IDs are result-local; invalid, stale and foreign handles fail safely.
 - A standalone consumer needs no AST, binder, checker or mutable project.
 
-#### Goal 234 — Stable external declarations
+#### Goal 234 — Stable external declarations — COMPLETE
 
 - Host-supplied `ExternalSymbolId` is independent of descriptor order.
 - External module, declaration, semantic and HIR identities remain distinct.
 - Function/global/constant/type declarations retain complete semantic types,
   conservative effects and provenance without backend metadata.
 
-#### Goal 235 — Canonical external lowering
+#### Goal 235 — Canonical external lowering — COMPLETE
 
 - Imports, aliases and re-exports retain canonical external identity.
 - External functions remain body-less declarations and calls use ordinary HIR
   call/binding operations.
 - Missing, duplicate or malformed external metadata is rejected.
 
-#### Goal 236 — Official versioned HIR access
+#### Goal 236 — Official versioned HIR access — COMPLETE
 
 - Zig consumers use immutable checked views.
 - Non-Zig consumers use the additive `VIZG_HIR_API_VERSION` summary/record API
@@ -1206,7 +1206,7 @@ git tag -a vizg-hir-v1 -m "ViZG canonical typed HIR v1"
 - `example/hir_consumer.c` validates a downstream consumer.
 - HIR serialization remains out of scope.
 
-#### Goal 237 — Final implementation audit and freeze
+#### Goal 237 — Final implementation audit and freeze — COMPLETE
 
 - Goals 232–236 pass with zero unresolved HIR P0/P1/P2 findings.
 - All supported access uses public APIs; VZed needs no private frontend state.

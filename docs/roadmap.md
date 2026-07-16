@@ -16,9 +16,9 @@ The responsibility split is fixed:
 - Concrete filesystem hosts in this repository are validation fixtures only.
 - The project ABI is one-shot; changed source requires a new project.
 
-ABI v1 is frozen. Goal 207 passed the repeated complete local validation matrix with no
-unresolved in-scope finding, so HIR planning is authorized. HIR remains
-unimplemented and cannot retroactively change the frozen ABI v1 contract.
+ABI v1 is frozen. Goal 207 passed the repeated complete local validation matrix
+with no unresolved in-scope finding. HIR v1 was then implemented additively
+without changing existing ABI v1 layouts or entry points.
 
 ## Current Implementation Snapshot: Frontend And Host-Resolved Module Graph
 
@@ -59,23 +59,33 @@ Implemented for the supported syntax subset:
 
 Complete TypeScript compatibility and advanced annotation forms remain out of scope.
 
-## Future Milestone: HIR And Lowering
+## Closed Milestone: Canonical HIR v1
 
-Planned, not implemented:
+Goals 208–237 are complete. The audited implementation is
+`6579e902129b43a9857ac07a070a33702a20df8c`, and the immutable freeze point is
+identified by tag `hir-v1.0.0`.
 
-- Lower AST or typed AST into a compact intermediate representation.
-- Normalize control flow and expression forms.
-- Prepare for interpretation, analysis, or code generation.
-- Reserve `VZG7xxx` diagnostics for lowering errors.
+Implemented:
 
-### HIR Entry Gate — Opened By Goal 207
+- immutable, owned, typed and target-independent project HIR;
+- canonical lowering with explicit evaluation order and control flow;
+- eligibility, limits, diagnostics, canonicalization and verification;
+- stable external declarations and identity-preserving external lowering;
+- deterministic Zig consumer views and versioned C-compatible summary/record
+  access;
+- native, Android and import-free WebAssembly validation.
 
-Goal 207 closed the gate only after Goals 203–206 corrected external semantic
-propagation, pre-growth limits, summary/limit consistency, and oversized-source
-safety, and the resulting tree passed the repeated complete local command
-matrix. HIR planning may begin from the frozen portable project and ABI v1
-contracts. The verified conditions and limitations are recorded in
-[`FINAL_AUDIT.md`](FINAL_AUDIT.md).
+The normative contract and lowering table are
+[`hir-v1-design.md`](hir-v1-design.md) and
+[`hir-v1-lowering-matrix.md`](hir-v1-lowering-matrix.md). Exact audit evidence
+and known limitations are in [`HIR_V1_AUDIT.md`](HIR_V1_AUDIT.md).
+
+## Current Product Boundary: Contractual Maintenance
+
+ViZG ends at verified immutable HIR v1 and now enters contractual maintenance.
+Changes must preserve the frozen project ABI v1 and HIR API v1 contracts unless
+a deliberately versioned successor is approved. Primary development may move
+to VZed, which consumes public HIR instead of private frontend state.
 
 ### Superseded portable-core closure records
 
@@ -96,16 +106,17 @@ confirmed findings remediated. Its attack classes, finding severity, fixes,
 limits, and final gate evidence live in
 [`typed-semantics-v2-audit.md`](typed-semantics-v2-audit.md).
 
-## Future Milestone: Runtime Or Compiler Backend
+## Downstream Work: VZed
 
-Possible future directions, not implemented:
+Post-HIR work is not a ViZG milestone. Downstream consumers such as VZed may
+implement:
 
 - Interpreter.
 - Native compiler backend.
 - JavaScript emitter.
 - Bytecode VM.
 
-No runtime or compiler backend exists today. Reserve `VZG8xxx` diagnostics for runtime-facing errors if that layer is added.
+No runtime or compiler backend exists in ViZG.
 
 ## Non-Goals Until Explicitly Revisited
 

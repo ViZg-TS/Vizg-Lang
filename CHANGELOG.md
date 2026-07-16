@@ -8,6 +8,10 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Froze canonical HIR v1 after Goals 232–237 and the full native, cross-target,
+  ABI, Android, and import-free WebAssembly matrix passed. The contract is
+  identified by `hir-v1.0.0`; ViZG now enters contractual maintenance and
+  post-HIR development moves downstream to VZed.
 - Capped every source at the public `VIZG_MAX_SOURCE_LENGTH` (`UINT32_MAX`)
   representation boundary, rejecting oversized configuration and source
   descriptors before pointer access, copying, or scanning while keeping
