@@ -14,6 +14,7 @@ pub const tokens = @import("frontend/tokens.zig");
 
 pub const semantics = @import("semantics/root.zig");
 pub const project = @import("project/root.zig");
+pub const hir = @import("hir/root.zig");
 
 // Official portable project contracts. These identities are distinct from the
 // semantic analysis graph records exported through `modules`.
@@ -47,6 +48,7 @@ test {
     _ = frontend;
     _ = tokens;
     _ = project;
+    _ = hir;
     _ = @import("modules/graph.zig");
     _ = @import("modules/root.zig");
     // Keep semantics layer wired in so its tests register alongside the rest.
