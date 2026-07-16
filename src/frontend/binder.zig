@@ -456,7 +456,9 @@ const Binder = struct {
         const scope = &self.scopes.items[@intCast(scope_id)];
         for (scope.symbols.items) |existing_id| {
             const existing = self.symbols.items[@intCast(existing_id)];
-            if (existing.namespace == namespace and std.mem.eql(u8, existing.name, name)) {
+            if (existing.namespace == namespace and std.mem.eql(u8, existing.name, name) and
+                !self.complementaryAccessors(existing, kind, declaration))
+            {
                 try self.diagnostic_list.append(self.allocator, .{
                     .severity = .@"error",
                     .code = .duplicate_declaration,
@@ -480,6 +482,19 @@ const Binder = struct {
         });
         try scope.symbols.append(self.allocator, id);
         return id;
+    }
+
+    fn complementaryAccessors(self: *const Binder, existing: Symbol, kind: SymbolKind, declaration: NodeId) bool {
+        if (existing.kind != .method or kind != .method) return false;
+        const first = switch (self.ast.node(existing.declaration).data) {
+            .ClassMethod => |method| method.kind,
+            else => return false,
+        };
+        const second = switch (self.ast.node(declaration).data) {
+            .ClassMethod => |method| method.kind,
+            else => return false,
+        };
+        return (first == .getter and second == .setter) or (first == .setter and second == .getter);
     }
 
     fn recordDeclarationExports(self: *Binder, node_id: NodeId) !void {
@@ -721,6 +736,19 @@ test "constructor parameter properties bind class members and diagnose conflicts
     const duplicate_bound = try bind(allocator, duplicate_parse.ast);
     try std.testing.expectEqual(@as(usize, 1), duplicate_bound.diagnostics.len);
     try std.testing.expectEqual(diagnostics.DiagnosticCode.duplicate_declaration, duplicate_bound.diagnostics[0].code);
+}
+
+test "getter and setter declarations share one class property name" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scan = try scanner.scanAll(allocator, "class Item { get value(): number { return 1; } set value(next: number) {} }", true);
+    const parsed = try parser.parse(allocator, scan.tokens, .{});
+    const bound = try bind(allocator, parsed.ast);
+    try std.testing.expectEqual(@as(usize, 0), bound.diagnostics.len);
 }
 
 test "enums bind value type and member namespaces" {
