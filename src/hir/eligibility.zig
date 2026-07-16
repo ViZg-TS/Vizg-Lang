@@ -154,8 +154,21 @@ fn validateProjectIdentities(
 
 fn validIdentity(project: *const project_mod.Project, result: *const semantics.BorrowedProjectSemanticResult, identity: semantics.SemanticIdentity, external: bool) bool {
     if (!validType(result, identity.type_id)) return false;
-    if (external) return identity.external_module_id != null;
-    if (identity.external_module_id != null) return false;
+    if (identity.external_module_id) |module_id| {
+        const descriptor = project.lookupExternalModule(.init(module_id)) orelse return false;
+        const symbol_id = identity.external_symbol_id orelse {
+            return !external and identity.external_declaration_kind == null and
+                identity.external_effects == null;
+        };
+        if (identity.external_declaration_kind == null or identity.external_effects == null) return false;
+        for (descriptor.exports) |item| {
+            if (item.symbol_id != null and item.symbol_id.?.value() == symbol_id and
+                item.declaration_kind == identity.external_declaration_kind and item.effects == identity.external_effects) return true;
+        }
+        return false;
+    }
+    if (external) return false;
+    if (identity.external_symbol_id != null or identity.external_declaration_kind != null or identity.external_effects != null) return false;
     if (result.lookupModule(identity.declaration.module_id) == null) return false;
     if (project.lookup(.init(identity.declaration.module_id))) |module| {
         const local = module.semantic_result orelse return false;

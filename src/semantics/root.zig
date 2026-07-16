@@ -33,6 +33,9 @@ pub const SemanticIdentity = struct {
     /// Present only for source-less host modules. Numeric values may equal a
     /// source ModuleId without creating equal semantic provenance.
     external_module_id: ?u64 = null,
+    external_symbol_id: ?u64 = null,
+    external_declaration_kind: ?@import("../project/contracts.zig").ExternalDeclarationKind = null,
+    external_effects: ?@import("../project/contracts.zig").ExternalEffectSet = null,
 };
 
 pub const SemanticLinkState = enum {
@@ -74,7 +77,7 @@ pub const ProjectSemanticModule = struct {
 /// owns all semantic tables. Cross-module links contain IDs only. Every TypeId
 /// belongs to the single project TypeStore.
 pub const ProjectSemanticResult = struct {
-    arena: std.heap.ArenaAllocator,
+    arena: *std.heap.ArenaAllocator,
     graph: modules_mod.ModuleGraph,
     type_store: types.TypeStore,
     modules: []ProjectSemanticModule,
@@ -85,7 +88,7 @@ pub const ProjectSemanticResult = struct {
 
     pub fn deinit(self: *ProjectSemanticResult) void {
         self.graph.deinit();
-        self.arena.deinit();
+        destroyArena(self.arena);
         self.* = undefined;
     }
 
@@ -103,7 +106,7 @@ pub const ProjectSemanticResult = struct {
 /// Multi-file semantic output derived from a borrowed module graph. The graph
 /// and every frontend result it references must outlive this result.
 pub const BorrowedProjectSemanticResult = struct {
-    arena: std.heap.ArenaAllocator,
+    arena: *std.heap.ArenaAllocator,
     type_store: types.TypeStore,
     modules: []ProjectSemanticModule,
     exports: []SemanticExport,
@@ -112,7 +115,7 @@ pub const BorrowedProjectSemanticResult = struct {
     is_partial: bool,
 
     pub fn deinit(self: *BorrowedProjectSemanticResult) void {
-        self.arena.deinit();
+        destroyArena(self.arena);
         self.* = undefined;
     }
 
@@ -128,7 +131,7 @@ pub const BorrowedProjectSemanticResult = struct {
 };
 
 const ProjectSemanticData = struct {
-    arena: std.heap.ArenaAllocator,
+    arena: *std.heap.ArenaAllocator,
     type_store: types.TypeStore,
     modules: []ProjectSemanticModule,
     exports: []SemanticExport,
@@ -162,7 +165,7 @@ pub const SemanticModule = struct {
 /// TypeIds belong to this result's TypeStore and must not be compared with IDs
 /// from another SemanticResult.
 pub const SemanticResult = struct {
-    arena: std.heap.ArenaAllocator,
+    arena: *std.heap.ArenaAllocator,
     frontend: frontend.FrontendResult,
     module: SemanticModule,
     type_store: types.TypeStore,
@@ -173,7 +176,7 @@ pub const SemanticResult = struct {
     metadata: SemanticMetadata,
 
     pub fn deinit(self: *SemanticResult) void {
-        self.arena.deinit();
+        destroyArena(self.arena);
         self.* = undefined;
     }
 
@@ -246,8 +249,8 @@ pub fn analyzeSource(
     source: frontend.SourceFile,
     options: frontend.FrontendOptions,
 ) !SemanticResult {
-    var arena = std.heap.ArenaAllocator.init(backing_allocator);
-    errdefer arena.deinit();
+    const arena = try createArena(backing_allocator);
+    errdefer destroyArena(arena);
     const allocator = arena.allocator();
 
     const owned_source: frontend.SourceFile = .{
@@ -328,8 +331,8 @@ pub fn analyzeBorrowedModuleGraph(backing_allocator: std.mem.Allocator, graph: *
 }
 
 fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const modules_mod.ModuleGraph) !ProjectSemanticData {
-    var arena = std.heap.ArenaAllocator.init(backing_allocator);
-    errdefer arena.deinit();
+    const arena = try createArena(backing_allocator);
+    errdefer destroyArena(arena);
     const allocator = arena.allocator();
     var type_store = types.TypeStore.init(allocator);
 
@@ -429,6 +432,18 @@ fn analyzeModuleGraphData(backing_allocator: std.mem.Allocator, graph: *const mo
         .diagnostics = diagnostic_slice,
         .is_partial = diagnostic_slice.len != 0 or hasUnresolvedLinks(import_slice),
     };
+}
+
+fn createArena(backing_allocator: std.mem.Allocator) !*std.heap.ArenaAllocator {
+    const arena = try backing_allocator.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(backing_allocator);
+    return arena;
+}
+
+fn destroyArena(arena: *std.heap.ArenaAllocator) void {
+    const backing_allocator = arena.child_allocator;
+    arena.deinit();
+    backing_allocator.destroy(arena);
 }
 
 fn graphModule(graph: *const modules_mod.ModuleGraph, id: ModuleId) ?*const modules_mod.Module {

@@ -10,18 +10,31 @@ const types = @import("../types/root.zig");
 pub const schema_version: u32 = 1;
 pub const ModuleId = project.ModuleId;
 pub const ExternalModuleId = project.ExternalModuleId;
+pub const ExternalSymbolId = project.ExternalSymbolId;
 pub const SemanticDeclId = types.SemanticDeclId;
 pub const TypeId = types.TypeId;
 
 pub const HirProject = struct {
     version: u32 = schema_version,
     modules: []const HirModule = &.{},
+    external_declarations: []const HirExternalDeclaration = &.{},
     entities: []const HirEntity = &.{},
     functions: []const HirFunction = &.{},
     constants: []const HirConstant = &.{},
     regions: []const HirRegion = &.{},
     origins: origin_mod.OriginTable = .{},
     lowering_trace: ?trace.LoweringTrace = null,
+};
+
+/// Body-less declaration supplied by the host. Identity is the pair
+/// (external module, external symbol); source declaration ids never alias it.
+pub const HirExternalDeclaration = struct {
+    module_id: ExternalModuleId,
+    symbol_id: ExternalSymbolId,
+    exported_name: []const u8,
+    kind: project.ExternalDeclarationKind,
+    type_id: TypeId,
+    effects: project.ExternalEffectSet,
 };
 
 pub const HirModule = struct {
@@ -54,7 +67,8 @@ pub const HirSemanticIdentity = struct {
     declaration: SemanticDeclId,
     type_id: TypeId,
     namespace: HirSemanticNamespace,
-    external_module_id: ?ExternalModuleId,
+    external_module_id: ?ExternalModuleId = null,
+    external_symbol_id: ?ExternalSymbolId = null,
 };
 
 pub const HirImportBinding = struct {

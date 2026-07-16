@@ -14,6 +14,7 @@ pub const Builder = struct {
     budget: limits_mod.Budget,
     violation: ?limits_mod.Violation = null,
     modules: std.ArrayList(model.HirModule) = .empty,
+    external_declarations: std.ArrayList(model.HirExternalDeclaration) = .empty,
     entities: std.ArrayList(model.HirEntity) = .empty,
     functions: std.ArrayList(model.HirFunction) = .empty,
     regions: std.ArrayList(model.HirRegion) = .empty,
@@ -113,6 +114,10 @@ pub const Builder = struct {
         try self.modules.append(self.allocator, module);
     }
 
+    pub fn appendExternalDeclaration(self: *Builder, declaration: model.HirExternalDeclaration) !void {
+        try self.external_declarations.append(self.allocator, declaration);
+    }
+
     pub fn reserveRegion(self: *Builder, function: ids.FunctionId, kind: model.HirRegionKind, nesting_depth: usize) !ids.RegionId {
         try self.reserveRegionNesting(nesting_depth);
         try self.reserve(.regions, 1);
@@ -150,6 +155,7 @@ pub const Builder = struct {
     pub fn finish(self: *Builder) !void {
         self.result.project = .{
             .modules = try self.modules.toOwnedSlice(self.allocator),
+            .external_declarations = try self.external_declarations.toOwnedSlice(self.allocator),
             .entities = try self.entities.toOwnedSlice(self.allocator),
             .functions = try self.functions.toOwnedSlice(self.allocator),
             .regions = try self.regions.toOwnedSlice(self.allocator),

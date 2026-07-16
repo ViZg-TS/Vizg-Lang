@@ -555,9 +555,12 @@ pub const Project = struct {
             item.target = .{
                 .symbol_id = null,
                 .declaration = types.SemanticDeclId.init(0, ast.invalid_node),
-                .type_id = externalTypeId(&result.type_store.builtins, exported.?.type_metadata),
+                .type_id = try externalDeclarationTypeId(allocator, &result.type_store, exported.?),
                 .namespace = if (item.type_only) .type else .value,
                 .external_module_id = external_id.value(),
+                .external_symbol_id = if (exported.?.symbol_id) |id| id.value() else null,
+                .external_declaration_kind = exported.?.declaration_kind,
+                .external_effects = exported.?.effects,
             };
             item.runtime_binding = !item.type_only;
         }
@@ -584,6 +587,10 @@ pub const Project = struct {
         return null;
     }
 
+    pub fn lookupExternalModule(self: *const Project, id: contracts.ExternalModuleId) ?contracts.ExternalModuleDescriptor {
+        return self.findExternal(id);
+    }
+
     fn registerExternalModule(self: *Project, descriptor: contracts.ExternalModuleDescriptor) !void {
         if (self.findExternal(descriptor.id)) |existing| {
             if (externalDescriptorsEqual(existing, descriptor)) return;
@@ -600,19 +607,33 @@ pub const Project = struct {
         const exports = try self.allocator.alloc(contracts.ExternalExportDescriptor, source.exports.len);
         var initialized: usize = 0;
         errdefer {
-            for (exports[0..initialized]) |item| self.allocator.free(item.name);
+            for (exports[0..initialized]) |item| freeExternalExport(self.allocator, item);
             self.allocator.free(exports);
         }
         for (source.exports, 0..) |item, index| {
             exports[index] = item;
             exports[index].name = try self.allocator.dupe(u8, item.name);
+            if (item.function) |function| {
+                const parameters = try self.allocator.alloc(contracts.ExternalParameterDescriptor, function.parameters.len);
+                var parameter_count: usize = 0;
+                errdefer {
+                    for (parameters[0..parameter_count]) |parameter| self.allocator.free(parameter.name);
+                    self.allocator.free(parameters);
+                }
+                for (function.parameters, 0..) |parameter, parameter_index| {
+                    parameters[parameter_index] = parameter;
+                    parameters[parameter_index].name = try self.allocator.dupe(u8, parameter.name);
+                    parameter_count += 1;
+                }
+                exports[index].function.?.parameters = parameters;
+            }
             initialized += 1;
         }
         return .{ .id = source.id, .logical_name = logical_name, .exports = exports };
     }
 
     fn freeExternalDescriptor(self: *Project, descriptor: contracts.ExternalModuleDescriptor) void {
-        for (descriptor.exports) |item| self.allocator.free(item.name);
+        for (descriptor.exports) |item| freeExternalExport(self.allocator, item);
         self.allocator.free(descriptor.exports);
         self.allocator.free(descriptor.logical_name);
     }
@@ -672,6 +693,16 @@ fn validateExternalDescriptor(descriptor: contracts.ExternalModuleDescriptor) !v
         }
         for (descriptor.exports[0..index]) |previous| {
             if (std.mem.eql(u8, previous.name, item.name)) return error.DuplicateExternalExport;
+            if (item.symbol_id != null and previous.symbol_id == item.symbol_id) return error.DuplicateExternalSymbol;
+        }
+        if (item.function != null and item.declaration_kind != .function) return error.InvalidExternalExport;
+        if (item.declaration_kind == .function and item.function == null) return error.InvalidExternalExport;
+        if (item.type_only and item.declaration_kind != null and item.declaration_kind != .type) return error.InvalidExternalExport;
+        if (item.declaration_kind == .type and !item.type_only) return error.InvalidExternalExport;
+        if (item.function) |function| {
+            for (function.parameters, 0..) |parameter, parameter_index| {
+                if (parameter.rest and parameter_index + 1 != function.parameters.len) return error.InvalidExternalExport;
+            }
         }
     }
 }
@@ -679,7 +710,10 @@ fn validateExternalDescriptor(descriptor: contracts.ExternalModuleDescriptor) !v
 fn externalDescriptorsEqual(left: contracts.ExternalModuleDescriptor, right: contracts.ExternalModuleDescriptor) bool {
     if (left.id != right.id or !std.mem.eql(u8, left.logical_name, right.logical_name) or left.exports.len != right.exports.len) return false;
     for (left.exports, right.exports) |a, b| {
-        if (!std.mem.eql(u8, a.name, b.name) or a.kind != b.kind or a.type_only != b.type_only or a.type_metadata != b.type_metadata) return false;
+        if (!std.mem.eql(u8, a.name, b.name) or a.kind != b.kind or a.type_only != b.type_only or
+            a.type_metadata != b.type_metadata or a.symbol_id != b.symbol_id or
+            a.declaration_kind != b.declaration_kind or a.effects != b.effects or
+            !externalFunctionsEqual(a.function, b.function)) return false;
     }
     return true;
 }
@@ -717,6 +751,50 @@ fn externalTypeId(builtins: *const types.Builtins, metadata: ?contracts.External
         .symbol => builtins.symbol,
         .object => builtins.object,
     };
+}
+
+fn externalDeclarationTypeId(allocator: std.mem.Allocator, store: *types.TypeStore, descriptor: contracts.ExternalExportDescriptor) !types.TypeId {
+    const function = descriptor.function orelse return externalTypeId(&store.builtins, descriptor.type_metadata);
+    const parameters = try allocator.alloc(types.ParameterType, function.parameters.len);
+    for (function.parameters, 0..) |parameter, index| parameters[index] = .{
+        .name = parameter.name,
+        .type_id = externalTypeId(&store.builtins, parameter.type_metadata),
+        .optional = parameter.optional,
+        .has_default = parameter.has_default,
+        .rest = parameter.rest,
+    };
+    return store.addFunctionDetailed(
+        parameters,
+        externalTypeId(&store.builtins, function.return_type),
+        function.type_parameter_count,
+        .{
+            .is_async = function.is_async,
+            .is_generator = function.is_generator,
+            .is_constructor = function.is_constructor,
+        },
+    );
+}
+
+fn freeExternalExport(allocator: std.mem.Allocator, item: contracts.ExternalExportDescriptor) void {
+    if (item.function) |function| {
+        for (function.parameters) |parameter| allocator.free(parameter.name);
+        allocator.free(function.parameters);
+    }
+    allocator.free(item.name);
+}
+
+fn externalFunctionsEqual(left: ?contracts.ExternalFunctionDescriptor, right: ?contracts.ExternalFunctionDescriptor) bool {
+    if (left == null or right == null) return left == null and right == null;
+    const a = left.?;
+    const b = right.?;
+    if (a.return_type != b.return_type or a.type_parameter_count != b.type_parameter_count or
+        a.is_async != b.is_async or a.is_generator != b.is_generator or
+        a.is_constructor != b.is_constructor or a.parameters.len != b.parameters.len) return false;
+    for (a.parameters, b.parameters) |x, y| {
+        if (!std.mem.eql(u8, x.name, y.name) or x.type_metadata != y.type_metadata or
+            x.optional != y.optional or x.has_default != y.has_default or x.rest != y.rest) return false;
+    }
+    return true;
 }
 
 test "project copies host buffers and analyzes one in-memory root" {

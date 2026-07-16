@@ -141,6 +141,7 @@ fn semanticIdentity(identity: semantics.SemanticIdentity) model.HirSemanticIdent
             .type => .type,
         },
         .external_module_id = if (identity.external_module_id) |id| .init(id) else null,
+        .external_symbol_id = if (identity.external_symbol_id) |id| .init(id) else null,
     };
 }
 

@@ -36,6 +36,36 @@ pub const TypeStore = struct {
         };
     }
 
+    /// Deep immutable snapshot preserving every TypeId and signature identity.
+    /// Semantic-only mutation indexes are intentionally omitted.
+    pub fn cloneReadOnly(self: *const TypeStore, allocator: std.mem.Allocator) !TypeStore {
+        var copy = TypeStore.init(allocator);
+        errdefer {
+            copy.records.deinit(allocator);
+            copy.signatures.deinit(allocator);
+            copy.class_types.deinit();
+            copy.interface_types.deinit();
+            copy.generic_declarations.deinit();
+        }
+        for (self.records.items) |record| {
+            try copy.records.append(allocator, .{
+                .id = record.id,
+                .kind = if (record.kind) |kind| try copy.cloneKind(kind) else null,
+            });
+        }
+        for (self.signatures.items) |signature| {
+            try copy.signatures.append(allocator, .{
+                .declaration_id = signature.declaration_id,
+                .id = signature.id,
+                .parameters = try copy.cloneParameters(signature.parameters),
+                .return_type = signature.return_type,
+                .type_parameter_count = signature.type_parameter_count,
+                .flags = signature.flags,
+            });
+        }
+        return copy;
+    }
+
     pub fn registerGenericDeclaration(
         self: *TypeStore,
         identity: model.SemanticDeclId,
@@ -204,6 +234,27 @@ pub const TypeStore = struct {
 
     pub fn count(self: *const TypeStore) usize {
         return self.builtins.records.len + self.records.items.len;
+    }
+
+    /// Number of fully defined types available to immutable consumers.
+    pub fn definedCount(self: *const TypeStore) usize {
+        var total = self.builtins.records.len;
+        for (self.records.items) |record| {
+            if (record.kind != null) total += 1;
+        }
+        return total;
+    }
+
+    /// Deterministic ordinal traversal independent of sparse/stable TypeId values.
+    pub fn typeAt(self: *const TypeStore, ordinal: usize) ?model.Type {
+        if (ordinal < self.builtins.records.len) return self.builtins.records[ordinal];
+        var current = ordinal - self.builtins.records.len;
+        for (self.records.items) |record| {
+            const kind = record.kind orelse continue;
+            if (current == 0) return .{ .id = record.id, .kind = kind };
+            current -= 1;
+        }
+        return null;
     }
 
     pub fn lookup(self: *const TypeStore, id: model.TypeId) ?model.Type {

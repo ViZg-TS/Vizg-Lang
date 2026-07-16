@@ -22,6 +22,7 @@ pub const lower_function = @import("lower_function.zig");
 pub const lower_project = @import("lower_project.zig");
 pub const project_session = @import("project_session.zig");
 pub const lower_module = @import("lower_module.zig");
+pub const consumer = @import("consumer.zig");
 
 pub const ModuleId = @import("../project/contracts.zig").ModuleId;
 pub const SemanticDeclId = @import("../types/root.zig").SemanticDeclId;
@@ -40,6 +41,7 @@ pub const OriginId = ids.OriginId;
 pub const HirResult = result.HirResult;
 pub const HirProject = model.HirProject;
 pub const HirModule = model.HirModule;
+pub const HirExternalDeclaration = model.HirExternalDeclaration;
 pub const HirEntity = model.HirEntity;
 pub const HirFunction = model.HirFunction;
 pub const HirBinding = model.HirBinding;
@@ -75,6 +77,8 @@ pub const PrintMode = printer.Mode;
 pub const PrintOptions = printer.Options;
 pub const printAlloc = printer.printAlloc;
 pub const printAllocOptions = printer.printAllocOptions;
+pub const ConsumerView = consumer.View;
+pub const hir_api_version = consumer.api_version;
 
 test {
     _ = project_session;

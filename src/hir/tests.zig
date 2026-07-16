@@ -810,14 +810,30 @@ test "HIR eligibility accepts typed external bindings without source bodies" {
     try project.addRoot(.{
         .id = .init(12),
         .logical_name = "external.ts",
-        .bytes = "import { platform } from 'native:env'; export const value = platform;",
+        .bytes = "import { platform, version } from 'native:env'; export const value = platform + version;",
     });
     while (true) switch (try project.step()) {
         .complete => break,
         .request => |request| try project.respondExternalModule(request.id, .{
             .id = .init(9001),
             .logical_name = "native:env",
-            .exports = &.{.{ .name = "platform", .type_metadata = .string }},
+            // Descriptor order is deliberately opposite to stable symbol order.
+            .exports = &.{
+                .{
+                    .name = "version",
+                    .type_metadata = .number,
+                    .symbol_id = .init(72),
+                    .declaration_kind = .global,
+                    .effects = .{ .unknown = false },
+                },
+                .{
+                    .name = "platform",
+                    .type_metadata = .string,
+                    .symbol_id = .init(71),
+                    .declaration_kind = .constant,
+                    .effects = .{ .unknown = false },
+                },
+            },
         }),
     };
     _ = try project.finish();
@@ -835,10 +851,107 @@ test "HIR eligibility accepts typed external bindings without source bodies" {
         .diagnostics => return error.UnexpectedLoweringDiagnostics,
     };
     try std.testing.expectEqual(@as(usize, 1), result.project.modules.len);
+    try std.testing.expectEqual(@as(usize, 2), result.project.external_declarations.len);
     try std.testing.expectEqual(@as(usize, 0), result.project.entities.len);
     try std.testing.expectEqual(@as(usize, 1), result.project.functions.len);
+    try std.testing.expectEqual(@as(u64, 71), result.project.external_declarations[0].symbol_id.value());
+    try std.testing.expectEqualStrings("platform", result.project.external_declarations[0].exported_name);
+    try std.testing.expectEqual(@as(u64, 72), result.project.external_declarations[1].symbol_id.value());
+    try std.testing.expectEqualStrings("version", result.project.external_declarations[1].exported_name);
     try std.testing.expectEqual(@as(u64, 9001), result.project.modules[0].imports[0].source.external.value());
     try std.testing.expectEqual(@as(u64, 9001), result.project.modules[0].imports[0].target.external_module_id.?.value());
+    try std.testing.expectEqual(@as(u64, 71), result.project.modules[0].imports[0].target.external_symbol_id.?.value());
+}
+
+test "HIR eligibility rejects external bindings without explicit publication metadata" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(13),
+        .logical_name = "legacy-external.ts",
+        .bytes = "import { platform } from 'native:env'; export const value = platform;",
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, .{
+            .id = .init(9002),
+            .logical_name = "native:env",
+            .exports = &.{.{
+                .name = "platform",
+                .type_metadata = .string,
+            }},
+        }),
+    };
+    _ = try project.finish();
+
+    var report = try hir.eligibility.check(std.testing.allocator, &project, .{});
+    defer report.deinit();
+    try std.testing.expect(!report.isEligible());
+    var saw_invalid_identity = false;
+    for (report.diagnostics) |diagnostic| {
+        if (diagnostic.code == .invalid_semantic_reference) saw_invalid_identity = true;
+    }
+    try std.testing.expect(saw_invalid_identity);
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    switch (outcome) {
+        .result => return error.UnexpectedPublishedHir,
+        .diagnostics => |diagnostics| try std.testing.expect(!diagnostics.isEligible()),
+    }
+}
+
+test "sealed HIR consumer survives project teardown with types intact" {
+    var project = try completedProject();
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    project.deinit();
+    defer outcome.deinit();
+
+    try std.testing.expect(result.semantic_result == null);
+    const view = try hir.ConsumerView.open(result, hir.hir_api_version);
+    try std.testing.expectEqual(hir.hir_api_version, view.version());
+    try std.testing.expectEqual(@as(usize, 1), view.modules().len);
+    try std.testing.expect(view.functions().len > 0);
+    try std.testing.expect(view.typeCount() > 0);
+    for (0..view.typeCount()) |index| {
+        const item = try view.typeAt(index);
+        try std.testing.expectEqual(item.id, (try view.typeRecord(item.id)).id);
+    }
+    try std.testing.expectError(error.InvalidId, view.typeAt(view.typeCount()));
+    const function = view.functions()[0];
+    _ = try view.function(function.id);
+    _ = try view.typeRecord(function.signature_type);
+}
+
+test "HIR consumer rejects unsupported versions invalid IDs and foreign IDs" {
+    var first_project = try completedProject();
+    defer first_project.deinit();
+    var second_project = try completedProject();
+    defer second_project.deinit();
+    var first = try hir.lowerProject(std.testing.allocator, &first_project, .{});
+    defer first.deinit();
+    var second = try hir.lowerProject(std.testing.allocator, &second_project, .{});
+    defer second.deinit();
+
+    const first_result = switch (first) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    const second_result = switch (second) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    try std.testing.expectError(error.UnsupportedVersion, hir.ConsumerView.open(first_result, 0));
+    try std.testing.expectError(error.UnsupportedVersion, hir.ConsumerView.open(first_result, hir.hir_api_version + 1));
+
+    const view = try hir.ConsumerView.open(first_result, hir.hir_api_version);
+    try std.testing.expectError(error.ForeignId, view.function(second_result.project.functions[0].id));
+    const invalid = try first_result.makeId(hir.FunctionId, @intCast(first_result.project.functions.len));
+    try std.testing.expectError(error.InvalidId, view.function(invalid));
 }
 
 test "HIR limit kind summary and diagnostic stay consistent" {
