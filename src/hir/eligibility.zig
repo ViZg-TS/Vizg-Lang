@@ -94,7 +94,13 @@ fn validateLocalIdentities(
     project_semantics: *const semantics.BorrowedProjectSemanticResult,
 ) !void {
     for (local.frontend.bind.symbols) |symbol| {
-        if (@as(usize, @intCast(symbol.declaration)) >= local.frontend.ast.nodes.len or
+        // Ambient globals are host-registered and intentionally carry
+        // `ast.invalid_node` as their declaration (they have no source
+        // node). Skip the declaration bounds check for them; the scope
+        // check still applies because ambients live in the global scope.
+        const declaration_ok = symbol.kind == .ambient or
+            @as(usize, @intCast(symbol.declaration)) < local.frontend.ast.nodes.len;
+        if (!declaration_ok or
             @as(usize, @intCast(symbol.scope)) >= local.frontend.bind.scopes.len)
         {
             try appendInvalid(output, allocator, module);

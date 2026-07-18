@@ -36,6 +36,9 @@ pub const SemanticIdentity = struct {
     external_symbol_id: ?u64 = null,
     external_declaration_kind: ?@import("../project/contracts.zig").ExternalDeclarationKind = null,
     external_effects: ?@import("../project/contracts.zig").ExternalEffectSet = null,
+    /// Host-assigned identity for ambient globals or explicitly registered
+    /// top-level source values. `null` for ordinary source-derived symbols.
+    host_binding_id: ?u64 = null,
 };
 
 pub const SemanticLinkState = enum {
@@ -524,6 +527,48 @@ fn externalBuiltinTypeId(builtins: *const types.Builtins, metadata: ?modules_mod
     };
 }
 
+fn ambientBuiltinTypeId(builtins: *const types.Builtins, metadata: ?@import("../project/contracts.zig").ExternalType) types.TypeId {
+    return switch (metadata orelse .unknown) {
+        .unknown => builtins.unknown,
+        .any => builtins.any,
+        .never => builtins.never,
+        .void => builtins.void,
+        .undefined => builtins.undefined,
+        .null_ => builtins.null_,
+        .boolean => builtins.boolean,
+        .number => builtins.number,
+        .bigint => builtins.bigint,
+        .string => builtins.string,
+        .symbol => builtins.symbol,
+        .object => builtins.object,
+    };
+}
+
+fn ambientTypeId(
+    allocator: std.mem.Allocator,
+    type_store: *types.TypeStore,
+    symbol: binder.Symbol,
+) !types.TypeId {
+    if (symbol.ambient_members.len == 0)
+        return ambientBuiltinTypeId(&type_store.builtins, symbol.type_metadata);
+
+    const identity = try type_store.reserve();
+    const properties = try allocator.alloc(types.ObjectProperty, symbol.ambient_members.len);
+    for (symbol.ambient_members, 0..) |member, index| {
+        properties[index] = .{
+            .name = member.name,
+            .type_id = if (member.self_reference)
+                identity
+            else
+                ambientBuiltinTypeId(&type_store.builtins, member.type_metadata),
+            .optional = member.optional,
+            .readonly = member.readonly,
+        };
+    }
+    try type_store.defineReserved(identity, .{ .object = properties });
+    return identity;
+}
+
 fn collectExternalExports(
     allocator: std.mem.Allocator,
     modules: []const modules_mod.graph.ExternalModule,
@@ -628,6 +673,7 @@ fn collectDirectExports(
             } else semantic_module.type_info.lookupNode(record.node) orelse type_store.builtins.unknown;
             const identity: SemanticIdentity = .{
                 .symbol_id = if (symbol) |item| item.id else null,
+                .host_binding_id = if (symbol) |item| if (item.host_bound) item.host_binding_id else null else null,
                 .declaration = types.SemanticDeclId.init(module.id, declaration),
                 .type_id = type_id,
                 .namespace = namespace,
@@ -668,6 +714,7 @@ fn optionalIdentityEql(left: ?SemanticIdentity, right: ?SemanticIdentity) bool {
     return left.?.type_id == right.?.type_id and
         left.?.namespace == right.?.namespace and
         left.?.external_module_id == right.?.external_module_id and
+        left.?.host_binding_id == right.?.host_binding_id and
         left.?.declaration.eql(right.?.declaration);
 }
 
@@ -1128,6 +1175,7 @@ fn buildTypeInfo(
             ) orelse builtins.unknown,
             .field => entry.inferred_type = entry.declared_type orelse builtins.unknown,
             .method => entry.inferred_type = functionType(collected.function_signatures, symbol.id) orelse builtins.unknown,
+            .ambient => entry.inferred_type = try ambientTypeId(allocator, type_store, symbol),
         }
         if (symbol.kind == .variable) {
             if (entry.declared_type) |declared| switch (result.ast.node(symbol.declaration).data) {
@@ -3249,7 +3297,16 @@ test "Goal 135 primitives, objects and functions share one TypeId space" {
 }
 
 test "Goal 150 every binder symbol has explicit semantic type information" {
-    var result = try analyze(std.testing.allocator,
+    const contracts = @import("../project/contracts.zig");
+    const ambients = [_]contracts.AmbientGlobal{.{
+        .name = "ambient_value",
+        .namespace = .{ .value = true },
+        .type_metadata = .object,
+        .host_binding_id = 0,
+    }};
+    var result = try analyzeSource(
+        std.testing.allocator,
+        .{ .path = "input", .text =
         \\import { imported } from "dep";
         \\type Alias = number;
         \\interface Shape { value: number; }
@@ -3260,6 +3317,8 @@ test "Goal 150 every binder symbol has explicit semantic type information" {
         \\}
         \\function identity<U>(input: U): U { return input; }
         \\const local = imported;
+    },
+        .{ .ambient_globals = &ambients },
     );
     defer result.deinit();
 
@@ -3269,6 +3328,39 @@ test "Goal 150 every binder symbol has explicit semantic type information" {
         seen[@intFromEnum(symbol.kind)] = true;
     }
     for (seen) |present| try std.testing.expect(present);
+}
+
+test "ambient self member has one recursive readonly structural type" {
+    const contracts = @import("../project/contracts.zig");
+    const ambients = [_]contracts.AmbientGlobal{.{
+        .name = "ambient_self",
+        .namespace = .{ .value = true },
+        .type_metadata = .object,
+        .host_binding_id = 8,
+        .members = &.{.{
+            .name = "self",
+            .readonly = true,
+            .self_reference = true,
+        }},
+    }};
+    var result = try analyzeSource(
+        std.testing.allocator,
+        .{ .path = "input", .text = "ambient_self.self;" },
+        .{ .ambient_globals = &ambients },
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+
+    const symbol = for (result.frontend.bind.symbols) |item| {
+        if (item.kind == .ambient and std.mem.eql(u8, item.name, "ambient_self")) break item;
+    } else return error.TestFailed;
+    const ambient_type = result.lookupSymbolType(symbol.id).?.effective().?;
+    const properties = result.lookupType(ambient_type).?.kind.object;
+    try std.testing.expectEqual(@as(usize, 1), properties.len);
+    try std.testing.expectEqualStrings("self", properties[0].name);
+    try std.testing.expect(properties[0].readonly);
+    try std.testing.expect(!properties[0].optional);
+    try std.testing.expectEqual(ambient_type, properties[0].type_id);
 }
 
 test "Goal 150 every accepted executable expression has semantic type information" {

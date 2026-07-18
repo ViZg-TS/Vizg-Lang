@@ -1039,7 +1039,7 @@ const Parser = struct {
             self.reportAt(template, "template literal types are not supported", .unsupported_ts_syntax);
             return self.addTypeNode(.{ .span = template.span, .data = .{ .Named = .{ .name = "<unsupported-template-literal>" } } });
         }
-        if (self.at(.Identifier) or self.at(.PrivateIdentifier)) {
+        if (self.at(.Identifier) or self.at(.PrivateIdentifier) or self.at(.Keyword_void)) {
             const name = self.advance();
             var arguments: std.ArrayList(ast_mod.TypeNodeId) = .empty;
             errdefer arguments.deinit(self.allocator);
@@ -3202,7 +3202,7 @@ test "parser builds declarations and function body" {
     const allocator = arena.allocator();
 
     const source =
-        \\import { log } from "console";
+        \\import { log } from "host-service";
         \\
         \\export function main(name: string) {
         \\    let message = "hi " + name;
@@ -3983,6 +3983,17 @@ test "parser preserves literal types separately from literal expressions" {
     try std.testing.expectEqual(@as(usize, 2), unsupported.diagnostics.len);
     try std.testing.expectEqualStrings("negative literal types are not supported", unsupported.diagnostics[0].message);
     try std.testing.expectEqualStrings("template literal types are not supported", unsupported.diagnostics[1].message);
+}
+
+test "parser accepts void interface method return types" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(allocator, "interface HostValue { invoke(value: number): void; }", true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
 }
 
 test "parser preserves indexed access keyof and type queries" {

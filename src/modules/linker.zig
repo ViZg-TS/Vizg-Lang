@@ -15,7 +15,7 @@ pub const LinkedImportKind = enum {
     default,
     /// `import * as ns from "./a";`
     namespace,
-    /// Imported from an external/ambient module (e.g. `"console"`).
+    /// Imported from an external/ambient module (e.g. `"host-service"`).
     external,
     /// No target module or symbol was resolved during linking.
     unresolved,

@@ -28,10 +28,24 @@ pub fn build(b: *std.Build) void {
         .pic = true,
     });
     vizg_cabi.addImport("vizg-impl", lib_mod);
+    const vizg_declarations = b.addModule("vizg-declarations", .{
+        .root_source_file = b.path("Lib/vizg_declarations.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+    });
+    vizg_declarations.addIncludePath(b.path("Lib"));
     const vizg_lib = b.addLibrary(.{
         .name = "vizg",
         .root_module = vizg_cabi,
     });
+    // Unique dependency-facing alias. The upstream graph has several artifacts
+    // named `vizg`, so consumers cannot select the native archive by name.
+    const vizg_consumer_lib = b.addLibrary(.{
+        .name = "vizg-vzed",
+        .root_module = vizg_cabi,
+    });
+    b.installArtifact(vizg_consumer_lib);
 
     // A fixed Debug build keeps runtime safety checks enabled regardless of the
     // caller's selected optimization mode. It is the adversarial audit gate.
@@ -373,16 +387,46 @@ pub fn build(b: *std.Build) void {
         \\archive="$1"
         \\actual="$(nm -g --defined-only "$archive" | awk '$2 ~ /^[TDBR]$/ && $3 ~ /^vizg_/ { print $3 }' | LC_ALL=C sort -u)"
         \\expected='vizg_abi_version
+        \\vizg_external_module_api_version
         \\vizg_hir_api_version
+        \\vizg_hir_binding_detail_at
+        \\vizg_hir_block_detail_at
+        \\vizg_hir_block_parameter_at
+        \\vizg_hir_detail_api_version
+        \\vizg_hir_function_capture_at
+        \\vizg_hir_function_completion_type
+        \\vizg_hir_function_detail_at
+        \\vizg_hir_function_parameter_at
+        \\vizg_hir_function_signature
+        \\vizg_hir_function_storage_detail_at
+        \\vizg_hir_module_dependency_at
+        \\vizg_hir_module_detail_at
+        \\vizg_hir_module_export_at
+        \\vizg_hir_module_import_at
+        \\vizg_hir_operation_at
+        \\vizg_hir_operation_item_at
+        \\vizg_hir_origin_detail_at
+        \\vizg_hir_payload_api_version
         \\vizg_hir_record_at
+        \\vizg_hir_region_count
+        \\vizg_hir_region_detail_at
+        \\vizg_hir_region_protected_block_at
+        \\vizg_hir_signature_parameter_at
         \\vizg_hir_summary
+        \\vizg_hir_terminator_at
+        \\vizg_hir_terminator_item_at
+        \\vizg_hir_type_detail_at
         \\vizg_project_add_source
         \\vizg_project_analyze_source
         \\vizg_project_create
         \\vizg_project_destroy
         \\vizg_project_finish
         \\vizg_project_limit_kind
+        \\vizg_project_register_ambient_globals
+        \\vizg_project_register_ambient_globals_v2
+        \\vizg_project_register_source_host_bindings
         \\vizg_project_respond_external
+        \\vizg_project_respond_external_v2
         \\vizg_project_respond_failure
         \\vizg_project_respond_source
         \\vizg_project_result_destroy

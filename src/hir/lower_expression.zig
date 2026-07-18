@@ -148,6 +148,8 @@ fn lowerImportAttributes(context: anytype, attributes: ast.ImportAttributes) any
 
 fn lowerMember(context: anytype, node_id: ast.NodeId, member: ast.MemberExpression) anyerror!ids.ValueId {
     if (member.optional) return lowerOptionalMember(context, node_id, member);
+    if (try context.sourceHostMemberBinding(node_id)) |binding|
+        return context.emitValue(.{ .load_binding = binding }, context.nodeType(node_id));
     const place = try context.lowerPlace(node_id);
     return context.emitValue(.{ .load_place = place }, context.nodeType(node_id));
 }

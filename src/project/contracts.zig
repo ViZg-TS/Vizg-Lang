@@ -217,6 +217,35 @@ pub const ExternalModuleDescriptor = struct {
     exports: []const ExternalExportDescriptor = &.{},
 };
 
+/// One borrowed structural member of an ambient global type. A self-reference
+/// reuses the enclosing ambient type identity; otherwise `type_metadata`
+/// supplies the member type.
+pub const AmbientMember = struct {
+    name: []const u8,
+    type_metadata: ?ExternalType = null,
+    optional: bool = false,
+    readonly: bool = false,
+    self_reference: bool = false,
+};
+
+/// Borrowed ambient global descriptor. The host registers ambient globals
+/// before analysis so ViZg can resolve them without synthetic source files.
+/// Retaining APIs copy `name`, `members`, and every member name.
+pub const AmbientGlobal = struct {
+    name: []const u8,
+    namespace: ExternalNamespace,
+    type_metadata: ?ExternalType = null,
+    host_binding_id: u64 = 0,
+    members: []const AmbientMember = &.{},
+};
+
+/// Borrowed mapping from a top-level source value declaration to a stable
+/// host identity. The declaration and its type remain source-defined.
+pub const SourceHostBinding = struct {
+    name: []const u8,
+    host_binding_id: u64,
+};
+
 comptime {
     if (@sizeOf(ModuleId) != @sizeOf(u64)) @compileError("ModuleId must remain C-representable as u64");
     if (@sizeOf(ExternalModuleId) != @sizeOf(u64)) @compileError("ExternalModuleId must remain C-representable as u64");

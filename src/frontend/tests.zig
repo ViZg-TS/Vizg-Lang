@@ -311,7 +311,7 @@ test "frontend suite: scanner tokenizes module declarations and literals" {
     const allocator = arena.allocator();
 
     const source =
-        \\import { log } from "console";
+        \\import { log } from "host-service";
         \\export function main(name: string) { return name + "ok"; }
         \\const count = 1;
     ;
@@ -324,7 +324,7 @@ test "frontend suite: scanner tokenizes module declarations and literals" {
         .RBrace,         .Keyword_const,    .Identifier,     .Equal,      .NumberLiteral, .Semicolon,     .EOF,
     });
     try std.testing.expectEqualStrings("from", scanned.tokens[4].lexeme);
-    try std.testing.expectEqualStrings("\"console\"", scanned.tokens[5].lexeme);
+    try std.testing.expectEqualStrings("\"host-service\"", scanned.tokens[5].lexeme);
 }
 
 test "frontend suite: scanner keeps contextual keywords as identifiers" {
@@ -397,10 +397,10 @@ test "frontend suite: parser builds variable function import export and call sha
     const allocator = arena.allocator();
 
     const parsed = try parseOk(allocator,
-        \\import { log } from "console";
+        \\import { log } from "host-service";
         \\export function main(name: string) {
         \\    let message = "hi " + name;
-        \\    console.log(message);
+        \\    hostService.log(message);
         \\    return message;
         \\}
     );
@@ -558,8 +558,8 @@ test "frontend suite: parser validates contextual import syntax" {
     const allocator = arena.allocator();
 
     const valid = try parseOk(allocator,
-        \\import defaultLogger from "console";
-        \\import { log, warn } from "console";
+        \\import defaultLogger from "host-service";
+        \\import { log, warn } from "host-service";
     );
     const program = valid.ast.node(valid.ast.root).data.Program;
     try std.testing.expectEqual(@as(usize, 2), program.statements.len);
@@ -567,8 +567,8 @@ test "frontend suite: parser validates contextual import syntax" {
     try expectNodeTag(valid.ast, program.statements[1], .ImportDeclaration);
 
     const invalid_imports = [_][]const u8{
-        "import defaultLogger potato \"console\";",
-        "import { log } potato \"console\";",
+        "import defaultLogger potato \"host-service\";",
+        "import { log } potato \"host-service\";",
     };
     for (invalid_imports) |source| {
         const scanned = try scanOk(allocator, source, false);
@@ -748,7 +748,7 @@ test "frontend suite: binder records scopes symbols imports exports and duplicat
     const allocator = arena.allocator();
 
     const parsed = try parseOk(allocator,
-        \\import { log } from "console";
+        \\import { log } from "host-service";
         \\export function main(name: string) {
         \\    let message = "hi " + name;
         \\    { let inner = message; }
@@ -895,8 +895,8 @@ test "frontend suite: resolver records calls assignments members imports and exp
     const allocator = arena.allocator();
 
     const parsed = try parseOk(allocator,
-        \\import defaultLogger from "console";
-        \\import { log } from "console";
+        \\import defaultLogger from "host-service";
+        \\import { log } from "host-service";
         \\let x = 1;
         \\let localName = "dev";
         \\function makeGreeting(name: string) {
@@ -932,17 +932,24 @@ test "frontend suite: resolver records calls assignments members imports and exp
     try std.testing.expectEqual(@as(usize, 0), countReferences(resolved, "exportedName", null));
 }
 
-test "frontend suite: resolver allows console as ambient global without VZG4001" {
+test "frontend suite: resolver allows a generic host ambient without VZG4001" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // `console` is a predeclared ambient global; should not emit VZG4001
-    // for the bare read of `console`, and member `.log` skips resolution entirely.
+    // The host registers an ambient global before binding. Its bare read
+    // resolves to the registered symbol without any name-specific rule.
+    const contracts = @import("../project/contracts.zig");
+    const ambients = [_]contracts.AmbientGlobal{.{
+        .name = "hostClock",
+        .namespace = .{ .value = true },
+        .type_metadata = .object,
+        .host_binding_id = 1,
+    }};
     const parsed = try parseOk(allocator,
-        \\console.log("hi");
+        \\hostClock;
     );
-    const bound = try binder.bind(allocator, parsed.ast);
+    const bound = try binder.bindWithLimit(allocator, parsed.ast, &ambients, &.{}, std.math.maxInt(usize));
     const resolved = try resolver.resolve(allocator, parsed.ast, bound);
 
     try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
@@ -1530,7 +1537,7 @@ test "frontend suite: facade integrates positive and negative analysis" {
     const allocator = arena.allocator();
 
     const ok = try frontend.analyze(allocator, .{ .path = "ok.ts", .text =
-        \\import { log } from "console";
+        \\import { log } from "host-service";
         \\export function main(name: string) {
         \\    log(name);
         \\    return name;
@@ -3057,13 +3064,21 @@ test "frontend suite: malformed recovered nodes survive full analysis" {
 test "frontend suite: color_art.ts fixture — 0 diagnostics smoke test" {
     // Fixture exercises: object literal, array literal, template interpolation,
     // type annotations (let i: number), non-null assertion (!.length, !.j),
-    // 'as any' cast, ambient console.log. Must parse/analyze with 0 errors.
+    // 'as any' cast, and a generic host ambient. Must analyze with 0 errors.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     const fixture = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/frontend/realworld/color_art.ts", allocator, .limited(1024 * 1024));
 
-    const result = try frontend.analyze(allocator, .{ .path = "color_art.ts", .text = fixture }, .{});
+    // The fixture's logger is a generic host ambient, not a predeclared name.
+    const contracts = @import("../project/contracts.zig");
+    const ambients = [_]contracts.AmbientGlobal{.{
+        .name = "hostLogger",
+        .namespace = .{ .value = true },
+        .type_metadata = .object,
+        .host_binding_id = 1,
+    }};
+    const result = try frontend.analyze(allocator, .{ .path = "color_art.ts", .text = fixture }, .{ .ambient_globals = &ambients });
 
     // Overall combined diagnostics (scanner + parser + binder + resolver) == 0
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);

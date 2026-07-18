@@ -2,6 +2,7 @@ const std = @import("std");
 const ast_mod = @import("ast.zig");
 const diagnostics = @import("../diagnostics/root.zig");
 const tokens = @import("tokens.zig");
+const contracts = @import("../project/contracts.zig");
 
 const NodeId = ast_mod.NodeId;
 
@@ -30,6 +31,10 @@ pub const SymbolKind = enum {
     type_parameter,
     field,
     method,
+    /// Host-registered ambient global (e.g. a host clock) injected
+    /// into the global scope before binding source declarations. Carries a
+    /// `host_binding_id` instead of a source declaration node.
+    ambient,
 };
 
 pub const SymbolNamespace = enum {
@@ -52,6 +57,14 @@ pub const Symbol = struct {
     scope: ScopeId,
     declaration: NodeId,
     span: tokens.Span,
+    /// Whether this value symbol has a host-assigned identity.
+    host_bound: bool = false,
+    /// Host-assigned identity. Zero is a valid host id.
+    host_binding_id: u64 = 0,
+    /// Type metadata for `.ambient` symbols; `null` otherwise.
+    type_metadata: ?contracts.ExternalType = null,
+    /// Borrowed structural members owned by the enclosing project.
+    ambient_members: []const contracts.AmbientMember = &.{},
 };
 
 pub const NodeSymbol = struct {
@@ -111,9 +124,15 @@ const Binder = struct {
     imports: std.ArrayList(ImportRecord) = .empty,
     exports: std.ArrayList(ExportRecord) = .empty,
     diagnostic_list: diagnostics.LimitedList = .{},
+    ambient_globals: []const contracts.AmbientGlobal = &.{},
+    source_host_bindings: []const contracts.SourceHostBinding = &.{},
 
     fn bind(self: *Binder) !BindResult {
         const global_scope = try self.addScope(.global, null);
+        for (self.ambient_globals) |ambient| {
+            if (ambient.namespace.value) _ = try self.declareAmbient(global_scope, ambient, .value);
+            if (ambient.namespace.type) _ = try self.declareAmbient(global_scope, ambient, .type);
+        }
         try self.bindNode(self.ast.root, global_scope);
 
         var final_scopes: std.ArrayList(Scope) = .empty;
@@ -306,6 +325,7 @@ const Binder = struct {
             },
             .VariableDeclarator => |declarator| {
                 const symbol_id = try self.declare(scope, declarator.name, .variable, node_id, node.span);
+                self.attachSourceHostBinding(scope, symbol_id);
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
                 if (declarator.init) |initializer| try self.bindNode(initializer, scope);
             },
@@ -425,6 +445,18 @@ const Binder = struct {
         }
     }
 
+    fn attachSourceHostBinding(self: *Binder, scope_id: ScopeId, symbol_id: SymbolId) void {
+        if (self.scopes.items[@intCast(scope_id)].kind != .global) return;
+        const symbol = &self.symbols.items[@intCast(symbol_id)];
+        for (self.source_host_bindings) |binding| {
+            if (std.mem.eql(u8, symbol.name, binding.name)) {
+                symbol.host_bound = true;
+                symbol.host_binding_id = binding.host_binding_id;
+                return;
+            }
+        }
+    }
+
     fn addScope(self: *Binder, kind: ScopeKind, parent: ?ScopeId) !ScopeId {
         const id: ScopeId = @intCast(self.scopes.items.len);
         try self.scopes.append(self.allocator, .{ .id = id, .kind = kind, .parent = parent });
@@ -479,6 +511,29 @@ const Binder = struct {
             .scope = scope_id,
             .declaration = declaration,
             .span = span,
+        });
+        try scope.symbols.append(self.allocator, id);
+        return id;
+    }
+
+    /// Inject an ambient global into a scope without a source declaration and
+    /// without the duplicate-name check (registration already validated
+    /// uniqueness). Ambient globals always live in the global scope.
+    fn declareAmbient(self: *Binder, scope_id: ScopeId, ambient: contracts.AmbientGlobal, namespace: SymbolNamespace) !SymbolId {
+        const scope = &self.scopes.items[@intCast(scope_id)];
+        const id: SymbolId = @intCast(self.symbols.items.len);
+        try self.symbols.append(self.allocator, .{
+            .id = id,
+            .name = ambient.name,
+            .kind = .ambient,
+            .namespace = namespace,
+            .scope = scope_id,
+            .declaration = ast_mod.invalid_node,
+            .span = .{ .start = 0, .end = 0, .line = 0, .column = 0 },
+            .host_bound = true,
+            .host_binding_id = ambient.host_binding_id,
+            .type_metadata = ambient.type_metadata,
+            .ambient_members = ambient.members,
         });
         try scope.symbols.append(self.allocator, id);
         return id;
@@ -543,11 +598,17 @@ const Binder = struct {
 };
 
 pub fn bind(allocator: std.mem.Allocator, tree: ast_mod.Ast) !BindResult {
-    return bindWithLimit(allocator, tree, std.math.maxInt(usize));
+    return bindWithLimit(allocator, tree, &.{}, &.{}, std.math.maxInt(usize));
 }
 
-pub fn bindWithLimit(allocator: std.mem.Allocator, tree: ast_mod.Ast, max_diagnostics: usize) !BindResult {
-    var binder = Binder{ .allocator = allocator, .ast = tree, .diagnostic_list = diagnostics.LimitedList.init(max_diagnostics) };
+pub fn bindWithLimit(allocator: std.mem.Allocator, tree: ast_mod.Ast, ambient_globals: []const contracts.AmbientGlobal, source_host_bindings: []const contracts.SourceHostBinding, max_diagnostics: usize) !BindResult {
+    var binder = Binder{
+        .allocator = allocator,
+        .ast = tree,
+        .diagnostic_list = diagnostics.LimitedList.init(max_diagnostics),
+        .ambient_globals = ambient_globals,
+        .source_host_bindings = source_host_bindings,
+    };
     return binder.bind();
 }
 
@@ -567,7 +628,7 @@ test "binder records imports exports scopes and declarations" {
     const allocator = arena.allocator();
 
     const source =
-        \\import { log } from "console";
+        \\import { log } from "host-service";
         \\
         \\export function main(name: string) {
         \\    let message = "hi " + name;

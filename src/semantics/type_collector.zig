@@ -325,7 +325,8 @@ pub fn collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
     for (bind.symbols) |symbol| {
         // Type-parameter symbols point at their owning declaration. They were
         // predeclared above and must not collect that function a second time.
-        if (symbol.kind == .type_parameter) continue;
+        // Ambient globals carry no source declaration node.
+        if (symbol.kind == .type_parameter or symbol.kind == .ambient) continue;
         context.scope = symbol.scope;
         const node = tree.node(symbol.declaration);
         switch (node.data) {

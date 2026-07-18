@@ -105,6 +105,8 @@ pub const Project = struct {
     total_source_bytes: usize = 0,
     finished: bool = false,
     finish_result: ?FinishResult = null,
+    ambient_globals: std.ArrayList(contracts.AmbientGlobal) = .empty,
+    source_host_bindings: std.ArrayList(contracts.SourceHostBinding) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Project {
         return initWithLimits(allocator, .{});
@@ -130,6 +132,14 @@ pub const Project = struct {
         self.modules.deinit(self.allocator);
         for (self.external_modules.items) |module| self.freeExternalDescriptor(module.descriptor);
         self.external_modules.deinit(self.allocator);
+        for (self.ambient_globals.items) |g| {
+            self.allocator.free(g.name);
+            for (g.members) |member| self.allocator.free(member.name);
+            self.allocator.free(g.members);
+        }
+        self.ambient_globals.deinit(self.allocator);
+        for (self.source_host_bindings.items) |binding| self.allocator.free(binding.name);
+        self.source_host_bindings.deinit(self.allocator);
         self.graph.deinit();
         self.requests.deinit();
         self.* = undefined;
@@ -175,6 +185,72 @@ pub const Project = struct {
         defer self.debugAssertInvariants();
         try self.ensureOpen();
         try self.submit(source, true);
+    }
+
+    /// Register ambient globals (e.g. a host clock) before any
+    /// source is added so analysis can resolve them without synthetic source
+    /// declarations. Copies the descriptor and all names. Must be called before `addRoot`/
+    /// `supplySource`; late registration is rejected.
+    pub fn registerAmbientGlobals(self: *Project, globals: []const contracts.AmbientGlobal) !void {
+        try self.ensureOpen();
+        if (self.modules.items.len > 0) return error.AmbientGlobalsLateRegistration;
+        for (globals) |g| {
+            if (g.name.len == 0) return error.InvalidAmbientGlobal;
+            if (!g.namespace.isValid()) return error.InvalidAmbientGlobal;
+            for (g.members) |member| {
+                if (member.name.len == 0) return error.InvalidAmbientGlobal;
+                if (member.self_reference) {
+                    if (!member.readonly or member.optional or member.type_metadata != null) return error.InvalidAmbientGlobal;
+                } else if (member.type_metadata == null) return error.InvalidAmbientGlobal;
+            }
+            for (self.ambient_globals.items) |existing| {
+                const namespaces_overlap =
+                    (existing.namespace.value and g.namespace.value) or
+                    (existing.namespace.type and g.namespace.type);
+                if (namespaces_overlap and std.mem.eql(u8, existing.name, g.name)) {
+                    return error.DuplicateAmbientGlobal;
+                }
+            }
+            const name_copy = try self.allocator.dupe(u8, g.name);
+            errdefer self.allocator.free(name_copy);
+            const members_copy = try self.allocator.alloc(contracts.AmbientMember, g.members.len);
+            errdefer self.allocator.free(members_copy);
+            var copied_members: usize = 0;
+            errdefer for (members_copy[0..copied_members]) |member| self.allocator.free(member.name);
+            for (g.members, 0..) |member, index| {
+                members_copy[index] = member;
+                members_copy[index].name = try self.allocator.dupe(u8, member.name);
+                copied_members += 1;
+            }
+            try self.ambient_globals.append(self.allocator, .{
+                .name = name_copy,
+                .namespace = g.namespace,
+                .type_metadata = g.type_metadata,
+                .host_binding_id = g.host_binding_id,
+                .members = members_copy,
+            });
+        }
+    }
+
+    /// Attach stable host identities to matching top-level source value
+    /// declarations. Registration copies names and must precede all sources.
+    pub fn registerSourceHostBindings(self: *Project, bindings: []const contracts.SourceHostBinding) !void {
+        try self.ensureOpen();
+        if (self.modules.items.len > 0) return error.SourceHostBindingsLateRegistration;
+        for (bindings) |binding| {
+            if (binding.name.len == 0) return error.InvalidSourceHostBinding;
+            for (self.source_host_bindings.items) |existing| {
+                if (std.mem.eql(u8, existing.name, binding.name) or
+                    existing.host_binding_id == binding.host_binding_id)
+                    return error.DuplicateSourceHostBinding;
+            }
+            const name_copy = try self.allocator.dupe(u8, binding.name);
+            errdefer self.allocator.free(name_copy);
+            try self.source_host_bindings.append(self.allocator, .{
+                .name = name_copy,
+                .host_binding_id = binding.host_binding_id,
+            });
+        }
     }
 
     pub fn supplySource(self: *Project, source: contracts.ModuleSource) !void {
@@ -460,7 +536,10 @@ pub const Project = struct {
                 .script => .script,
                 .module => .module,
             },
-        }, .{}, .{
+        }, .{
+            .ambient_globals = self.ambient_globals.items,
+            .source_host_bindings = self.source_host_bindings.items,
+        }, .{
             .max_types = self.limits.max_semantic_types,
             .max_diagnostics = self.limits.max_diagnostics,
         });
@@ -724,7 +803,16 @@ pub const Project = struct {
                 .name = exported.name,
                 .kind = @enumFromInt(@intFromEnum(exported.kind)),
                 .namespace = .{ .value = exported.namespace.value, .type = exported.namespace.type },
-                .type_metadata = if (exported.type_metadata) |metadata| @enumFromInt(@intFromEnum(metadata)) else null,
+                // A detailed function signature supersedes the coarse primitive
+                // fallback. It is attached after graph linking, so exposing an
+                // `object` fallback here would produce a premature not-callable
+                // diagnostic before the external identity is enriched.
+                .type_metadata = if (exported.function != null)
+                    null
+                else if (exported.type_metadata) |metadata|
+                    @enumFromInt(@intFromEnum(metadata))
+                else
+                    null,
             };
             try graph_external_modules.append(allocator, .{
                 .id = descriptor.id.value(),
@@ -1799,6 +1887,51 @@ test "external value type reaches checker and final node and symbol tables" {
     try std.testing.expectEqual(imported_type, initializer_type);
 }
 
+test "external function signature supersedes coarse type metadata before checking" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(409),
+        .logical_name = "root",
+        .bytes =
+        \\import { nativeValue } from 'native:functions';
+        \\export const answer: number = nativeValue();
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, .{
+            .id = .init(9009),
+            .logical_name = "native:functions",
+            .exports = &.{.{
+                .name = "nativeValue",
+                .type_metadata = .object,
+                .symbol_id = .init(9010),
+                .declaration_kind = .function,
+                .function = .{ .return_type = .number },
+            }},
+        }),
+    };
+    try std.testing.expect(!(try project.finish()).has_failures);
+
+    const result = project.semanticResult().?;
+    const root = result.lookupModule(409).?;
+    try std.testing.expectEqual(@as(usize, 0), root.type_info.diagnostics.len);
+    for (result.imports) |item| {
+        if (!std.mem.eql(u8, item.local_name, "nativeValue")) continue;
+        const imported_type = result.type_store.lookup(item.target.?.type_id).?;
+        try std.testing.expect(imported_type.isFunction());
+        const signature_id = switch (imported_type.kind) {
+            .function => |id| id,
+            else => unreachable,
+        };
+        const signature = result.type_store.lookupFunctionSignature(signature_id).?;
+        try std.testing.expectEqual(result.type_store.builtins.number, signature.return_type);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
 test "value-only external import is rejected in the type namespace" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
@@ -2250,4 +2383,176 @@ test "allocation failure matrix covers external descriptor copying" {
 
 test "allocation failure matrix covers external linking project result and canonical diagnostics" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureProjectResult, .{});
+}
+
+test "ambient global registration propagates host binding id and resolves references" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerAmbientGlobals(&.{
+        .{ .name = "ambient_a", .namespace = .{ .value = true }, .type_metadata = .object, .host_binding_id = 42 },
+    });
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "ambient_root",
+        .bytes = "ambient_a;",
+    });
+    const result = try project.analyzeModule(.init(1));
+    try std.testing.expectEqual(ModuleState.complete, project.state(.init(1)));
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+
+    var seen = false;
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind == .ambient and std.mem.eql(u8, symbol.name, "ambient_a")) {
+            try std.testing.expectEqual(@as(u64, 42), symbol.host_binding_id);
+            seen = true;
+        }
+    }
+    try std.testing.expect(seen);
+}
+
+test "source host binding registration owns names and annotates source declarations" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+
+    var name = [_]u8{ 'h', 'o', 's', 't', 'V', 'a', 'l', 'u', 'e' };
+    try project.registerSourceHostBindings(&.{.{
+        .name = &name,
+        .host_binding_id = 41,
+    }});
+    name[0] = 'x';
+    try std.testing.expectEqualStrings("hostValue", project.source_host_bindings.items[0].name);
+
+    try project.addRoot(.{
+        .id = .init(2),
+        .logical_name = "source-host-binding.ts",
+        .bytes =
+        \\interface HostValue { invoke(value: number): void; }
+        \\const hostValue: HostValue;
+        \\hostValue;
+        ,
+    });
+    const result = try project.analyzeModule(.init(2));
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+
+    var saw_host_value = false;
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind == .variable and std.mem.eql(u8, symbol.name, "hostValue")) {
+            try std.testing.expect(symbol.host_bound);
+            try std.testing.expectEqual(@as(u64, 41), symbol.host_binding_id);
+            saw_host_value = true;
+        }
+    }
+    try std.testing.expect(saw_host_value);
+}
+
+test "source host binding registration rejects invalid duplicate and late descriptors" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+
+    try std.testing.expectError(
+        error.InvalidSourceHostBinding,
+        project.registerSourceHostBindings(&.{.{ .name = "", .host_binding_id = 1 }}),
+    );
+    try project.registerSourceHostBindings(&.{.{ .name = "hostValue", .host_binding_id = 1 }});
+    try std.testing.expectError(
+        error.DuplicateSourceHostBinding,
+        project.registerSourceHostBindings(&.{.{ .name = "hostValue", .host_binding_id = 2 }}),
+    );
+    try std.testing.expectError(
+        error.DuplicateSourceHostBinding,
+        project.registerSourceHostBindings(&.{.{ .name = "other", .host_binding_id = 1 }}),
+    );
+
+    try project.addRoot(.{
+        .id = .init(3),
+        .logical_name = "late-source-host-binding.ts",
+        .bytes = "export {};",
+    });
+    try std.testing.expectError(
+        error.SourceHostBindingsLateRegistration,
+        project.registerSourceHostBindings(&.{.{ .name = "late", .host_binding_id = 3 }}),
+    );
+}
+
+test "ambient registration owns recursive member descriptors and rejects mutable self references" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+
+    var global_name = [_]u8{ 'a', 'm', 'b', 'i', 'e', 'n', 't' };
+    var member_name = [_]u8{ 's', 'e', 'l', 'f' };
+    try project.registerAmbientGlobals(&.{.{
+        .name = &global_name,
+        .namespace = .{ .value = true },
+        .type_metadata = .object,
+        .host_binding_id = 7,
+        .members = &.{.{ .name = &member_name, .readonly = true, .self_reference = true }},
+    }});
+    global_name[0] = 'x';
+    member_name[0] = 'x';
+
+    try std.testing.expectEqualStrings("ambient", project.ambient_globals.items[0].name);
+    try std.testing.expectEqualStrings("self", project.ambient_globals.items[0].members[0].name);
+    try std.testing.expect(project.ambient_globals.items[0].members[0].readonly);
+    try std.testing.expect(project.ambient_globals.items[0].members[0].self_reference);
+
+    var invalid = Project.init(std.testing.allocator);
+    defer invalid.deinit();
+    try std.testing.expectError(error.InvalidAmbientGlobal, invalid.registerAmbientGlobals(&.{.{
+        .name = "mutable_self",
+        .namespace = .{ .value = true },
+        .type_metadata = .object,
+        .members = &.{.{ .name = "self", .self_reference = true }},
+    }}));
+}
+
+test "referencing an unregistered ambient name produces cannot_find_name" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "ambient_root",
+        .bytes = "ambient_a;",
+    });
+    const result = try project.analyzeModule(.init(1));
+    try std.testing.expectEqual(ModuleState.complete, project.state(.init(1)));
+    var found = false;
+    for (result.diagnostics) |diagnostic| {
+        if (diagnostic.code == .cannot_find_name) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "duplicate ambient global registration is rejected" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerAmbientGlobals(&.{
+        .{ .name = "ambient_a", .namespace = .{ .value = true }, .type_metadata = .object, .host_binding_id = 1 },
+    });
+    try std.testing.expectError(
+        error.DuplicateAmbientGlobal,
+        project.registerAmbientGlobals(&.{
+            .{ .name = "ambient_a", .namespace = .{ .value = true }, .type_metadata = .object, .host_binding_id = 2 },
+        }),
+    );
+}
+
+test "ambient registration enforces overlapping namespaces and permits disjoint namespaces" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerAmbientGlobals(&.{
+        .{ .name = "ambient_both", .namespace = .{ .value = true, .type = true }, .type_metadata = .object, .host_binding_id = 40 },
+    });
+    try std.testing.expectError(
+        error.DuplicateAmbientGlobal,
+        project.registerAmbientGlobals(&.{
+            .{ .name = "ambient_both", .namespace = .{ .type = true }, .type_metadata = .object, .host_binding_id = 41 },
+        }),
+    );
+
+    var disjoint = Project.init(std.testing.allocator);
+    defer disjoint.deinit();
+    try disjoint.registerAmbientGlobals(&.{
+        .{ .name = "ambient_split", .namespace = .{ .value = true }, .type_metadata = .object, .host_binding_id = 42 },
+        .{ .name = "ambient_split", .namespace = .{ .type = true }, .type_metadata = .object, .host_binding_id = 43 },
+    });
 }

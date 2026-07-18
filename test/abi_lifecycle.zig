@@ -92,6 +92,7 @@ fn expectInvalid(status: c.Vizg_ProjectStatus) !void {
 
 test "official ABI v1 exposes version and a project-owned terminal result" {
     try std.testing.expectEqual(@as(u32, c.VIZG_ABI_VERSION), c.vizg_abi_version());
+    try std.testing.expectEqual(@as(u32, c.VIZG_EXTERNAL_MODULE_API_VERSION), c.vizg_external_module_api_version());
 
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();
@@ -130,6 +131,117 @@ test "official ABI v1 exposes version and a project-owned terminal result" {
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), c.vizg_project_result_summary(first, &summary));
 }
 
+test "ambient-global API v2 preserves recursive host identity" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    const name = "globalThis";
+    const host_binding_id: u64 = 0x4754;
+    var member: c.Vizg_AmbientMember = .{
+        .name_ptr = name.ptr,
+        .name_len = name.len,
+        .has_type_metadata = 0,
+        .optional = 0,
+        .readonly = 1,
+        .self_reference = 1,
+        .type_metadata = c.VIZG_EXTERNAL_TYPE_UNKNOWN,
+        .reserved = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+    var global: c.Vizg_AmbientGlobalV2 = .{
+        .name_ptr = name.ptr,
+        .name_len = name.len,
+        .namespace_flags = c.VIZG_EXTERNAL_NAMESPACE_VALUE,
+        .has_type_metadata = 1,
+        .type_metadata = c.VIZG_EXTERNAL_TYPE_OBJECT,
+        .host_binding_id = host_binding_id,
+        .members_ptr = &member,
+        .member_count = 1,
+        .reserved = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_register_ambient_globals_v2(project, &global, 1),
+    );
+
+    var root = projectSource(1, "ambient.ts", "globalThis.globalThis;", true);
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_add_source(project, &root),
+    );
+    const result = try finishProject(project);
+
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
+    );
+    var saw_host_binding = false;
+    for (0..summary.binding_count) |index| {
+        var binding: c.Vizg_HirBindingDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_binding_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &binding),
+        );
+        if (binding.has_host_binding_id != 0) {
+            try std.testing.expectEqual(host_binding_id, binding.host_binding_id);
+            saw_host_binding = true;
+        }
+    }
+    try std.testing.expect(saw_host_binding);
+}
+
+test "source host binding C API preserves source declaration identity" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    const name = "hostValue";
+    const host_binding_id: u64 = 0x434f4e53;
+    var binding: c.Vizg_SourceHostBinding = .{
+        .name_ptr = name.ptr,
+        .name_len = name.len,
+        .host_binding_id = host_binding_id,
+        .reserved = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_register_source_host_bindings(project, &binding, 1),
+    );
+
+    var root = projectSource(
+        2,
+        "source-host-binding.ts",
+        "interface HostValue { invoke(value: number): void; } const hostValue: HostValue; hostValue;",
+        true,
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_add_source(project, &root),
+    );
+    const result = try finishProject(project);
+
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
+    );
+    var saw_host_binding = false;
+    for (0..summary.binding_count) |index| {
+        var detail: c.Vizg_HirBindingDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_binding_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+        );
+        if (detail.has_host_binding_id != 0 and detail.host_binding_id == host_binding_id) {
+            saw_host_binding = true;
+        }
+    }
+    try std.testing.expect(saw_host_binding);
+}
+
 test "versioned C HIR consumer reads immutable result records" {
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();
@@ -137,7 +249,7 @@ test "versioned C HIR consumer reads immutable result records" {
     var source = projectSource(
         17,
         "hir-consumer.ts",
-        "export function answer(value: number): number { return value + 1; }",
+        "const captured = 1; const values = [1, 2]; const holder = { values }; export function answer(value: number): number { const nested = () => captured + value; return holder.values[0] + nested(); }",
         true,
     );
     var result: ?*c.Vizg_ProjectResult = null;
@@ -148,11 +260,19 @@ test "versioned C HIR consumer reads immutable result records" {
     defer c.vizg_project_result_destroy(result);
 
     try std.testing.expectEqual(@as(u32, c.VIZG_HIR_API_VERSION), c.vizg_hir_api_version());
+    try std.testing.expectEqual(@as(u32, c.VIZG_HIR_PAYLOAD_API_VERSION), c.vizg_hir_payload_api_version());
+    try std.testing.expectEqual(@as(u32, c.VIZG_HIR_DETAIL_API_VERSION), c.vizg_hir_detail_api_version());
     var summary: c.Vizg_HirSummary = undefined;
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_OK),
         c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
     );
+    var legacy_summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, 1, &legacy_summary),
+    );
+    try std.testing.expectEqual(summary.instruction_count, legacy_summary.instruction_count);
     try std.testing.expectEqual(@as(usize, 1), summary.module_count);
     try std.testing.expect(summary.function_count > 0);
     try std.testing.expect(summary.block_count > 0);
@@ -168,12 +288,206 @@ test "versioned C HIR consumer reads immutable result records" {
     try std.testing.expectEqual(@as(c.Vizg_HirEntityKind, c.VIZG_HIR_ENTITY_MODULE), record.kind);
     try std.testing.expectEqual(@as(u64, 17), record.module_id);
     try std.testing.expectEqualStrings("hir-consumer.ts", record.name_ptr[0..record.name_len]);
+    var module_detail: c.Vizg_HirModuleDetail = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_module_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, 0, &module_detail),
+    );
+    try std.testing.expectEqual(record.id, module_detail.module_id);
+    try std.testing.expectEqual(@as(usize, 0), module_detail.dependency_count);
+    try std.testing.expectEqual(@as(usize, 0), module_detail.import_count);
+    try std.testing.expect(module_detail.export_count > 0);
+    for (0..module_detail.export_count) |export_index| {
+        var module_export: c.Vizg_HirModuleExport = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_module_export_at(result, c.VIZG_HIR_DETAIL_API_VERSION, 0, export_index, &module_export),
+        );
+        try std.testing.expect(module_export.exported_name_len > 0);
+    }
+    var function_signature_count: usize = 0;
+    var rich_type_count: usize = 0;
     for (0..summary.type_count) |index| {
         try std.testing.expectEqual(
             @as(u32, c.VIZG_PROJECT_STATUS_OK),
             c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_TYPE, index, &record),
         );
         try std.testing.expectEqual(@as(c.Vizg_HirEntityKind, c.VIZG_HIR_ENTITY_TYPE), record.kind);
+
+        var detail: c.Vizg_HirTypeDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+        );
+        try std.testing.expectEqual(@as(u32, @intCast(record.id)), detail.id);
+        if (detail.kind == c.VIZG_HIR_TYPE_PRIMITIVE) {
+            try std.testing.expect(detail.builtin_kind != c.VIZG_HIR_BUILTIN_NONE);
+        } else if (detail.kind == c.VIZG_HIR_TYPE_FUNCTION) {
+            var signature: c.Vizg_HirFunctionSignature = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_function_signature(result, c.VIZG_HIR_DETAIL_API_VERSION, detail.id, &signature),
+            );
+            try std.testing.expectEqual(detail.id, signature.type_id);
+            for (0..signature.parameter_count) |parameter_index| {
+                var parameter: c.Vizg_HirSignatureParameter = undefined;
+                try std.testing.expectEqual(
+                    @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                    c.vizg_hir_signature_parameter_at(result, c.VIZG_HIR_DETAIL_API_VERSION, detail.id, parameter_index, &parameter),
+                );
+            }
+            function_signature_count += 1;
+        } else {
+            try std.testing.expect(detail.kind >= c.VIZG_HIR_TYPE_PROMISE);
+            try std.testing.expect(detail.kind <= c.VIZG_HIR_TYPE_APPLIED_GENERIC);
+            try std.testing.expectEqual(@as(u32, c.VIZG_HIR_BUILTIN_NONE), detail.builtin_kind);
+            rich_type_count += 1;
+        }
+    }
+    try std.testing.expect(function_signature_count > 0);
+    try std.testing.expect(rich_type_count > 0);
+    for (0..summary.binding_count) |index| {
+        var binding_detail: c.Vizg_HirBindingDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_binding_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &binding_detail),
+        );
+        try std.testing.expect(binding_detail.initial_state <= c.VIZG_HIR_BINDING_STATE_LIVE_IMPORT);
+    }
+    var saw_live_capture = false;
+    for (0..summary.function_count) |index| {
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_FUNCTION, index, &record),
+        );
+        var detail: c.Vizg_HirFunctionDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_function_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+        );
+        try std.testing.expectEqual(record.id, detail.id);
+        var storage: c.Vizg_HirFunctionStorageDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_function_storage_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &storage),
+        );
+        try std.testing.expectEqual(record.id, storage.id);
+        for (0..storage.capture_count) |capture_index| {
+            var capture: c.Vizg_HirFunctionCapture = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_function_capture_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, capture_index, &capture),
+            );
+            if (capture.source_kind == c.VIZG_HIR_CAPTURE_SOURCE_BINDING) {
+                try std.testing.expect(capture.source_binding_id != c.VIZG_HIR_ID_NONE);
+                try std.testing.expectEqual(@as(u32, c.VIZG_HIR_CAPTURE_MODE_LIVE_BINDING), capture.mode);
+                saw_live_capture = true;
+            }
+        }
+
+        for (0..detail.parameter_count) |parameter_index| {
+            var parameter: c.Vizg_HirFunctionParameter = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_function_parameter_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, parameter_index, &parameter),
+            );
+            try std.testing.expect(parameter.argument_index < detail.parameter_count);
+        }
+    }
+    try std.testing.expect(saw_live_capture);
+    var legacy_record: c.Vizg_HirRecord = undefined;
+    for (0..summary.origin_count) |index| {
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_ORIGIN, index, &record),
+        );
+        if (record.flags & 1 == 0) {
+            try std.testing.expectEqual(@as(u32, 0), record.type_id);
+        }
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, 1, c.VIZG_HIR_ENTITY_ORIGIN, index, &legacy_record),
+        );
+        try std.testing.expectEqual(@as(u8, 0), legacy_record.flags);
+
+        var detail: c.Vizg_HirOriginDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_origin_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+        );
+        try std.testing.expectEqual(@as(u32, @intCast(index)), detail.id);
+        try std.testing.expectEqual(record.module_id, detail.module_id);
+        try std.testing.expect(detail.span_end >= detail.span_start);
+        try std.testing.expectEqual(record.secondary_id, detail.span_start);
+        try std.testing.expectEqual(record.type_id != 0, detail.flags & c.VIZG_HIR_ORIGIN_HAS_TYPE != 0);
+    }
+    var payload: c.Vizg_HirPayload = undefined;
+    var item: c.Vizg_HirPayloadItem = undefined;
+    for (0..summary.instruction_count) |index| {
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_INSTRUCTION, index, &record),
+        );
+        if (record.flags & 1 != 0) {
+            try std.testing.expect(record.secondary_id != c.VIZG_HIR_ID_NONE);
+        } else {
+            try std.testing.expectEqual(@as(u64, c.VIZG_HIR_ID_NONE), record.secondary_id);
+        }
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, 1, c.VIZG_HIR_ENTITY_INSTRUCTION, index, &legacy_record),
+        );
+        try std.testing.expect(legacy_record.secondary_id != c.VIZG_HIR_ID_NONE);
+        try std.testing.expectEqual(record.parent_id, legacy_record.parent_id);
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_operation_at(result, c.VIZG_HIR_PAYLOAD_API_VERSION, index, &payload),
+        );
+        try std.testing.expectEqual(record.tag, payload.tag);
+        for (0..payload.item_count) |item_index| {
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_operation_item_at(result, c.VIZG_HIR_PAYLOAD_API_VERSION, index, item_index, &item),
+            );
+        }
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
+            c.vizg_hir_operation_item_at(result, c.VIZG_HIR_PAYLOAD_API_VERSION, index, payload.item_count, &item),
+        );
+    }
+    for (0..summary.block_count) |index| {
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_BLOCK, index, &record),
+        );
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_terminator_at(result, c.VIZG_HIR_PAYLOAD_API_VERSION, index, &payload),
+        );
+        try std.testing.expectEqual(record.tag, payload.tag);
+        var detail: c.Vizg_HirBlockDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_block_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+        );
+        try std.testing.expectEqual(record.id, detail.id);
+        for (0..detail.parameter_count) |parameter_index| {
+            var parameter: c.Vizg_HirBlockParameter = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_block_parameter_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, parameter_index, &parameter),
+            );
+        }
+        for (0..payload.item_count) |item_index| {
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_terminator_item_at(result, c.VIZG_HIR_PAYLOAD_API_VERSION, index, item_index, &item),
+            );
+        }
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
+            c.vizg_hir_terminator_item_at(result, c.VIZG_HIR_PAYLOAD_API_VERSION, index, payload.item_count, &item),
+        );
     }
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
@@ -182,6 +496,208 @@ test "versioned C HIR consumer reads immutable result records" {
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
         c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION + 1, &summary),
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+        c.vizg_hir_summary(result, 0, &summary),
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+        c.vizg_hir_operation_at(result, c.VIZG_HIR_PAYLOAD_API_VERSION + 1, 0, &payload),
+    );
+    var detail: c.Vizg_HirTypeDetail = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
+        c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, summary.type_count, &detail),
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+        c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION + 1, 0, &detail),
+    );
+}
+
+test "HIR detail ABI exposes async and generator body completion types" {
+    const Helpers = struct {
+        fn typeKind(
+            result: ?*const c.Vizg_ProjectResult,
+            count: usize,
+            type_id: u32,
+        ) !u32 {
+            for (0..count) |index| {
+                var detail: c.Vizg_HirTypeDetail = undefined;
+                try std.testing.expectEqual(
+                    @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                    c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+                );
+                if (detail.id == type_id) return detail.kind;
+            }
+            return error.MissingType;
+        }
+    };
+
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    var config = workspace.config();
+    var source = projectSource(
+        18,
+        "completion-types.ts",
+        "async function wait(value: any): any { return await value; } function* sequence(value: any): any { yield value; return value; } async function* combined(value: any): any { yield await value; return value; }",
+        true,
+    );
+    var result: ?*c.Vizg_ProjectResult = null;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_analyze_source(&config, &source, &result),
+    );
+    defer c.vizg_project_result_destroy(result);
+
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
+    );
+
+    var suspension_signatures: usize = 0;
+    var first_suspension_type: ?u32 = null;
+    for (0..summary.type_count) |index| {
+        var detail: c.Vizg_HirTypeDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+        );
+        if (detail.kind != c.VIZG_HIR_TYPE_FUNCTION) continue;
+
+        var signature: c.Vizg_HirFunctionSignature = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_function_signature(result, c.VIZG_HIR_DETAIL_API_VERSION, detail.id, &signature),
+        );
+        const is_async = signature.flags & c.VIZG_HIR_SIGNATURE_ASYNC != 0;
+        const is_generator = signature.flags & c.VIZG_HIR_SIGNATURE_GENERATOR != 0;
+        if (!is_async and !is_generator) continue;
+
+        var completion_type: u32 = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_function_completion_type(result, c.VIZG_HIR_DETAIL_API_VERSION, detail.id, &completion_type),
+        );
+        try std.testing.expect(completion_type != signature.return_type_id);
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_HIR_TYPE_PRIMITIVE),
+            try Helpers.typeKind(result, summary.type_count, completion_type),
+        );
+        try std.testing.expectEqual(
+            @as(u32, if (is_generator) c.VIZG_HIR_TYPE_GENERATOR else c.VIZG_HIR_TYPE_PROMISE),
+            try Helpers.typeKind(result, summary.type_count, signature.return_type_id),
+        );
+        first_suspension_type = first_suspension_type orelse detail.id;
+        suspension_signatures += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), suspension_signatures);
+
+    try expectInvalid(c.vizg_hir_function_completion_type(
+        result,
+        c.VIZG_HIR_DETAIL_API_VERSION,
+        first_suspension_type.?,
+        null,
+    ));
+    var completion_type: u32 = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+        c.vizg_hir_function_completion_type(result, c.VIZG_HIR_DETAIL_API_VERSION + 1, first_suspension_type.?, &completion_type),
+    );
+}
+
+test "HIR detail ABI exposes structured exception regions" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    var config = workspace.config();
+    var source = projectSource(
+        223,
+        "exception-regions.ts",
+        \\export function guarded(flag: boolean): number {
+        \\  try {
+        \\    if (flag) throw 1;
+        \\    return 2;
+        \\  } catch (caughtValue) {
+        \\    throw caughtValue;
+        \\  } finally {
+        \\    if (flag) return 3;
+        \\  }
+        \\}
+    ,
+        true,
+    );
+    var result: ?*c.Vizg_ProjectResult = null;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_analyze_source(&config, &source, &result),
+    );
+    defer c.vizg_project_result_destroy(result);
+
+    var region_count: usize = 0;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_region_count(result, c.VIZG_HIR_DETAIL_API_VERSION, &region_count),
+    );
+    try std.testing.expect(region_count >= 2);
+
+    var saw_catch = false;
+    var saw_finally = false;
+    for (0..region_count) |region_index| {
+        var detail: c.Vizg_HirRegionDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_region_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, region_index, &detail),
+        );
+        try std.testing.expect(detail.id != c.VIZG_HIR_ID_NONE);
+        try std.testing.expect(detail.function_id != c.VIZG_HIR_ID_NONE);
+        try std.testing.expect(detail.handler_block_id != c.VIZG_HIR_ID_NONE);
+        try std.testing.expect(detail.protected_block_count > 0);
+        try std.testing.expectEqual(
+            detail.flags & c.VIZG_HIR_REGION_HAS_PARENT != 0,
+            detail.parent_region_id != c.VIZG_HIR_ID_NONE,
+        );
+        try std.testing.expectEqual(
+            detail.flags & c.VIZG_HIR_REGION_HAS_CONTINUATION != 0,
+            detail.continuation_block_id != c.VIZG_HIR_ID_NONE,
+        );
+        switch (detail.kind) {
+            c.VIZG_HIR_REGION_CATCH => saw_catch = true,
+            c.VIZG_HIR_REGION_FINALLY => saw_finally = true,
+            c.VIZG_HIR_REGION_ITERATOR_CLOSE => {},
+            else => return error.UnknownRegionKind,
+        }
+        for (0..detail.protected_block_count) |protected_index| {
+            var block_id: u64 = c.VIZG_HIR_ID_NONE;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_region_protected_block_at(result, c.VIZG_HIR_DETAIL_API_VERSION, region_index, protected_index, &block_id),
+            );
+            try std.testing.expect(block_id != c.VIZG_HIR_ID_NONE);
+        }
+        var invalid_block_id: u64 = 0;
+        try expectInvalid(c.vizg_hir_region_protected_block_at(
+            result,
+            c.VIZG_HIR_DETAIL_API_VERSION,
+            region_index,
+            detail.protected_block_count,
+            &invalid_block_id,
+        ));
+    }
+    try std.testing.expect(saw_catch);
+    try std.testing.expect(saw_finally);
+
+    var invalid_detail: c.Vizg_HirRegionDetail = undefined;
+    try expectInvalid(c.vizg_hir_region_detail_at(
+        result,
+        c.VIZG_HIR_DETAIL_API_VERSION,
+        region_count,
+        &invalid_detail,
+    ));
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+        c.vizg_hir_region_count(result, c.VIZG_HIR_DETAIL_API_VERSION + 1, &region_count),
     );
 }
 
@@ -235,6 +751,221 @@ test "official ABI v1 drives source and external host responses" {
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
     try std.testing.expectEqual(@as(usize, 2), summary.module_count);
     try std.testing.expect(summary.edge_count >= 2);
+}
+
+test "external-module API v2 publishes stable function declarations to HIR" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(1, "root.ts", "import { log } from 'runtime'; export const value = log(1);", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(project, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STEP_REQUEST), step.kind);
+    try std.testing.expectEqualStrings("runtime", stepSpecifier(&step));
+
+    const parameter_name = "value";
+    var parameter: c.Vizg_ExternalParameterV2 = .{
+        .name_ptr = parameter_name.ptr,
+        .name_len = parameter_name.len,
+        .type_metadata = c.VIZG_EXTERNAL_TYPE_NUMBER,
+        .optional = 0,
+        .has_default = 0,
+        .rest = 0,
+        .reserved = 0,
+    };
+    const export_name = "log";
+    var export_desc: c.Vizg_ExternalExportV2 = .{
+        .name_ptr = export_name.ptr,
+        .name_len = export_name.len,
+        .kind = c.VIZG_EXTERNAL_EXPORT_NAMED,
+        .namespace_flags = c.VIZG_EXTERNAL_NAMESPACE_VALUE,
+        .has_type_metadata = 0,
+        .has_function = 1,
+        .reserved = 0,
+        .type_metadata = c.VIZG_EXTERNAL_TYPE_UNKNOWN,
+        .declaration_kind = c.VIZG_EXTERNAL_DECLARATION_FUNCTION,
+        .effect_flags = c.VIZG_EXTERNAL_EFFECT_ALLOCATES | c.VIZG_EXTERNAL_EFFECT_IO | c.VIZG_EXTERNAL_EFFECT_ASYNC,
+        .reserved2 = 0,
+        .external_symbol_id = 0x7100,
+        .function = .{
+            .parameters_ptr = &parameter,
+            .parameter_count = 1,
+            .return_type = c.VIZG_EXTERNAL_TYPE_VOID,
+            .type_parameter_count = 0,
+            .is_async = 0,
+            .is_generator = 0,
+            .is_constructor = 0,
+            .reserved = 0,
+        },
+    };
+    var external: c.Vizg_ExternalModuleV2 = .{
+        .external_module_id = 80,
+        .logical_name_ptr = "runtime".ptr,
+        .logical_name_len = "runtime".len,
+        .exports_ptr = &export_desc,
+        .export_count = 1,
+    };
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_respond_external_v2(project, step.request_id, &external),
+    );
+
+    const result = try finishProject(project);
+    var summary: c.Vizg_ProjectResultSummary = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
+    try std.testing.expectEqual(@as(u8, 0), summary.is_partial);
+
+    var hir_summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &hir_summary),
+    );
+    try std.testing.expectEqual(@as(usize, 1), hir_summary.external_declaration_count);
+    var declaration: c.Vizg_HirRecord = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_EXTERNAL_DECLARATION, 0, &declaration),
+    );
+    try std.testing.expectEqual(@as(u16, (1 << 3) | (1 << 4) | (1 << 5)), declaration.effect_bits);
+
+    var module_detail: c.Vizg_HirModuleDetail = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_module_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, 0, &module_detail),
+    );
+    try std.testing.expect(module_detail.import_count > 0);
+    var saw_external_live_import = false;
+    for (0..module_detail.import_count) |import_index| {
+        var module_import: c.Vizg_HirModuleImport = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_module_import_at(result, c.VIZG_HIR_DETAIL_API_VERSION, 0, import_index, &module_import),
+        );
+        if (module_import.source_kind != c.VIZG_HIR_MODULE_REFERENCE_EXTERNAL) continue;
+        try std.testing.expectEqual(@as(u64, 80), module_import.source_id);
+        try std.testing.expectEqual(@as(u64, 80), module_import.target.external_module_id);
+        try std.testing.expectEqual(@as(u64, 0x7100), module_import.target.external_symbol_id);
+        try std.testing.expect(module_import.local_binding_id != c.VIZG_HIR_U32_NONE);
+        for (0..hir_summary.binding_count) |binding_index| {
+            var binding: c.Vizg_HirBindingDetail = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_binding_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, binding_index, &binding),
+            );
+            if (binding.id == module_import.local_binding_id) {
+                try std.testing.expectEqual(@as(u8, c.VIZG_HIR_BINDING_STATE_LIVE_IMPORT), binding.initial_state);
+                saw_external_live_import = true;
+            }
+        }
+    }
+    try std.testing.expect(saw_external_live_import);
+}
+
+test "HIR detail ABI preserves source module initialization and live imports" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(1, "root.ts", "import { value } from './dep'; export const answer = value;", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(project, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STEP_REQUEST), step.kind);
+    try std.testing.expectEqualStrings("./dep", stepSpecifier(&step));
+    var dependency = projectSource(2, "dep.ts", "export let value: number = 1;", false);
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_respond_source(project, step.request_id, &dependency),
+    );
+
+    const result = try finishProject(project);
+    var hir_summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &hir_summary),
+    );
+    try std.testing.expectEqual(@as(usize, 2), hir_summary.module_count);
+
+    var saw_source_import = false;
+    var saw_initialization_dependency = false;
+    var saw_live_import = false;
+    for (0..hir_summary.module_count) |module_index| {
+        var detail: c.Vizg_HirModuleDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_module_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, module_index, &detail),
+        );
+        for (0..detail.dependency_count) |dependency_index| {
+            var module_dependency: c.Vizg_HirModuleDependency = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_module_dependency_at(result, c.VIZG_HIR_DETAIL_API_VERSION, module_index, dependency_index, &module_dependency),
+            );
+            saw_initialization_dependency = saw_initialization_dependency or module_dependency.initialization_required != 0;
+        }
+        for (0..detail.import_count) |import_index| {
+            var module_import: c.Vizg_HirModuleImport = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_module_import_at(result, c.VIZG_HIR_DETAIL_API_VERSION, module_index, import_index, &module_import),
+            );
+            if (module_import.source_kind != c.VIZG_HIR_MODULE_REFERENCE_SOURCE) continue;
+            try std.testing.expectEqual(@as(u64, 2), module_import.source_id);
+            saw_source_import = true;
+            for (0..hir_summary.binding_count) |binding_index| {
+                var binding: c.Vizg_HirBindingDetail = undefined;
+                try std.testing.expectEqual(
+                    @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                    c.vizg_hir_binding_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, binding_index, &binding),
+                );
+                if (binding.id == module_import.local_binding_id) {
+                    try std.testing.expectEqual(@as(u8, c.VIZG_HIR_BINDING_STATE_LIVE_IMPORT), binding.initial_state);
+                    saw_live_import = true;
+                }
+            }
+        }
+    }
+    try std.testing.expect(saw_source_import);
+    try std.testing.expect(saw_initialization_dependency);
+    try std.testing.expect(saw_live_import);
+}
+
+test "external-module API v2 accepts null pointers for empty arrays" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(1, "root.ts", "import 'empty'; export const value = 1;", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(project, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STEP_REQUEST), step.kind);
+    try std.testing.expectEqualStrings("empty", stepSpecifier(&step));
+
+    var external: c.Vizg_ExternalModuleV2 = .{
+        .external_module_id = 81,
+        .logical_name_ptr = "empty".ptr,
+        .logical_name_len = "empty".len,
+        .exports_ptr = null,
+        .export_count = 0,
+    };
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_respond_external_v2(project, step.request_id, &external),
+    );
+
+    const result = try finishProject(project);
+    var summary: c.Vizg_ProjectResultSummary = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
+    try std.testing.expectEqual(@as(u8, 0), summary.is_partial);
 }
 
 test "official ABI v1 reports unresolved modules through the result" {

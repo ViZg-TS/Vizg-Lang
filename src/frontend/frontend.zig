@@ -25,6 +25,13 @@ pub const FrontendOptions = struct {
     // Maximum recursive depth during parse descent. Exceeded parses are rejected with a diagnostic (H4).
     max_parse_depth: usize = 1024,
     max_diagnostics: usize = std.math.maxInt(usize),
+    /// Ambient globals (e.g. a host clock) registered by the host
+    /// before analysis so they resolve without synthetic source declarations.
+    /// Borrowed for the duration of `analyze`.
+    ambient_globals: []const @import("../project/contracts.zig").AmbientGlobal = &.{},
+    /// Stable host identities attached to matching top-level source value
+    /// declarations. Borrowed for the duration of `analyze`.
+    source_host_bindings: []const @import("../project/contracts.zig").SourceHostBinding = &.{},
 };
 
 pub const FrontendResult = struct {
@@ -49,6 +56,8 @@ pub fn analyze(allocator: std.mem.Allocator, source: SourceFile, options: Fronte
     const bound = try binder.bindWithLimit(
         allocator,
         parsed.ast,
+        options.ambient_globals,
+        options.source_host_bindings,
         try remainingDiagnostics(options.max_diagnostics, scanner_parser_count),
     );
     const resolved = try resolver.resolveWithLimit(
@@ -156,7 +165,7 @@ test "frontend analyze runs scanner parser binder and cfg" {
     const allocator = arena.allocator();
 
     const source =
-        \\import { log } from "console";
+        \\import { log } from "host-service";
         \\
         \\export function main(name: string) {
         \\    let message = "hi " + name;

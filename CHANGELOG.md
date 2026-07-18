@@ -8,6 +8,55 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Added source host binding registration through the Zig and C project APIs.
+  Standard declarations can now remain TypeScript source-owned while retaining
+  stable HIR host identity; static aliases with an exact matching `TypeId`
+  normalize to the same binding. Interface methods now also accept `void`
+  return types.
+- Added pre-analysis ambient-global registration, including structural member
+  descriptors and stable host binding identities in HIR detail API v2. Hosts can
+  model recursive readonly bindings such as `globalThis` without introducing
+  dynamic property or runtime semantics.
+- Fixed external function descriptors that also provide coarse primitive type
+  metadata so the detailed signature takes precedence before checker analysis;
+  valid imported native calls no longer report `VZG6005` as non-callable.
+- Fixed HIR binding records to use explicit, stable public
+  `VIZG_HIR_BINDING_KIND_*` tags instead of leaking private enum ordinals.
+- Added `vizg_hir_function_completion_type` to the immutable HIR detail
+  projection. Downstream compilers can now validate body `return` values for
+  async functions, generators, and async generators without reconstructing
+  private `Promise` or `Generator` wrappers.
+- Extended the versioned HIR detail projection with structured exception
+  regions, including nesting, handlers, continuations, and protected blocks.
+  Downstream compilers can now reconstruct `catch`, `finally`, and iterator
+  cleanup control flow without depending on ViZg-internal storage.
+- Fixed the HIR detail type projection to publish explicit, stable ABI tags for
+  every semantic type category already returned by `vizg_hir_type_detail_at`.
+  Rich types no longer leak undeclared internal enum ordinals to consumers.
+- Extended the versioned HIR detail projection with canonical module
+  dependencies, imports, exports, binding initialization states, and function
+  captures. Downstream compilers can now preserve source/external references,
+  live bindings, initialization ordering, and abstract closure storage without
+  inferring data from names or concrete runtime layouts.
+- Added the versioned HIR detail projection needed by typed SSA consumers.
+  The additive API exposes primitive type identity, function signatures and
+  parameters, function entry blocks, block parameters, and complete origin
+  spans without changing frozen HIR v1 or existing ABI layouts.
+- Fixed HIR origin records so API v2 distinguishes an absent origin type from
+  a present `TypeId(0)` through `flags` bit 0; v1 behavior and ABI layout are
+  unchanged.
+- Fixed the versioned HIR record projection so instruction records expose their
+  result `ValueId`. HIR record API v2 uses `secondary_id` for the optional
+  result identity while continuing to accept v1 callers with the original
+  parent-function interpretation; the official ABI v1 layout is unchanged.
+- Added external-module API v2 as an additive extension to official ABI v1.
+  Hosts can now publish the stable symbol identity, declaration kind, portable
+  function signature, and effect flags already required by canonical HIR;
+  legacy `vizg_project_respond_external` remains unchanged.
+- Added an exhaustive, read-only HIR payload consumer API for downstream MIR
+  lowering. The additive `VIZG_HIR_PAYLOAD_API_VERSION` contract exposes every
+  operation and terminator payload without changing the frozen HIR v1 model or
+  official ABI v1 lifecycle.
 - Froze canonical HIR v1 after Goals 232–237 and the full native, cross-target,
   ABI, Android, and import-free WebAssembly matrix passed. The contract is
   identified by `hir-v1.0.0`; ViZG now enters contractual maintenance and

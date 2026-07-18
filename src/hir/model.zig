@@ -69,6 +69,9 @@ pub const HirSemanticIdentity = struct {
     namespace: HirSemanticNamespace,
     external_module_id: ?ExternalModuleId = null,
     external_symbol_id: ?ExternalSymbolId = null,
+    /// Host-assigned identity for ambient globals or registered source values;
+    /// `null` for ordinary source-derived symbols.
+    host_binding_id: ?u64 = null,
 };
 
 pub const HirImportBinding = struct {
@@ -206,6 +209,8 @@ pub const HirBinding = struct {
     mutable: bool,
     initial_state: HirBindingInitialState,
     origin: ids.OriginId,
+    /// Stable host identity for ambient or registered source bindings.
+    host_binding_id: ?u64 = null,
 };
 
 pub const HirBindingKind = enum {

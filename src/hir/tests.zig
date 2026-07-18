@@ -2659,6 +2659,125 @@ test "HIR provenance levels preserve executable shape and full trace records era
     }
 }
 
+test "HIR ambient bindings retain generic host identity including zero" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerAmbientGlobals(&.{
+        .{
+            .name = "ambient_zero",
+            .namespace = .{ .value = true },
+            .type_metadata = .object,
+            .host_binding_id = 0,
+        },
+        .{
+            .name = "ambient_both",
+            .namespace = .{ .value = true, .type = true },
+            .type_metadata = .object,
+            .host_binding_id = 42,
+        },
+    });
+    try project.addRoot(.{
+        .id = .init(228),
+        .logical_name = "ambient-identity.ts",
+        .bytes =
+        \\ambient_zero;
+        \\ambient_both;
+        ,
+    });
+    while (switch (try project.step()) {
+        .complete => false,
+        .request => return error.UnexpectedModuleRequest,
+    }) {}
+    try std.testing.expect(!(try project.finish()).has_failures);
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const lowered = switch (outcome) {
+        .result => |*result| result,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    var saw_zero = false;
+    var saw_both = false;
+    for (lowered.project.functions) |function| {
+        for (function.bindings) |binding| {
+            if (std.mem.eql(u8, binding.name, "ambient_zero")) {
+                try std.testing.expectEqual(@as(?u64, 0), binding.host_binding_id);
+                try std.testing.expect(!saw_zero);
+                saw_zero = true;
+            } else if (std.mem.eql(u8, binding.name, "ambient_both")) {
+                try std.testing.expectEqual(@as(?u64, 42), binding.host_binding_id);
+                try std.testing.expect(!saw_both);
+                saw_both = true;
+            }
+        }
+    }
+    try std.testing.expect(saw_zero);
+    try std.testing.expect(saw_both);
+}
+
+test "HIR source host property aliases preserve binding and type identity" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceHostBindings(&.{
+        .{ .name = "hostRoot", .host_binding_id = 0 },
+        .{ .name = "hostValue", .host_binding_id = 1 },
+    });
+    try project.addRoot(.{
+        .id = .init(229),
+        .logical_name = "source-host-identity.ts",
+        .bytes =
+        \\interface HostValue { invoke(value: number): void; }
+        \\interface HostRoot { readonly hostValue: HostValue; }
+        \\const hostRoot: HostRoot;
+        \\const hostValue: HostValue;
+        \\hostValue;
+        \\hostRoot.hostValue;
+        ,
+    });
+    while (switch (try project.step()) {
+        .complete => false,
+        .request => return error.UnexpectedModuleRequest,
+    }) {}
+    try std.testing.expect(!(try project.finish()).has_failures);
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const lowered = switch (outcome) {
+        .result => |*result| result,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    var host_value_binding: ?hir.BindingId = null;
+    var host_value_type: ?hir.TypeId = null;
+    for (lowered.project.functions) |function| {
+        for (function.bindings) |binding| {
+            if (!std.mem.eql(u8, binding.name, "hostValue")) continue;
+            try std.testing.expect(host_value_binding == null);
+            try std.testing.expectEqual(@as(?u64, 1), binding.host_binding_id);
+            host_value_binding = binding.id;
+            host_value_type = binding.type_id;
+        }
+    }
+    try std.testing.expect(host_value_binding != null);
+    try std.testing.expect(host_value_type != null);
+
+    var host_value_loads: usize = 0;
+    for (lowered.project.functions) |function| {
+        for (function.blocks) |block| {
+            for (block.instructions) |instruction| switch (instruction.operation) {
+                .load_binding => |binding| if (binding.eql(host_value_binding.?)) {
+                    try std.testing.expectEqual(host_value_type, instruction.result_type);
+                    host_value_loads += 1;
+                },
+                .make_property_place, .load_place => return error.UnexpectedDynamicPropertyAccess,
+                else => {},
+            };
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), host_value_loads);
+}
+
 fn expectSameExecutableShape(left: *const hir.HirResult, right: *const hir.HirResult) !void {
     try std.testing.expectEqual(left.project.modules.len, right.project.modules.len);
     try std.testing.expectEqual(left.project.entities.len, right.project.entities.len);

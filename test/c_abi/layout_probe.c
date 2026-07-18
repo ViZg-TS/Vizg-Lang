@@ -14,6 +14,8 @@ LAYOUT(Vizg_ProjectFailureKind)
 LAYOUT(Vizg_ExternalExportKind)
 LAYOUT(Vizg_ExternalNamespaceFlags)
 LAYOUT(Vizg_ExternalType)
+LAYOUT(Vizg_ExternalDeclarationKind)
+LAYOUT(Vizg_ExternalEffectFlags)
 LAYOUT(Vizg_HirEntityKind)
 LAYOUT(Vizg_ProjectConfig)
 LAYOUT(Vizg_ProjectSource)
@@ -22,6 +24,14 @@ LAYOUT(Vizg_ProjectRequestAttribute)
 LAYOUT(Vizg_ProjectStep)
 LAYOUT(Vizg_ExternalExport)
 LAYOUT(Vizg_ExternalModule)
+LAYOUT(Vizg_ExternalParameterV2)
+LAYOUT(Vizg_ExternalFunctionV2)
+LAYOUT(Vizg_ExternalExportV2)
+LAYOUT(Vizg_ExternalModuleV2)
+LAYOUT(Vizg_SourceHostBinding)
+LAYOUT(Vizg_AmbientGlobal)
+LAYOUT(Vizg_AmbientMember)
+LAYOUT(Vizg_AmbientGlobalV2)
 LAYOUT(Vizg_ProjectResultSummary)
 LAYOUT(Vizg_ProjectModuleInfo)
 LAYOUT(Vizg_ProjectDiagnostic)
@@ -30,6 +40,25 @@ LAYOUT(Vizg_ProjectImportInfo)
 LAYOUT(Vizg_ProjectExportInfo)
 LAYOUT(Vizg_HirSummary)
 LAYOUT(Vizg_HirRecord)
+LAYOUT(Vizg_HirPayload)
+LAYOUT(Vizg_HirPayloadItem)
+LAYOUT(Vizg_HirTypeDetail)
+LAYOUT(Vizg_HirFunctionSignature)
+LAYOUT(Vizg_HirSignatureParameter)
+LAYOUT(Vizg_HirFunctionDetail)
+LAYOUT(Vizg_HirFunctionParameter)
+LAYOUT(Vizg_HirBlockDetail)
+LAYOUT(Vizg_HirBlockParameter)
+LAYOUT(Vizg_HirOriginDetail)
+LAYOUT(Vizg_HirSemanticIdentity)
+LAYOUT(Vizg_HirModuleDetail)
+LAYOUT(Vizg_HirModuleDependency)
+LAYOUT(Vizg_HirModuleImport)
+LAYOUT(Vizg_HirModuleExport)
+LAYOUT(Vizg_HirBindingDetail)
+LAYOUT(Vizg_HirFunctionStorageDetail)
+LAYOUT(Vizg_HirFunctionCapture)
+LAYOUT(Vizg_HirRegionDetail)
 
 #define F(type, field, weight) (offsetof(type, field) * (weight))
 
@@ -73,6 +102,55 @@ size_t vizg_c_fields_Vizg_ExternalModule(void) {
     return F(Vizg_ExternalModule, external_module_id, 1) + F(Vizg_ExternalModule, logical_name_ptr, 2) +
         F(Vizg_ExternalModule, logical_name_len, 3) + F(Vizg_ExternalModule, exports_ptr, 4) +
         F(Vizg_ExternalModule, export_count, 5);
+}
+size_t vizg_c_fields_Vizg_ExternalParameterV2(void) {
+    return F(Vizg_ExternalParameterV2, name_ptr, 1) + F(Vizg_ExternalParameterV2, name_len, 2) +
+        F(Vizg_ExternalParameterV2, type_metadata, 3) + F(Vizg_ExternalParameterV2, optional, 4) +
+        F(Vizg_ExternalParameterV2, has_default, 5) + F(Vizg_ExternalParameterV2, rest, 6) +
+        F(Vizg_ExternalParameterV2, reserved, 7);
+}
+size_t vizg_c_fields_Vizg_ExternalFunctionV2(void) {
+    return F(Vizg_ExternalFunctionV2, parameters_ptr, 1) + F(Vizg_ExternalFunctionV2, parameter_count, 2) +
+        F(Vizg_ExternalFunctionV2, return_type, 3) + F(Vizg_ExternalFunctionV2, type_parameter_count, 4) +
+        F(Vizg_ExternalFunctionV2, is_async, 5) + F(Vizg_ExternalFunctionV2, is_generator, 6) +
+        F(Vizg_ExternalFunctionV2, is_constructor, 7) + F(Vizg_ExternalFunctionV2, reserved, 8);
+}
+size_t vizg_c_fields_Vizg_ExternalExportV2(void) {
+    return F(Vizg_ExternalExportV2, name_ptr, 1) + F(Vizg_ExternalExportV2, name_len, 2) +
+        F(Vizg_ExternalExportV2, kind, 3) + F(Vizg_ExternalExportV2, namespace_flags, 4) +
+        F(Vizg_ExternalExportV2, has_type_metadata, 5) + F(Vizg_ExternalExportV2, has_function, 6) +
+        F(Vizg_ExternalExportV2, reserved, 7) + F(Vizg_ExternalExportV2, type_metadata, 8) +
+        F(Vizg_ExternalExportV2, declaration_kind, 9) + F(Vizg_ExternalExportV2, effect_flags, 10) +
+        F(Vizg_ExternalExportV2, reserved2, 11) + F(Vizg_ExternalExportV2, external_symbol_id, 12) +
+        F(Vizg_ExternalExportV2, function, 13);
+}
+size_t vizg_c_fields_Vizg_ExternalModuleV2(void) {
+    return F(Vizg_ExternalModuleV2, external_module_id, 1) + F(Vizg_ExternalModuleV2, logical_name_ptr, 2) +
+        F(Vizg_ExternalModuleV2, logical_name_len, 3) + F(Vizg_ExternalModuleV2, exports_ptr, 4) +
+        F(Vizg_ExternalModuleV2, export_count, 5);
+}
+size_t vizg_c_fields_Vizg_SourceHostBinding(void) {
+    return F(Vizg_SourceHostBinding, name_ptr, 1) + F(Vizg_SourceHostBinding, name_len, 2) +
+        F(Vizg_SourceHostBinding, host_binding_id, 3) + F(Vizg_SourceHostBinding, reserved, 4);
+}
+size_t vizg_c_fields_Vizg_AmbientGlobal(void) {
+    return F(Vizg_AmbientGlobal, name_ptr, 1) + F(Vizg_AmbientGlobal, name_len, 2) +
+        F(Vizg_AmbientGlobal, namespace_flags, 3) + F(Vizg_AmbientGlobal, has_type_metadata, 4) +
+        F(Vizg_AmbientGlobal, type_metadata, 5) + F(Vizg_AmbientGlobal, host_binding_id, 6) +
+        F(Vizg_AmbientGlobal, reserved, 7);
+}
+size_t vizg_c_fields_Vizg_AmbientMember(void) {
+    return F(Vizg_AmbientMember, name_ptr, 1) + F(Vizg_AmbientMember, name_len, 2) +
+        F(Vizg_AmbientMember, has_type_metadata, 3) + F(Vizg_AmbientMember, optional, 4) +
+        F(Vizg_AmbientMember, readonly, 5) + F(Vizg_AmbientMember, self_reference, 6) +
+        F(Vizg_AmbientMember, type_metadata, 7) + F(Vizg_AmbientMember, reserved, 8);
+}
+size_t vizg_c_fields_Vizg_AmbientGlobalV2(void) {
+    return F(Vizg_AmbientGlobalV2, name_ptr, 1) + F(Vizg_AmbientGlobalV2, name_len, 2) +
+        F(Vizg_AmbientGlobalV2, namespace_flags, 3) + F(Vizg_AmbientGlobalV2, has_type_metadata, 4) +
+        F(Vizg_AmbientGlobalV2, type_metadata, 5) + F(Vizg_AmbientGlobalV2, host_binding_id, 6) +
+        F(Vizg_AmbientGlobalV2, members_ptr, 7) + F(Vizg_AmbientGlobalV2, member_count, 8) +
+        F(Vizg_AmbientGlobalV2, reserved, 9);
 }
 size_t vizg_c_fields_Vizg_ProjectResultSummary(void) {
     return F(Vizg_ProjectResultSummary, module_count, 1) + F(Vizg_ProjectResultSummary, diagnostic_count, 2) +
@@ -137,6 +215,137 @@ size_t vizg_c_fields_Vizg_HirRecord(void) {
         F(Vizg_HirRecord, origin_id, 11) + F(Vizg_HirRecord, name_ptr, 12) +
         F(Vizg_HirRecord, name_len, 13) + F(Vizg_HirRecord, child_count, 14);
 }
+size_t vizg_c_fields_Vizg_HirPayload(void) {
+    return F(Vizg_HirPayload, tag, 1) + F(Vizg_HirPayload, tag0, 2) +
+        F(Vizg_HirPayload, tag1, 3) + F(Vizg_HirPayload, flags, 4) +
+        F(Vizg_HirPayload, operand0, 5) + F(Vizg_HirPayload, operand1, 6) +
+        F(Vizg_HirPayload, operand2, 7) + F(Vizg_HirPayload, operand3, 8) +
+        F(Vizg_HirPayload, string0_ptr, 9) + F(Vizg_HirPayload, string0_len, 10) +
+        F(Vizg_HirPayload, string1_ptr, 11) + F(Vizg_HirPayload, string1_len, 12) +
+        F(Vizg_HirPayload, item_count, 13);
+}
+size_t vizg_c_fields_Vizg_HirPayloadItem(void) {
+    return F(Vizg_HirPayloadItem, tag, 1) + F(Vizg_HirPayloadItem, flags, 2) +
+        F(Vizg_HirPayloadItem, operand0, 3) + F(Vizg_HirPayloadItem, operand1, 4) +
+        F(Vizg_HirPayloadItem, string0_ptr, 5) + F(Vizg_HirPayloadItem, string0_len, 6) +
+        F(Vizg_HirPayloadItem, string1_ptr, 7) + F(Vizg_HirPayloadItem, string1_len, 8);
+}
+size_t vizg_c_fields_Vizg_HirTypeDetail(void) {
+    return F(Vizg_HirTypeDetail, id, 1) + F(Vizg_HirTypeDetail, kind, 2) +
+        F(Vizg_HirTypeDetail, builtin_kind, 3) + F(Vizg_HirTypeDetail, reserved, 4);
+}
+size_t vizg_c_fields_Vizg_HirFunctionSignature(void) {
+    return F(Vizg_HirFunctionSignature, type_id, 1) + F(Vizg_HirFunctionSignature, return_type_id, 2) +
+        F(Vizg_HirFunctionSignature, type_parameter_count, 3) + F(Vizg_HirFunctionSignature, flags, 4) +
+        F(Vizg_HirFunctionSignature, reserved, 5) + F(Vizg_HirFunctionSignature, parameter_count, 6);
+}
+size_t vizg_c_fields_Vizg_HirSignatureParameter(void) {
+    return F(Vizg_HirSignatureParameter, name_ptr, 1) + F(Vizg_HirSignatureParameter, name_len, 2) +
+        F(Vizg_HirSignatureParameter, type_id, 3) + F(Vizg_HirSignatureParameter, flags, 4) +
+        F(Vizg_HirSignatureParameter, reserved, 5);
+}
+size_t vizg_c_fields_Vizg_HirFunctionDetail(void) {
+    return F(Vizg_HirFunctionDetail, id, 1) + F(Vizg_HirFunctionDetail, entry_block_id, 2) +
+        F(Vizg_HirFunctionDetail, parameter_count, 3) + F(Vizg_HirFunctionDetail, flags, 4) +
+        F(Vizg_HirFunctionDetail, reserved, 5);
+}
+size_t vizg_c_fields_Vizg_HirFunctionParameter(void) {
+    return F(Vizg_HirFunctionParameter, binding_id, 1) + F(Vizg_HirFunctionParameter, type_id, 2) +
+        F(Vizg_HirFunctionParameter, argument_index, 3) + F(Vizg_HirFunctionParameter, origin_id, 4) +
+        F(Vizg_HirFunctionParameter, flags, 5) + F(Vizg_HirFunctionParameter, reserved, 6);
+}
+size_t vizg_c_fields_Vizg_HirBlockDetail(void) {
+    return F(Vizg_HirBlockDetail, id, 1) + F(Vizg_HirBlockDetail, parameter_count, 2);
+}
+size_t vizg_c_fields_Vizg_HirBlockParameter(void) {
+    return F(Vizg_HirBlockParameter, value_id, 1) + F(Vizg_HirBlockParameter, type_id, 2) +
+        F(Vizg_HirBlockParameter, origin_id, 3);
+}
+size_t vizg_c_fields_Vizg_HirOriginDetail(void) {
+    return F(Vizg_HirOriginDetail, id, 1) + F(Vizg_HirOriginDetail, module_id, 2) +
+        F(Vizg_HirOriginDetail, span_start, 3) + F(Vizg_HirOriginDetail, span_end, 4) +
+        F(Vizg_HirOriginDetail, original_syntax, 5) + F(Vizg_HirOriginDetail, lowering_rule, 6) +
+        F(Vizg_HirOriginDetail, type_id, 7) + F(Vizg_HirOriginDetail, parent_id, 8) +
+        F(Vizg_HirOriginDetail, synthetic_reason, 9) + F(Vizg_HirOriginDetail, symbol_module_id, 10) +
+        F(Vizg_HirOriginDetail, symbol_declaration_id, 11) + F(Vizg_HirOriginDetail, symbol_external, 12) +
+        F(Vizg_HirOriginDetail, flags, 13) + F(Vizg_HirOriginDetail, reserved, 14);
+}
+size_t vizg_c_fields_Vizg_HirSemanticIdentity(void) {
+    return F(Vizg_HirSemanticIdentity, declaration_module_id, 1) +
+        F(Vizg_HirSemanticIdentity, external_module_id, 2) +
+        F(Vizg_HirSemanticIdentity, external_symbol_id, 3) +
+        F(Vizg_HirSemanticIdentity, symbol_id, 4) +
+        F(Vizg_HirSemanticIdentity, declaration_id, 5) +
+        F(Vizg_HirSemanticIdentity, type_id, 6) +
+        F(Vizg_HirSemanticIdentity, namespace_kind, 7) +
+        F(Vizg_HirSemanticIdentity, declaration_external, 8) +
+        F(Vizg_HirSemanticIdentity, has_host_binding_id, 9) +
+        F(Vizg_HirSemanticIdentity, reserved, 10) +
+        F(Vizg_HirSemanticIdentity, host_binding_id, 11);
+}
+size_t vizg_c_fields_Vizg_HirModuleDetail(void) {
+    return F(Vizg_HirModuleDetail, module_id, 1) +
+        F(Vizg_HirModuleDetail, initialization_function_id, 2) +
+        F(Vizg_HirModuleDetail, dependency_count, 3) +
+        F(Vizg_HirModuleDetail, import_count, 4) +
+        F(Vizg_HirModuleDetail, export_count, 5);
+}
+size_t vizg_c_fields_Vizg_HirModuleDependency(void) {
+    return F(Vizg_HirModuleDependency, module_id, 1) +
+        F(Vizg_HirModuleDependency, initialization_required, 2) +
+        F(Vizg_HirModuleDependency, reserved, 3);
+}
+size_t vizg_c_fields_Vizg_HirModuleImport(void) {
+    return F(Vizg_HirModuleImport, local_binding_id, 1) +
+        F(Vizg_HirModuleImport, source_id, 2) +
+        F(Vizg_HirModuleImport, exported_name_ptr, 3) +
+        F(Vizg_HirModuleImport, exported_name_len, 4) +
+        F(Vizg_HirModuleImport, target, 5) +
+        F(Vizg_HirModuleImport, source_kind, 6) +
+        F(Vizg_HirModuleImport, type_only, 7) +
+        F(Vizg_HirModuleImport, reserved, 8);
+}
+size_t vizg_c_fields_Vizg_HirModuleExport(void) {
+    return F(Vizg_HirModuleExport, binding_id, 1) +
+        F(Vizg_HirModuleExport, entity_id, 2) +
+        F(Vizg_HirModuleExport, exported_name_ptr, 3) +
+        F(Vizg_HirModuleExport, exported_name_len, 4) +
+        F(Vizg_HirModuleExport, target, 5) +
+        F(Vizg_HirModuleExport, type_only, 6) +
+        F(Vizg_HirModuleExport, reserved, 7);
+}
+size_t vizg_c_fields_Vizg_HirBindingDetail(void) {
+    return F(Vizg_HirBindingDetail, id, 1) +
+        F(Vizg_HirBindingDetail, declaration_id, 2) +
+        F(Vizg_HirBindingDetail, initial_state, 3) +
+        F(Vizg_HirBindingDetail, declaration_module_id, 4) +
+        F(Vizg_HirBindingDetail, declaration_external, 5) +
+        F(Vizg_HirBindingDetail, has_host_binding_id, 6) +
+        F(Vizg_HirBindingDetail, reserved, 7) +
+        F(Vizg_HirBindingDetail, host_binding_id, 8);
+}
+size_t vizg_c_fields_Vizg_HirFunctionStorageDetail(void) {
+    return F(Vizg_HirFunctionStorageDetail, id, 1) +
+        F(Vizg_HirFunctionStorageDetail, capture_count, 2);
+}
+size_t vizg_c_fields_Vizg_HirFunctionCapture(void) {
+    return F(Vizg_HirFunctionCapture, local_binding_id, 1) +
+        F(Vizg_HirFunctionCapture, source_binding_id, 2) +
+        F(Vizg_HirFunctionCapture, source_kind, 3) +
+        F(Vizg_HirFunctionCapture, mode, 4);
+}
+size_t vizg_c_fields_Vizg_HirRegionDetail(void) {
+    return F(Vizg_HirRegionDetail, id, 1) +
+        F(Vizg_HirRegionDetail, function_id, 2) +
+        F(Vizg_HirRegionDetail, parent_region_id, 3) +
+        F(Vizg_HirRegionDetail, handler_block_id, 4) +
+        F(Vizg_HirRegionDetail, continuation_block_id, 5) +
+        F(Vizg_HirRegionDetail, origin_id, 6) +
+        F(Vizg_HirRegionDetail, kind, 7) +
+        F(Vizg_HirRegionDetail, protected_block_count, 8) +
+        F(Vizg_HirRegionDetail, flags, 9) +
+        F(Vizg_HirRegionDetail, reserved, 10);
+}
 
 uint32_t vizg_c_value_project_status_internal_error(void) { return VIZG_PROJECT_STATUS_INTERNAL_ERROR; }
 uint32_t vizg_c_value_limit_semantic_growth(void) { return VIZG_LIMIT_SEMANTIC_GROWTH; }
@@ -146,3 +355,6 @@ uint32_t vizg_c_value_external_type_object(void) { return VIZG_EXTERNAL_TYPE_OBJ
 uint8_t vizg_c_value_external_namespace_value(void) { return VIZG_EXTERNAL_NAMESPACE_VALUE; }
 uint8_t vizg_c_value_external_namespace_type(void) { return VIZG_EXTERNAL_NAMESPACE_TYPE; }
 uint8_t vizg_c_value_external_namespace_both(void) { return VIZG_EXTERNAL_NAMESPACE_BOTH; }
+uint32_t vizg_c_value_external_module_api_version(void) { return VIZG_EXTERNAL_MODULE_API_VERSION; }
+uint32_t vizg_c_value_external_declaration_type(void) { return VIZG_EXTERNAL_DECLARATION_TYPE; }
+uint16_t vizg_c_value_external_effect_unknown(void) { return VIZG_EXTERNAL_EFFECT_UNKNOWN; }

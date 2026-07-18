@@ -13,16 +13,42 @@ if (imports.length !== 0) {
 const expectedExports = [
   "memory",
   "vizg_abi_version",
+  "vizg_external_module_api_version",
   "vizg_hir_api_version",
+  "vizg_hir_binding_detail_at",
+  "vizg_hir_block_detail_at",
+  "vizg_hir_block_parameter_at",
+  "vizg_hir_detail_api_version",
+  "vizg_hir_function_capture_at",
+  "vizg_hir_function_completion_type",
+  "vizg_hir_function_detail_at",
+  "vizg_hir_function_parameter_at",
+  "vizg_hir_function_signature",
+  "vizg_hir_function_storage_detail_at",
+  "vizg_hir_module_dependency_at",
+  "vizg_hir_module_detail_at",
+  "vizg_hir_module_export_at",
+  "vizg_hir_module_import_at",
+  "vizg_hir_operation_at",
+  "vizg_hir_operation_item_at",
+  "vizg_hir_origin_detail_at",
+  "vizg_hir_payload_api_version",
   "vizg_hir_record_at",
+  "vizg_hir_signature_parameter_at",
   "vizg_hir_summary",
+  "vizg_hir_terminator_at",
+  "vizg_hir_terminator_item_at",
+  "vizg_hir_type_detail_at",
   "vizg_project_add_source",
   "vizg_project_analyze_source",
   "vizg_project_create",
   "vizg_project_destroy",
   "vizg_project_finish",
   "vizg_project_limit_kind",
+  "vizg_project_register_ambient_globals",
+  "vizg_project_register_ambient_globals_v2",
   "vizg_project_respond_external",
+  "vizg_project_respond_external_v2",
   "vizg_project_respond_failure",
   "vizg_project_respond_source",
   "vizg_project_result_diagnostic",
@@ -47,8 +73,17 @@ const { exports: api } = await WebAssembly.instantiate(module);
 if (api.vizg_abi_version() !== 1) {
   throw new Error(`unexpected ABI version: ${api.vizg_abi_version()}`);
 }
-if (api.vizg_hir_api_version() !== 1) {
+if (api.vizg_external_module_api_version() !== 2) {
+  throw new Error(`unexpected external-module API version: ${api.vizg_external_module_api_version()}`);
+}
+if (api.vizg_hir_api_version() !== 2) {
   throw new Error(`unexpected HIR ABI version: ${api.vizg_hir_api_version()}`);
+}
+if (api.vizg_hir_payload_api_version() !== 1) {
+  throw new Error(`unexpected HIR payload ABI version: ${api.vizg_hir_payload_api_version()}`);
+}
+if (api.vizg_hir_detail_api_version() !== 2) {
+  throw new Error(`unexpected HIR detail ABI version: ${api.vizg_hir_detail_api_version()}`);
 }
 const PAGE_BYTES = 64 * 1024;
 const WORKSPACE_BYTES = 8 * 1024 * 1024;

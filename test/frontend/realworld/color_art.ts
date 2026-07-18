@@ -26,7 +26,7 @@ export default function createColorArt() {
     for (let j = 0; j < art[i]!.length; j++) {
       line += `${(colors as any)[i % colors.red.length] || ""}${art[i]![j]}${colors.reset}`;
     }
-    console.log(line);
+    hostLogger.log(line);
   }
 
   return art;

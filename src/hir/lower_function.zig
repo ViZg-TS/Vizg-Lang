@@ -675,6 +675,50 @@ const Context = struct {
         return self.emitPlace(.{ .binding = try self.bindingForReference(symbol) });
     }
 
+    pub fn sourceHostMemberBinding(self: *Context, node_id: ast.NodeId) !?ids.BindingId {
+        const symbol = self.sourceHostMemberSymbol(node_id) orelse return null;
+        return try self.bindingForReference(symbol);
+    }
+
+    fn sourceHostSymbolForExpression(self: *const Context, node_id: ast.NodeId) ?binder.SymbolId {
+        const node = self.inputs.local.frontend.ast.node(node_id);
+        return switch (node.data) {
+            .Identifier => blk: {
+                const symbol_id = self.referenceSymbol(node_id) orelse break :blk null;
+                const symbol = self.inputs.local.frontend.bind.symbols[symbol_id];
+                break :blk if (symbol.host_bound) symbol_id else null;
+            },
+            .MemberExpression => |member| blk: {
+                if (member.optional) break :blk null;
+                const object_symbol = self.sourceHostSymbolForExpression(member.object) orelse break :blk null;
+                break :blk self.globalSourceHostSymbol(member.property, self.nodeType(node_id)) orelse
+                    self.ambientSelfSymbol(object_symbol, self.nodeType(node_id));
+            },
+            else => null,
+        };
+    }
+
+    fn sourceHostMemberSymbol(self: *const Context, node_id: ast.NodeId) ?binder.SymbolId {
+        if (self.inputs.local.frontend.ast.node(node_id).data != .MemberExpression) return null;
+        return self.sourceHostSymbolForExpression(node_id);
+    }
+
+    fn globalSourceHostSymbol(self: *const Context, name: []const u8, type_id: model.TypeId) ?binder.SymbolId {
+        for (self.inputs.local.frontend.bind.symbols) |symbol| {
+            if (symbol.host_bound and symbol.namespace == .value and
+                self.inputs.local.frontend.bind.scopes[symbol.scope].kind == .global and
+                std.mem.eql(u8, symbol.name, name) and self.symbolType(symbol.id) == type_id)
+                return symbol.id;
+        }
+        return null;
+    }
+
+    fn ambientSelfSymbol(self: *const Context, object_symbol: binder.SymbolId, type_id: model.TypeId) ?binder.SymbolId {
+        const symbol = self.inputs.local.frontend.bind.symbols[object_symbol];
+        if (symbol.kind == .ambient and self.symbolType(object_symbol) == type_id) return object_symbol;
+        return null;
+    }
+
     fn bindingForReference(self: *Context, symbol: binder.SymbolId) !ids.BindingId {
         if (self.scopeWithin(self.inputs.local.frontend.bind.symbols[symbol].scope))
             return self.mappedBinding(symbol) orelse error.MissingHirBinding;

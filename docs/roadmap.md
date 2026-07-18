@@ -83,9 +83,9 @@ and known limitations are in [`HIR_V1_AUDIT.md`](HIR_V1_AUDIT.md).
 ## Current Product Boundary: Contractual Maintenance
 
 ViZG ends at verified immutable HIR v1 and now enters contractual maintenance.
-Changes must preserve the frozen project ABI v1 and HIR API v1 contracts unless
-a deliberately versioned successor is approved. Primary development may move
-to VZed, which consumes public HIR instead of private frontend state.
+Changes must preserve the frozen project ABI v1 and version public HIR
+projection changes deliberately. Primary development may move to VZed, which
+consumes public HIR instead of private frontend state.
 
 ### Superseded portable-core closure records
 

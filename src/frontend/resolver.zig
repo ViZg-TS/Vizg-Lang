@@ -6,11 +6,7 @@ const tokens = @import("tokens.zig");
 
 const NodeId = ast_mod.NodeId;
 
-/// Hardcoded ambient globals (predeclared, no-stdlib style).
-/// Future: load from external declarations / lib files / `ambient_globals` option.
-const PredeclaredAmbients: []const []const u8 = &.{
-    "console",
-};
+const PredeclaredAmbients: []const []const u8 = &.{};
 
 pub const ReferenceId = u32;
 

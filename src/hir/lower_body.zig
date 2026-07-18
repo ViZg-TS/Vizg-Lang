@@ -73,6 +73,32 @@ const Lowerer = struct {
     labels: std.ArrayList(lower_control.LabelFrame) = .empty,
     catch_cleanup_depths: std.ArrayList(usize) = .empty,
 
+    /// Materialize HIR bindings for host-registered ambient globals before
+    /// lowering source declarations. Ambient symbols are injected into the
+    /// global scope by the binder with `ast.invalid_node` as their declaration,
+    /// so the AST-driven `predeclare` walk never reaches them; without this
+    /// step references to host values would fail with `MissingHirBinding`.
+    /// Like imports, host-bound values are live at function entry and cannot
+    /// be stored to from source.
+    fn predeclareHostBindings(self: *Lowerer) !void {
+        for (self.local.frontend.bind.symbols) |symbol| {
+            if (!symbol.host_bound or symbol.namespace != .value) continue;
+            const binding = try self.builder.makeId(ids.BindingId, self.builder.budget.usage.bindings);
+            try self.builder.appendBinding(&self.bindings, .{
+                .id = binding,
+                .name = try self.builder.copyString(symbol.name),
+                .kind = .import,
+                .type_id = self.symbolType(symbol.id),
+                .declaration = null,
+                .mutable = false,
+                .initial_state = .live_import,
+                .origin = .invalid,
+                .host_binding_id = symbol.host_binding_id,
+            });
+            try self.symbol_bindings.append(self.builder.allocator, .{ .symbol = symbol.id, .binding = binding });
+        }
+    }
+
     fn predeclare(self: *Lowerer, node_id: ast.NodeId) !void {
         const node = self.local.frontend.ast.node(node_id);
         switch (node.data) {
@@ -124,6 +150,7 @@ const Lowerer = struct {
                     const declarator = self.local.frontend.ast.node(declarator_id).data.VariableDeclarator;
                     if (declarator.type_annotation) |annotation| self.eraseTypeNode(annotation.root);
                     const symbol_id = self.symbolForDeclaration(declarator_id) orelse return error.MissingSemanticIdentity;
+                    if (self.local.frontend.bind.symbols[symbol_id].host_bound) continue;
                     const binding_id = try self.builder.makeId(ids.BindingId, self.builder.budget.usage.bindings);
                     const kind: model.HirBindingKind = switch (declaration.kind) {
                         .Keyword_var => .var_,
@@ -260,6 +287,7 @@ const Lowerer = struct {
                 for (declaration.declarations) |declarator_id| {
                     const declarator = self.local.frontend.ast.node(declarator_id).data.VariableDeclarator;
                     const symbol_id = self.symbolForDeclaration(declarator_id) orelse return error.MissingSemanticIdentity;
+                    if (self.local.frontend.bind.symbols[symbol_id].host_bound) continue;
                     const binding_id = self.bindingForSymbol(symbol_id) orelse return error.MissingHirBinding;
                     if (declarator.init) |initializer| {
                         const value = try self.lowerExpression(initializer);
@@ -408,6 +436,50 @@ const Lowerer = struct {
         const symbol_id = self.referenceSymbol(node_id) orelse return error.UnresolvedIdentifier;
         const binding_id = self.bindingForSymbol(symbol_id) orelse return error.MissingHirBinding;
         return self.emitPlace(.{ .binding = binding_id });
+    }
+
+    pub fn sourceHostMemberBinding(self: *const Lowerer, node_id: ast.NodeId) !?ids.BindingId {
+        const symbol = self.sourceHostMemberSymbol(node_id) orelse return null;
+        return self.bindingForSymbol(symbol);
+    }
+
+    fn sourceHostSymbolForExpression(self: *const Lowerer, node_id: ast.NodeId) ?binder.SymbolId {
+        const node = self.local.frontend.ast.node(node_id);
+        return switch (node.data) {
+            .Identifier => blk: {
+                const symbol_id = self.referenceSymbol(node_id) orelse break :blk null;
+                const symbol = self.local.frontend.bind.symbols[symbol_id];
+                break :blk if (symbol.host_bound) symbol_id else null;
+            },
+            .MemberExpression => |member| blk: {
+                if (member.optional) break :blk null;
+                const object_symbol = self.sourceHostSymbolForExpression(member.object) orelse break :blk null;
+                break :blk self.globalSourceHostSymbol(member.property, self.nodeType(node_id)) orelse
+                    self.ambientSelfSymbol(object_symbol, self.nodeType(node_id));
+            },
+            else => null,
+        };
+    }
+
+    fn sourceHostMemberSymbol(self: *const Lowerer, node_id: ast.NodeId) ?binder.SymbolId {
+        if (self.local.frontend.ast.node(node_id).data != .MemberExpression) return null;
+        return self.sourceHostSymbolForExpression(node_id);
+    }
+
+    fn globalSourceHostSymbol(self: *const Lowerer, name: []const u8, type_id: model.TypeId) ?binder.SymbolId {
+        for (self.local.frontend.bind.symbols) |symbol| {
+            if (symbol.host_bound and symbol.namespace == .value and
+                self.local.frontend.bind.scopes[symbol.scope].kind == .global and
+                std.mem.eql(u8, symbol.name, name) and self.symbolType(symbol.id) == type_id)
+                return symbol.id;
+        }
+        return null;
+    }
+
+    fn ambientSelfSymbol(self: *const Lowerer, object_symbol: binder.SymbolId, type_id: model.TypeId) ?binder.SymbolId {
+        const symbol = self.local.frontend.bind.symbols[object_symbol];
+        if (symbol.kind == .ambient and self.symbolType(object_symbol) == type_id) return object_symbol;
+        return null;
     }
 
     pub fn booleanType(self: *const Lowerer) model.TypeId {
@@ -628,6 +700,7 @@ pub fn lower(
     var lowerer: Lowerer = .{ .builder = builder, .anf = &anf, .module = module, .local = local, .project_module = project_module, .function_id = function_id };
     try lowerer.bindings.appendSlice(builder.allocator, imported_bindings);
     try lowerer.symbol_bindings.appendSlice(builder.allocator, imported_symbols);
+    try lowerer.predeclareHostBindings();
     try lowerer.predeclare(local.frontend.ast.root);
     try lowerer.lowerFunctions();
     try lowerer.emitHoists();

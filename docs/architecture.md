@@ -52,6 +52,14 @@ supports one imported class name in both `new ExternalClass()` and an
 `VIZG_EXTERNAL_NAMESPACE_VALUE`, `VIZG_EXTERNAL_NAMESPACE_TYPE`, and
 `VIZG_EXTERNAL_NAMESPACE_BOTH`.
 
+The additive external-module API v2 carries the rest of the origin-neutral
+publication contract needed by HIR: a stable external symbol identity,
+declaration kind, portable function signature, and effect flags. Hosts discover
+the extension through `vizg_external_module_api_version()` and answer with
+`vizg_project_respond_external_v2()`. The original external response remains
+available unchanged; neither form accepts filesystem, header, library, linker,
+or other origin policy.
+
 `Project` is one-shot. A source identity is supplied once, `step()` analyzes
 reachable modules and returns one pending request at a time, every request is
 answered once, and `finish()` is terminal. There are no source revisions or
@@ -77,6 +85,7 @@ Lifecycle:
 
 ```txt
 create
+  -> optionally register ambient globals
   -> add source(s)
   -> step / respond exactly once per request
   -> step complete
@@ -84,6 +93,13 @@ create
   -> read immutable result views
   -> destroy project
 ```
+
+Ambient globals must be registered before any source is added. ViZG copies the
+borrowed descriptors into project-owned storage. The base registration call
+carries coarse type metadata; the V2 call adds structural member descriptors.
+Host-assigned identities flow through HIR detail API v2, and descriptor-declared
+readonly self references preserve identity during HIR lowering without adding
+general property or runtime semantics.
 
 `finish()` returns a project-owned immutable view. Repeated calls return the
 same view without allocation. The view becomes invalid when the project is
@@ -93,6 +109,17 @@ file function, or convenience single-source ABI.
 The result surface provides summary, modules, canonical diagnostics, graph
 edges, semantic imports, and semantic exports. Strings and spans returned from a
 result remain borrowed from the project until destruction.
+
+The official ABI layout remains v1, while the read-only HIR record projection
+is independently versioned. HIR record API v2 preserves the v1 struct and
+lifecycle but reports an instruction's optional result `ValueId` in
+`secondary_id`; v1 requests remain accepted and retain the original parent
+function interpretation. The parent function is derivable from the instruction
+parent block, so v2 exposes the otherwise unavailable definition identity.
+The separately versioned HIR detail projection preserves wrapped public
+function return types and also exposes each function body's completion type.
+For async functions and generators this lets downstream consumers validate
+`return` instructions without depending on ViZg's private type-store layout.
 
 Finalization computes the closure reachable from submitted roots through
 resolved local import edges. Only that closure is validated and retained in the
@@ -150,6 +177,7 @@ The official export table is:
 
 ```txt
 vizg_abi_version
+vizg_external_module_api_version
 vizg_project_workspace_alignment
 vizg_project_workspace_overhead
 vizg_project_create
@@ -159,6 +187,7 @@ vizg_project_add_source
 vizg_project_step
 vizg_project_respond_source
 vizg_project_respond_external
+vizg_project_respond_external_v2
 vizg_project_respond_failure
 vizg_project_finish
 vizg_project_result_summary
