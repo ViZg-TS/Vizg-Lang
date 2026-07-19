@@ -37,6 +37,7 @@ pub const DiagnosticCode = enum {
     invalid_argument_count,
     invalid_argument_type,
     parse_recursion_limit_reached,
+    global_ambient_collision,
 };
 
 pub const DiagnosticPhase = enum {
@@ -181,6 +182,7 @@ pub fn diagnosticCodeId(code: DiagnosticCode) []const u8 {
         .invalid_argument_count => "VZG6008",
         .invalid_argument_type => "VZG6009",
         .parse_recursion_limit_reached => "VZG2003",
+        .global_ambient_collision => "VZG8001",
     };
 }
 
@@ -214,5 +216,6 @@ pub fn diagnosticCodeName(code: DiagnosticCode) []const u8 {
         .invalid_argument_count => "invalid_argument_count",
         .invalid_argument_type => "invalid_argument_type",
         .parse_recursion_limit_reached => "parse_recursion_limit_reached",
+        .global_ambient_collision => "global_ambient_collision",
     };
 }

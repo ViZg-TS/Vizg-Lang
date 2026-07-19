@@ -416,6 +416,7 @@ pub fn build(b: *std.Build) void {
         \\vizg_hir_terminator_at
         \\vizg_hir_terminator_item_at
         \\vizg_hir_type_detail_at
+        \\vizg_project_add_global_root
         \\vizg_project_add_source
         \\vizg_project_analyze_source
         \\vizg_project_create

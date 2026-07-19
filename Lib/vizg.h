@@ -293,6 +293,7 @@ enum {
     VIZG_DIAGNOSTIC_INVALID_INDEX = 6007,
     VIZG_DIAGNOSTIC_INVALID_ARGUMENT_COUNT = 6008,
     VIZG_DIAGNOSTIC_INVALID_ARGUMENT_TYPE = 6009,
+    VIZG_DIAGNOSTIC_GLOBAL_AMBIENT_COLLISION = 8001,
 };
 
 typedef uint32_t Vizg_ExternalType;
@@ -1005,6 +1006,10 @@ void vizg_project_destroy(Vizg_Project *project);
  * project calls reset this value to VIZG_LIMIT_NONE. */
 Vizg_LimitKind vizg_project_limit_kind(Vizg_Project *project);
 Vizg_ProjectStatus vizg_project_add_source(
+    Vizg_Project *project, const Vizg_ProjectSource *source);
+/* Adds the designated module whose named exports become source globals in
+ * application roots. This module is analyzed before ordinary project roots. */
+Vizg_ProjectStatus vizg_project_add_global_root(
     Vizg_Project *project, const Vizg_ProjectSource *source);
 Vizg_ProjectStatus vizg_project_register_ambient_globals(
     Vizg_Project *project, const Vizg_AmbientGlobal *globals, size_t count);

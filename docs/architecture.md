@@ -86,6 +86,7 @@ Lifecycle:
 ```txt
 create
   -> optionally register ambient globals
+  -> optionally add one source-backed global root
   -> add source(s)
   -> step / respond exactly once per request
   -> step complete
@@ -100,6 +101,13 @@ carries coarse type metadata; the V2 call adds structural member descriptors.
 Host-assigned identities flow through HIR detail API v2, and descriptor-declared
 readonly self references preserve identity during HIR lowering without adding
 general property or runtime semantics.
+
+A source-backed global root is submitted before ordinary project roots and is
+analyzed as source rather than converted into host-owned ambient descriptors.
+Its source identity is retained in semantic and HIR dependency records. The
+additive `vizg_project_add_global_root` entry point exposes the same operation
+through the C lifecycle; ViZG does not assign runtime or platform meaning to
+the declarations.
 
 `finish()` returns a project-owned immutable view. Repeated calls return the
 same view without allocation. The view becomes invalid when the project is

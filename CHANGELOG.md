@@ -8,6 +8,15 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Added a source-backed global-root project operation and the additive
+  `vizg_project_add_global_root` C entry point. Global declarations remain
+  ordinary source-owned declarations with their source identity preserved in
+  semantic and HIR dependency records; runtime and platform policy remain with
+  the consumer.
+- Added ambient-collision detection to `deriveGlobalExports` so a global
+  source module export that shadows a pre-registered ambient global reports
+  the `global_ambient_collision` diagnostic (`VZG8001`) and leaves the ambient
+  binding intact instead of registering a duplicate source global.
 - Added source host binding registration through the Zig and C project APIs.
   Standard declarations can now remain TypeScript source-owned while retaining
   stable HIR host identity; static aliases with an exact matching `TypeId`
