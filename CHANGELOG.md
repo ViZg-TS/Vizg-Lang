@@ -13,6 +13,11 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
   ordinary source-owned declarations with their source identity preserved in
   semantic and HIR dependency records; runtime and platform policy remain with
   the consumer.
+- Fixed the `vizg_project_add_global_root` error mapping so late registration
+  after a source has been added returns `VIZG_PROJECT_STATUS_INVALID_STATE`
+  instead of `VIZG_PROJECT_STATUS_INTERNAL_ERROR`, matching the existing
+  `DuplicateGlobalRoot` mapping. Added native and wasm ABI lifecycle coverage
+  for the additive entry point.
 - Added ambient-collision detection to `deriveGlobalExports` so a global
   source module export that shadows a pre-registered ambient global reports
   the `global_ambient_collision` diagnostic (`VZG8001`) and leaves the ambient

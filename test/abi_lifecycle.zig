@@ -1696,3 +1696,130 @@ test "official ABI v1 reports parse-depth limit exactly and clears stale kinds" 
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), c.vizg_project_add_source(project, null));
     try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_NONE), c.vizg_project_limit_kind(project));
 }
+
+// ---------------------------------------------------------------------------
+// Goal 013 — ABI lifecycle coverage for vizg_project_add_global_root.
+//
+// The additive `vizg_project_add_global_root` entry point designates one
+// source module whose named exports are visible as globals in application
+// modules. These tests exercise the happy path (global root + app root →
+// finish OK), the lifecycle ordering invariants (late registration after a
+// source, duplicate global root, and post-finish are rejected), and the
+// host-input validation that must reject hostile pointers without state
+// mutation. They mirror the existing `vizg_project_add_source` coverage.
+// ---------------------------------------------------------------------------
+
+test "official ABI v1 add_global_root: global root exports reach an application root" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var global_root = projectSource(0, "std.ts",
+        \\export const console = {
+        \\    log: (value: number) => { /* native bridge */ },
+        \\};
+    , true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_global_root(project, &global_root));
+
+    var app_root = projectSource(1, "main.ts", "console.log(42);", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &app_root));
+
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(project, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STEP_COMPLETE), step.kind);
+
+    const result = try finishProject(project);
+    var summary: c.Vizg_ProjectResultSummary = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
+    // Both the global source module and the application module are analyzed.
+    try std.testing.expectEqual(@as(usize, 2), summary.module_count);
+    // The application module has no exports; the global root's `console`
+    // export is a source global, not a project export. Reachability is proven
+    // by the absence of failures: `console` resolved without `cannot_find_name`.
+    try std.testing.expectEqual(@as(u8, 0), summary.is_partial);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_syntax_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_semantic_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_project_errors);
+    try std.testing.expectEqual(@as(u8, 0), summary.has_module_failures);
+
+    // Both modules are present in the result, ordered by analysis (global root
+    // is analyzed before application roots).
+    var first: c.Vizg_ProjectModuleInfo = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_module(result, 0, &first));
+    try std.testing.expectEqual(@as(u64, 0), first.module_id);
+    var second: c.Vizg_ProjectModuleInfo = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_module(result, 1, &second));
+    try std.testing.expectEqual(@as(u64, 1), second.module_id);
+}
+
+test "official ABI v1 add_global_root: late registration after add_source is rejected" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    // An application root must be added after the global root. Supplying any
+    // source first makes the global root a late registration.
+    var app_root = projectSource(1, "main.ts", "export {};", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &app_root));
+
+    var global_root = projectSource(0, "std.ts", "export const console = {};", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_project_add_global_root(project, &global_root));
+}
+
+test "official ABI v1 add_global_root: duplicate global root is rejected" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var global_root = projectSource(0, "std.ts", "export const console = {};", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_global_root(project, &global_root));
+
+    var duplicate = projectSource(5, "other.ts", "export const other = 1;", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_project_add_global_root(project, &duplicate));
+}
+
+test "official ABI v1 add_global_root: rejected after finish" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var global_root = projectSource(0, "std.ts", "export const console = {};", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_global_root(project, &global_root));
+    var app_root = projectSource(1, "main.ts", "export {};", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &app_root));
+    _ = try finishProject(project);
+
+    var late = projectSource(7, "late.ts", "export const late = 1;", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_project_add_global_root(project, &late));
+}
+
+test "official ABI v1 add_global_root: validates hostile inputs without state mutation" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var global_root = projectSource(0, "std.ts", "export const console = {};", true);
+    try expectInvalid(c.vizg_project_add_global_root(null, &global_root));
+    try expectInvalid(c.vizg_project_add_global_root(project, null));
+
+    // A source descriptor placed inside the workspace must be rejected. The
+    // shared alignment/range validation is also exercised for `add_source`
+    // and the misaligned-input case is covered in the wasm ABI host test.
+    const workspace_source: *c.Vizg_ProjectSource = @ptrCast(@alignCast(workspace.words.ptr + workspace.words.len - 32));
+    workspace_source.* = global_root;
+    try expectInvalid(c.vizg_project_add_global_root(project, workspace_source));
+
+    // Out-of-bounds nested source bytes must be rejected without state change.
+    global_root.source_ptr = @ptrFromInt(std.math.maxInt(usize));
+    global_root.source_len = 2;
+    try expectInvalid(c.vizg_project_add_global_root(project, &global_root));
+
+    // After all hostile inputs, a valid global root still succeeds.
+    global_root = projectSource(0, "std.ts", "export const console = {};", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_global_root(project, &global_root));
+}

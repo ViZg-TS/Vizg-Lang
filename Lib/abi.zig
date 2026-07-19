@@ -889,6 +889,7 @@ fn statusFromError(owned: *OwnedProject, err: anyerror) Vizg_ProjectStatus {
         error.DuplicateResponse,
         error.DuplicateModule,
         error.DuplicateGlobalRoot,
+        error.GlobalRootLateRegistration,
         error.UnknownImporter,
         error.UnknownModule,
         error.SourceNotSupplied,

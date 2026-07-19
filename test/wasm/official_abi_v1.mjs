@@ -34,11 +34,15 @@ const expectedExports = [
   "vizg_hir_origin_detail_at",
   "vizg_hir_payload_api_version",
   "vizg_hir_record_at",
+  "vizg_hir_region_count",
+  "vizg_hir_region_detail_at",
+  "vizg_hir_region_protected_block_at",
   "vizg_hir_signature_parameter_at",
   "vizg_hir_summary",
   "vizg_hir_terminator_at",
   "vizg_hir_terminator_item_at",
   "vizg_hir_type_detail_at",
+  "vizg_project_add_global_root",
   "vizg_project_add_source",
   "vizg_project_analyze_source",
   "vizg_project_create",
@@ -47,6 +51,7 @@ const expectedExports = [
   "vizg_project_limit_kind",
   "vizg_project_register_ambient_globals",
   "vizg_project_register_ambient_globals_v2",
+  "vizg_project_register_source_host_bindings",
   "vizg_project_respond_external",
   "vizg_project_respond_external_v2",
   "vizg_project_respond_failure",
@@ -89,6 +94,7 @@ const PAGE_BYTES = 64 * 1024;
 const WORKSPACE_BYTES = 8 * 1024 * 1024;
 const STATUS_OK = 0;
 const STATUS_INVALID_ARGUMENT = 1;
+const STATUS_INVALID_STATE = 3;
 const STATUS_LIMIT_EXCEEDED = 4;
 const LIMIT_PARSE_DEPTH = 9;
 const STEP_COMPLETE = 0;
@@ -578,4 +584,86 @@ function expectNoTrap(operation, callback) {
   ), "external respond_external");
   if (host.step(project).kind !== STEP_COMPLETE) throw new Error("external did not complete");
   host.finish(project, 1, false);
+}
+
+// vizg_project_add_global_root designates one source module whose named
+// exports are visible as globals in application modules. The happy path must
+// analyze both the global root and the application root, and the lifecycle
+// invariants (late registration, duplicate, post-finish) and host-input
+// validation must mirror vizg_project_add_source.
+{
+  const host = beginFlow();
+  const project = host.createProject();
+  check(api.vizg_project_add_global_root(
+    project,
+    host.writeSource(0, "std.ts", "export const console = { log: (v: number) => { /* native */ } };", true),
+  ), "global_root add_global_root");
+  check(api.vizg_project_add_source(
+    project,
+    host.writeSource(1, "main.ts", "console.log(42);", true),
+  ), "global_root app add_source");
+  if (host.step(project).kind !== STEP_COMPLETE) throw new Error("global_root did not complete");
+  host.finish(project, 2, false);
+}
+
+{
+  const host = beginFlow();
+  const project = host.createProject();
+  let end = api.memory.buffer.byteLength;
+  const scratch = host.alloc(128, 8);
+
+  expectInvalid("add_global_root null handle", () => api.vizg_project_add_global_root(0, scratch));
+  expectInvalid("add_global_root null input", () => api.vizg_project_add_global_root(project, 0));
+  expectInvalid("add_global_root out-of-bounds input", () => api.vizg_project_add_global_root(project, end));
+  expectInvalid("add_global_root near-end input", () => api.vizg_project_add_global_root(project, end - 2));
+  expectInvalid("add_global_root misaligned input", () => api.vizg_project_add_global_root(project, scratch + 1));
+  expectInvalid("add_global_root workspace input", () => api.vizg_project_add_global_root(project, host.workspace));
+
+  let source = host.writeSource(0, "hostile.ts", "export const console = {};", true);
+  host.view().setUint32(source + 16, end, true);
+  expectInvalid("add_global_root out-of-bounds nested source", () => api.vizg_project_add_global_root(project, source));
+  host.view().setUint32(source + 16, 0xfffffffe, true);
+  host.view().setUint32(source + 20, 4, true);
+  expectInvalid("add_global_root overflowing nested source", () => api.vizg_project_add_global_root(project, source));
+  host.view().setUint32(source + 16, host.workspace, true);
+  host.view().setUint32(source + 20, 1, true);
+  expectInvalid("add_global_root workspace nested source", () => api.vizg_project_add_global_root(project, source));
+
+  source = host.writeSource(0, "std.ts", "export const console = {};", true);
+  check(api.vizg_project_add_global_root(project, source), "global_root hostile add_global_root after invalid inputs");
+  api.vizg_project_destroy(project);
+}
+
+{
+  const host = beginFlow();
+  const project = host.createProject();
+  check(api.vizg_project_add_source(
+    project,
+    host.writeSource(1, "main.ts", "export {};", true),
+  ), "global_root late add_source first");
+  const status = api.vizg_project_add_global_root(
+    project,
+    host.writeSource(0, "std.ts", "export const console = {};", true),
+  );
+  if (status !== STATUS_INVALID_STATE) {
+    throw new Error(`global_root late registration returned ${status}, expected INVALID_STATE`);
+  }
+  api.vizg_project_destroy(project);
+}
+
+{
+  const host = beginFlow();
+  const project = host.createProject();
+  check(api.vizg_project_add_global_root(
+    project,
+    host.writeSource(0, "std.ts", "export const console = {};", true),
+  ), "global_root duplicate first");
+  const status = api.vizg_project_add_global_root(
+    project,
+    host.writeSource(5, "other.ts", "export const other = 1;", true),
+  );
+  if (status !== STATUS_INVALID_STATE) {
+    throw new Error(`global_root duplicate returned ${status}, expected INVALID_STATE`);
+  }
+  api.vizg_project_destroy(project);
 }
