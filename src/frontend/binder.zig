@@ -65,6 +65,17 @@ pub const Symbol = struct {
     type_metadata: ?contracts.ExternalType = null,
     /// Borrowed structural members owned by the enclosing project.
     ambient_members: []const contracts.AmbientMember = &.{},
+    /// Source module/export backing a project-injected global. These globals
+    /// participate in ordinary module linking and are never host bindings.
+    source_module_id: ?contracts.ModuleId = null,
+    source_export_name: []const u8 = "",
+};
+
+pub const SourceGlobal = struct {
+    name: []const u8,
+    namespace: contracts.ExternalNamespace,
+    source_module_id: contracts.ModuleId,
+    source_export_name: []const u8,
 };
 
 pub const NodeSymbol = struct {
@@ -125,6 +136,7 @@ const Binder = struct {
     exports: std.ArrayList(ExportRecord) = .empty,
     diagnostic_list: diagnostics.LimitedList = .{},
     ambient_globals: []const contracts.AmbientGlobal = &.{},
+    source_globals: []const SourceGlobal = &.{},
     source_host_bindings: []const contracts.SourceHostBinding = &.{},
 
     fn bind(self: *Binder) !BindResult {
@@ -132,6 +144,10 @@ const Binder = struct {
         for (self.ambient_globals) |ambient| {
             if (ambient.namespace.value) _ = try self.declareAmbient(global_scope, ambient, .value);
             if (ambient.namespace.type) _ = try self.declareAmbient(global_scope, ambient, .type);
+        }
+        for (self.source_globals) |global| {
+            if (global.namespace.value) _ = try self.declareSourceGlobal(global_scope, global, .value);
+            if (global.namespace.type) _ = try self.declareSourceGlobal(global_scope, global, .type);
         }
         try self.bindNode(self.ast.root, global_scope);
 
@@ -539,6 +555,25 @@ const Binder = struct {
         return id;
     }
 
+    fn declareSourceGlobal(self: *Binder, scope_id: ScopeId, global: SourceGlobal, namespace: SymbolNamespace) !SymbolId {
+        const scope = &self.scopes.items[@intCast(scope_id)];
+        const id: SymbolId = @intCast(self.symbols.items.len);
+        try self.symbols.append(self.allocator, .{
+            .id = id,
+            .name = global.name,
+            .kind = .ambient,
+            .namespace = namespace,
+            .scope = scope_id,
+            .declaration = ast_mod.invalid_node,
+            .span = .{ .start = 0, .end = 0, .line = 0, .column = 0 },
+            .type_metadata = .any,
+            .source_module_id = global.source_module_id,
+            .source_export_name = global.source_export_name,
+        });
+        try scope.symbols.append(self.allocator, id);
+        return id;
+    }
+
     fn complementaryAccessors(self: *const Binder, existing: Symbol, kind: SymbolKind, declaration: NodeId) bool {
         if (existing.kind != .method or kind != .method) return false;
         const first = switch (self.ast.node(existing.declaration).data) {
@@ -598,15 +633,16 @@ const Binder = struct {
 };
 
 pub fn bind(allocator: std.mem.Allocator, tree: ast_mod.Ast) !BindResult {
-    return bindWithLimit(allocator, tree, &.{}, &.{}, std.math.maxInt(usize));
+    return bindWithLimit(allocator, tree, &.{}, &.{}, &.{}, std.math.maxInt(usize));
 }
 
-pub fn bindWithLimit(allocator: std.mem.Allocator, tree: ast_mod.Ast, ambient_globals: []const contracts.AmbientGlobal, source_host_bindings: []const contracts.SourceHostBinding, max_diagnostics: usize) !BindResult {
+pub fn bindWithLimit(allocator: std.mem.Allocator, tree: ast_mod.Ast, ambient_globals: []const contracts.AmbientGlobal, source_globals: []const SourceGlobal, source_host_bindings: []const contracts.SourceHostBinding, max_diagnostics: usize) !BindResult {
     var binder = Binder{
         .allocator = allocator,
         .ast = tree,
         .diagnostic_list = diagnostics.LimitedList.init(max_diagnostics),
         .ambient_globals = ambient_globals,
+        .source_globals = source_globals,
         .source_host_bindings = source_host_bindings,
     };
     return binder.bind();

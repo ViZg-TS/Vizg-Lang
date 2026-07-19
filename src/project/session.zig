@@ -106,6 +106,10 @@ pub const Project = struct {
     finished: bool = false,
     finish_result: ?FinishResult = null,
     ambient_globals: std.ArrayList(contracts.AmbientGlobal) = .empty,
+    source_globals: std.ArrayList(binder.SourceGlobal) = .empty,
+    global_root: ?contracts.ModuleId = null,
+    global_exports_derived: bool = false,
+    global_derivation_diagnostics: std.ArrayList(ProjectDiagnostic) = .empty,
     source_host_bindings: std.ArrayList(contracts.SourceHostBinding) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Project {
@@ -138,6 +142,16 @@ pub const Project = struct {
             self.allocator.free(g.members);
         }
         self.ambient_globals.deinit(self.allocator);
+        for (self.source_globals.items) |global| {
+            self.allocator.free(global.name);
+            self.allocator.free(global.source_export_name);
+        }
+        self.source_globals.deinit(self.allocator);
+        for (self.global_derivation_diagnostics.items) |item| {
+            self.allocator.free(item.message);
+            self.allocator.free(item.logical_name);
+        }
+        self.global_derivation_diagnostics.deinit(self.allocator);
         for (self.source_host_bindings.items) |binding| self.allocator.free(binding.name);
         self.source_host_bindings.deinit(self.allocator);
         self.graph.deinit();
@@ -185,6 +199,17 @@ pub const Project = struct {
         defer self.debugAssertInvariants();
         try self.ensureOpen();
         try self.submit(source, true);
+    }
+
+    /// Designate one source module whose named exports are visible as globals
+    /// in application modules. The exports remain ordinary live module imports.
+    pub fn addGlobalRoot(self: *Project, source: contracts.ModuleSource) !void {
+        defer self.debugAssertInvariants();
+        try self.ensureOpen();
+        if (self.global_root != null) return error.DuplicateGlobalRoot;
+        if (self.modules.items.len != 0) return error.GlobalRootLateRegistration;
+        try self.submit(source, true);
+        self.global_root = source.id;
     }
 
     /// Register ambient globals (e.g. a host clock) before any
@@ -538,6 +563,7 @@ pub const Project = struct {
             },
         }, .{
             .ambient_globals = self.ambient_globals.items,
+            .source_globals = if (self.isStandardModule(id)) &.{} else self.source_globals.items,
             .source_host_bindings = self.source_host_bindings.items,
         }, .{
             .max_types = self.limits.max_semantic_types,
@@ -564,6 +590,10 @@ pub const Project = struct {
     /// Analyze every supplied or previously failed module. Completed modules
     /// remain available if a later module fails.
     fn analyze(self: *Project) !void {
+        if (self.global_root) |global_root| {
+            _ = try self.analyzeModule(global_root);
+            if (!self.global_exports_derived) try self.deriveGlobalExports(global_root);
+        }
         var index: usize = 0;
         while (index < self.modules.items.len) : (index += 1) {
             const module = &self.modules.items[index];
@@ -571,6 +601,110 @@ pub const Project = struct {
                 _ = try self.analyzeModule(module.id);
             }
         }
+    }
+
+    fn deriveGlobalExports(self: *Project, global_root: contracts.ModuleId) !void {
+        const module = self.find(global_root) orelse return error.UnknownModule;
+        const result = module.semantic_result orelse return error.SourceNotSupplied;
+        const logical_name = if (module.source) |source| source.logical_name else "";
+        for (result.frontend.bind.module.exports) |exported| {
+            if (std.mem.eql(u8, exported.name, "default")) continue;
+            const namespace: contracts.ExternalNamespace = if (exported.type_only)
+                .{ .type = true }
+            else
+                .{ .value = true };
+            const span = result.frontend.ast.node(exported.node).span;
+            // A derived global that collides with an ambient global of the same
+            // name and namespace is a configuration error (section 10.6): report
+            // a blocking diagnostic and do not register the source global, so
+            // the ambient binding is not silently overridden.
+            var ambient_collision = false;
+            for (self.ambient_globals.items) |ambient| {
+                const overlap = (namespace.value and ambient.namespace.value) or
+                    (namespace.type and ambient.namespace.type);
+                if (overlap and std.mem.eql(u8, ambient.name, exported.name)) {
+                    ambient_collision = true;
+                    break;
+                }
+            }
+            if (ambient_collision) {
+                try self.appendGlobalDerivationDiagnostic(.{
+                    .module_id = global_root,
+                    .phase = .project,
+                    .severity = .@"error",
+                    .code = .global_ambient_collision,
+                    .message = "global export collides with a registered ambient global of the same name and namespace",
+                    .logical_name = logical_name,
+                    .span = span,
+                });
+                continue;
+            }
+            // Duplicate named exports within the global source module are
+            // already reported by the binder as `duplicate_export`. The dedup
+            // here only prevents double-registration of the same source global;
+            // it never silences the binder diagnostic.
+            var duplicate = false;
+            for (self.source_globals.items) |existing| {
+                if (existing.namespace.supports(exported.type_only) and std.mem.eql(u8, existing.name, exported.name)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            const name = try self.allocator.dupe(u8, exported.name);
+            errdefer self.allocator.free(name);
+            const export_name = try self.allocator.dupe(u8, exported.name);
+            errdefer self.allocator.free(export_name);
+            try self.source_globals.append(self.allocator, .{
+                .name = name,
+                .namespace = namespace,
+                .source_module_id = global_root,
+                .source_export_name = export_name,
+            });
+        }
+        self.global_exports_derived = true;
+    }
+
+    /// Append a project diagnostic produced while deriving global exports.
+    /// These diagnostics survive between analysis steps and are merged into
+    /// the canonical project diagnostic list during `finish`. Deduplicates by
+    /// identity so repeated derivation attempts cannot duplicate a report.
+    fn appendGlobalDerivationDiagnostic(self: *Project, candidate: ProjectDiagnostic) !void {
+        for (self.global_derivation_diagnostics.items) |existing| {
+            if (projectDiagnosticsEqual(existing, candidate)) return;
+        }
+        const message = try self.allocator.dupe(u8, candidate.message);
+        errdefer self.allocator.free(message);
+        const logical_name = try self.allocator.dupe(u8, candidate.logical_name);
+        errdefer self.allocator.free(logical_name);
+        var owned = candidate;
+        owned.message = message;
+        owned.logical_name = logical_name;
+        try self.global_derivation_diagnostics.append(self.allocator, owned);
+    }
+
+    fn isStandardModule(self: *const Project, id: contracts.ModuleId) bool {
+        const global_root = self.global_root orelse return false;
+        if (id == global_root) return true;
+        var pending: std.ArrayList(contracts.ModuleId) = .empty;
+        defer pending.deinit(self.allocator);
+        pending.append(self.allocator, global_root) catch return false;
+        var index: usize = 0;
+        while (index < pending.items.len) : (index += 1) {
+            const current = pending.items[index];
+            for (self.graph.edges.items) |edge| {
+                if (edge.importer != current or edge.state != .resolved) continue;
+                const target = edge.target orelse continue;
+                if (target == id) return true;
+                var seen = false;
+                for (pending.items) |queued| if (queued == target) {
+                    seen = true;
+                    break;
+                };
+                if (!seen) pending.append(self.allocator, target) catch return false;
+            }
+        }
+        return false;
     }
 
     fn isReachable(self: *const Project, id: contracts.ModuleId) bool {
@@ -857,6 +991,38 @@ pub const Project = struct {
             }
         }
 
+        for (graph_modules.items) |module| {
+            for (module.result.bind.symbols) |symbol| {
+                const source_module_id = symbol.source_module_id orelse continue;
+                const target = findSemanticModule(graph_modules.items, source_module_id.value()) orelse continue;
+                const edge_id: modules_mod.graph.ImportEdgeId = @intCast(graph_edges.items.len);
+                try graph_edges.append(allocator, .{
+                    .id = edge_id,
+                    .project_edge_index = std.math.maxInt(usize),
+                    .from = module.id,
+                    .to = target.id,
+                    .specifier = target.path,
+                    .kind = .named,
+                    .type_only = symbol.namespace == .type,
+                    .status = .local,
+                    .span = symbol.span,
+                });
+                const target_symbol = modules_mod.linker.findExportedSymbol(target, symbol.source_export_name);
+                try linked_imports.append(allocator, .{
+                    .id = @intCast(linked_imports.items.len),
+                    .from_module = module.id,
+                    .import_edge = edge_id,
+                    .import_symbol = symbol.id,
+                    .local_name = symbol.name,
+                    .imported_name = symbol.source_export_name,
+                    .target_module = target.id,
+                    .target_symbol = target_symbol,
+                    .kind = if (target_symbol != null) .named else .unresolved,
+                    .span = symbol.span,
+                });
+            }
+        }
+
         var placeholder_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer placeholder_arena.deinit();
         const semantic_graph: modules_mod.ModuleGraph = .{
@@ -942,6 +1108,19 @@ pub const Project = struct {
                 .span = item.span,
             });
         }
+
+        // Merge diagnostics produced while deriving global exports (section
+        // 10.6). These are produced during analysis, before `finish`, so they
+        // live in a dedicated list that survives `clearProjectSemantics`.
+        for (self.global_derivation_diagnostics.items) |item| try self.appendProjectDiagnostic(.{
+            .module_id = item.module_id,
+            .phase = item.phase,
+            .severity = item.severity,
+            .code = item.code,
+            .message = item.message,
+            .logical_name = item.logical_name,
+            .span = item.span,
+        });
     }
 
     fn appendProjectDiagnostic(self: *Project, candidate: ProjectDiagnostic) !void {
@@ -963,8 +1142,9 @@ pub const Project = struct {
     fn recordExternalLinkDiagnostics(self: *Project, result: *semantics.BorrowedProjectSemanticResult) !void {
         const allocator = result.arena.allocator();
         for (result.imports) |*item| {
-            if (item.edge_index >= self.graph.edges.items.len) continue;
-            const edge = self.graph.edges.items[item.edge_index];
+            const edge_index = item.edge_index orelse continue;
+            if (edge_index >= self.graph.edges.items.len) continue;
+            const edge = self.graph.edges.items[edge_index];
             if (edge.state != .external) continue;
             const external_id = edge.external_target orelse continue;
             const external = self.findExternal(external_id) orelse continue;
@@ -2555,4 +2735,349 @@ test "ambient registration enforces overlapping namespaces and permits disjoint 
         .{ .name = "ambient_split", .namespace = .{ .value = true }, .type_metadata = .object, .host_binding_id = 42 },
         .{ .name = "ambient_split", .namespace = .{ .type = true }, .type_metadata = .object, .host_binding_id = 43 },
     });
+}
+
+// --- Goal 011: global source module coverage (section 10.1-10.9) ---
+
+test "global source module: bare global access resolves to source-backed ambient" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(0),
+        .logical_name = "global.ts",
+        .bytes = "export const console = 1;",
+    });
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "app.ts",
+        .bytes = "console;",
+    });
+    _ = try project.step();
+    _ = try project.finish();
+
+    for (project.diagnostics()) |diagnostic| {
+        if (diagnostic.code == .cannot_find_name and std.mem.eql(u8, diagnostic.logical_name, "app.ts")) {
+            return error.UnexpectedCannotFindName;
+        }
+    }
+
+    const app = project.lookup(.init(1)).?;
+    var found = false;
+    for (app.semantic_result.?.frontend.resolve.references) |reference| {
+        if (!std.mem.eql(u8, reference.name, "console")) continue;
+        const symbol_id = reference.symbol orelse continue;
+        const symbol = app.semantic_result.?.frontend.bind.symbols[@intCast(symbol_id)];
+        try std.testing.expectEqual(binder.SymbolKind.ambient, symbol.kind);
+        try std.testing.expectEqual(contracts.ModuleId.init(0), symbol.source_module_id.?);
+        try std.testing.expectEqualStrings("console", symbol.source_export_name);
+        found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "global source module: globalThis resolves to ambient self-reference" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerAmbientGlobals(&.{.{
+        .name = "globalThis",
+        .namespace = .{ .value = true },
+        .type_metadata = .object,
+        .host_binding_id = 1,
+        .members = &.{.{ .name = "self", .readonly = true, .self_reference = true }},
+    }});
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "app.ts",
+        .bytes = "globalThis;",
+    });
+    _ = try project.step();
+    _ = try project.finish();
+
+    const app = project.lookup(.init(1)).?;
+    var found = false;
+    for (app.semantic_result.?.frontend.bind.symbols) |symbol| {
+        if (symbol.kind == .ambient and std.mem.eql(u8, symbol.name, "globalThis")) {
+            try std.testing.expectEqual(@as(u64, 1), symbol.host_binding_id);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+
+    var resolved = false;
+    for (app.semantic_result.?.frontend.resolve.references) |reference| {
+        if (std.mem.eql(u8, reference.name, "globalThis")) {
+            try std.testing.expect(reference.symbol != null);
+            resolved = true;
+        }
+    }
+    try std.testing.expect(resolved);
+}
+
+test "global source module: local declaration shadows source global" {
+    // A declaration in a containing local scope (here, a function body) must
+    // shadow the source-backed global per section 10.4. The compiler must not
+    // add a global-specific exception to TypeScript scoping rules.
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(0),
+        .logical_name = "global.ts",
+        .bytes = "export const console = 1;",
+    });
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "app.ts",
+        .bytes =
+        \\function local() {
+        \\    const console = 2;
+        \\    return console;
+        \\}
+        \\local;
+        ,
+    });
+    _ = try project.step();
+    _ = try project.finish();
+
+    const app = project.lookup(.init(1)).?;
+    var found = false;
+    for (app.semantic_result.?.frontend.resolve.references) |reference| {
+        if (!std.mem.eql(u8, reference.name, "console")) continue;
+        const symbol_id = reference.symbol orelse continue;
+        const symbol = app.semantic_result.?.frontend.bind.symbols[@intCast(symbol_id)];
+        try std.testing.expectEqual(binder.SymbolKind.variable, symbol.kind);
+        try std.testing.expectEqual(@as(?contracts.ModuleId, null), symbol.source_module_id);
+        found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "global source module: multiple application modules share one global root" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(0),
+        .logical_name = "global.ts",
+        .bytes = "export const shared = 1;",
+    });
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "app1.ts",
+        .bytes = "shared;",
+    });
+    try project.addRoot(.{
+        .id = .init(2),
+        .logical_name = "app2.ts",
+        .bytes = "shared;",
+    });
+    _ = try project.step();
+    _ = try project.finish();
+
+    for ([_]contracts.ModuleId{ .init(1), .init(2) }) |app_id| {
+        const app = project.lookup(app_id).?;
+        var found = false;
+        for (app.semantic_result.?.frontend.resolve.references) |reference| {
+            if (!std.mem.eql(u8, reference.name, "shared")) continue;
+            const symbol_id = reference.symbol orelse continue;
+            const symbol = app.semantic_result.?.frontend.bind.symbols[@intCast(symbol_id)];
+            try std.testing.expectEqual(binder.SymbolKind.ambient, symbol.kind);
+            try std.testing.expectEqual(contracts.ModuleId.init(0), symbol.source_module_id.?);
+            found = true;
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "global source module: duplicate and late registration are rejected" {
+    var first = Project.init(std.testing.allocator);
+    defer first.deinit();
+    try first.addGlobalRoot(.{
+        .id = .init(0),
+        .logical_name = "global.ts",
+        .bytes = "export const a = 1;",
+    });
+    try std.testing.expectError(
+        error.DuplicateGlobalRoot,
+        first.addGlobalRoot(.{
+            .id = .init(5),
+            .logical_name = "other.ts",
+            .bytes = "export const b = 2;",
+        }),
+    );
+
+    var second = Project.init(std.testing.allocator);
+    defer second.deinit();
+    try second.addRoot(.{
+        .id = .init(1),
+        .logical_name = "app.ts",
+        .bytes = "export {};",
+    });
+    try std.testing.expectError(
+        error.GlobalRootLateRegistration,
+        second.addGlobalRoot(.{
+            .id = .init(0),
+            .logical_name = "global.ts",
+            .bytes = "export const a = 1;",
+        }),
+    );
+}
+
+test "global source module: type-only and value exports occupy disjoint namespaces" {
+    // Type and value namespaces are distinct (section 10.4): a type-only
+    // export derives a type-namespace source global and a value export derives
+    // a value-namespace source global. `default` is never a named global.
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(0),
+        .logical_name = "global.ts",
+        .bytes =
+        \\export type FooType = number;
+        \\export const FooValue = 1;
+        \\export default 5;
+        ,
+    });
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "app.ts",
+        .bytes = "export {};",
+    });
+    _ = try project.step();
+
+    var type_global: ?binder.SourceGlobal = null;
+    var value_global: ?binder.SourceGlobal = null;
+    var default_count: usize = 0;
+    for (project.source_globals.items) |global| {
+        if (std.mem.eql(u8, global.name, "FooType")) type_global = global;
+        if (std.mem.eql(u8, global.name, "FooValue")) value_global = global;
+        if (std.mem.eql(u8, global.name, "default")) default_count += 1;
+    }
+    try std.testing.expect(type_global != null);
+    try std.testing.expect(type_global.?.namespace.type);
+    try std.testing.expect(!type_global.?.namespace.value);
+    try std.testing.expect(value_global != null);
+    try std.testing.expect(value_global.?.namespace.value);
+    try std.testing.expect(!value_global.?.namespace.type);
+    try std.testing.expectEqual(@as(usize, 0), default_count);
+
+    _ = try project.finish();
+}
+
+test "global source module: derivation precedes application module analysis" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(0),
+        .logical_name = "global.ts",
+        .bytes = "export const first = 1;",
+    });
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "app.ts",
+        .bytes = "first;",
+    });
+    _ = try project.step();
+
+    try std.testing.expect(project.global_exports_derived);
+    try std.testing.expectEqual(ModuleState.complete, project.state(.init(0)));
+    try std.testing.expect(project.source_globals.items.len >= 1);
+
+    _ = try project.finish();
+
+    try std.testing.expect(project.lookup(.init(0)) != null);
+    try std.testing.expectEqual(ModuleState.complete, project.state(.init(0)));
+
+    const app = project.lookup(.init(1)).?;
+    var found = false;
+    for (app.semantic_result.?.frontend.resolve.references) |reference| {
+        if (!std.mem.eql(u8, reference.name, "first")) continue;
+        const symbol_id = reference.symbol orelse continue;
+        const symbol = app.semantic_result.?.frontend.bind.symbols[@intCast(symbol_id)];
+        try std.testing.expectEqual(binder.SymbolKind.ambient, symbol.kind);
+        try std.testing.expectEqual(contracts.ModuleId.init(0), symbol.source_module_id.?);
+        found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "global source module: duplicate_export in the global root is a blocking diagnostic" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(0),
+        .logical_name = "global.ts",
+        .bytes =
+        \\export let a = 1;
+        \\export { a };
+        ,
+    });
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "app.ts",
+        .bytes = "export {};",
+    });
+    _ = try project.step();
+    _ = try project.finish();
+
+    var found = false;
+    for (project.diagnostics()) |diagnostic| {
+        if (diagnostic.code == .duplicate_export and
+            diagnostic.module_id != null and
+            diagnostic.module_id.? == contracts.ModuleId.init(0) and
+            diagnostic.severity == .@"error")
+        {
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "global source module: ambient collision reports a diagnostic and preserves the ambient" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerAmbientGlobals(&.{.{
+        .name = "console",
+        .namespace = .{ .value = true },
+        .type_metadata = .object,
+        .host_binding_id = 7,
+    }});
+    try project.addGlobalRoot(.{
+        .id = .init(0),
+        .logical_name = "global.ts",
+        .bytes = "export const console = 1;",
+    });
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "app.ts",
+        .bytes = "console;",
+    });
+    _ = try project.step();
+    _ = try project.finish();
+
+    var collision = false;
+    for (project.diagnostics()) |diagnostic| {
+        if (diagnostic.code == .global_ambient_collision and
+            diagnostic.module_id != null and
+            diagnostic.module_id.? == contracts.ModuleId.init(0) and
+            diagnostic.severity == .@"error")
+        {
+            collision = true;
+        }
+    }
+    try std.testing.expect(collision);
+
+    for (project.source_globals.items) |global| {
+        if (std.mem.eql(u8, global.name, "console")) return error.UnexpectedSourceGlobal;
+    }
+
+    const app = project.lookup(.init(1)).?;
+    var found = false;
+    for (app.semantic_result.?.frontend.resolve.references) |reference| {
+        if (!std.mem.eql(u8, reference.name, "console")) continue;
+        const symbol_id = reference.symbol orelse continue;
+        const symbol = app.semantic_result.?.frontend.bind.symbols[@intCast(symbol_id)];
+        try std.testing.expectEqual(binder.SymbolKind.ambient, symbol.kind);
+        try std.testing.expectEqual(@as(u64, 7), symbol.host_binding_id);
+        found = true;
+    }
+    try std.testing.expect(found);
 }

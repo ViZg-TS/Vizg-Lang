@@ -29,6 +29,9 @@ pub const FrontendOptions = struct {
     /// before analysis so they resolve without synthetic source declarations.
     /// Borrowed for the duration of `analyze`.
     ambient_globals: []const @import("../project/contracts.zig").AmbientGlobal = &.{},
+    /// Source-backed globals derived from a designated project module.
+    /// Borrowed for the duration of `analyze`.
+    source_globals: []const binder.SourceGlobal = &.{},
     /// Stable host identities attached to matching top-level source value
     /// declarations. Borrowed for the duration of `analyze`.
     source_host_bindings: []const @import("../project/contracts.zig").SourceHostBinding = &.{},
@@ -57,6 +60,7 @@ pub fn analyze(allocator: std.mem.Allocator, source: SourceFile, options: Fronte
         allocator,
         parsed.ast,
         options.ambient_globals,
+        options.source_globals,
         options.source_host_bindings,
         try remainingDiagnostics(options.max_diagnostics, scanner_parser_count),
     );

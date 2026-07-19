@@ -949,7 +949,7 @@ test "frontend suite: resolver allows a generic host ambient without VZG4001" {
     const parsed = try parseOk(allocator,
         \\hostClock;
     );
-    const bound = try binder.bindWithLimit(allocator, parsed.ast, &ambients, &.{}, std.math.maxInt(usize));
+    const bound = try binder.bindWithLimit(allocator, parsed.ast, &ambients, &.{}, &.{}, std.math.maxInt(usize));
     const resolved = try resolver.resolve(allocator, parsed.ast, bound);
 
     try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
