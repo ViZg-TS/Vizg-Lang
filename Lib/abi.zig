@@ -830,6 +830,7 @@ fn diagnosticCode(value: vizg.diagnostics.DiagnosticCode) u32 {
         .invalid_index => 6007,
         .invalid_argument_count => 6008,
         .invalid_argument_type => 6009,
+        .global_ambient_collision => 8001,
     };
 }
 
@@ -887,6 +888,7 @@ fn statusFromError(owned: *OwnedProject, err: anyerror) Vizg_ProjectStatus {
         error.InvalidResponseOrder,
         error.DuplicateResponse,
         error.DuplicateModule,
+        error.DuplicateGlobalRoot,
         error.UnknownImporter,
         error.UnknownModule,
         error.SourceNotSupplied,
@@ -1020,6 +1022,21 @@ pub fn projectAddSource(project: ?*Vizg_Project, input: ?*const Vizg_ProjectSour
     } else {
         owned.project.supplySource(source) catch |err| return statusFromError(owned, err);
     }
+    return .OK;
+}
+
+pub fn projectAddGlobalRoot(project: ?*Vizg_Project, input: ?*const Vizg_ProjectSource) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
+    beginProjectCall(owned);
+    const args = input orelse return .INVALID_ARGUMENT;
+    if (!validAlignedHostObject(Vizg_ProjectSource, args) or
+        !inputOutsideWorkspace(owned, args, @sizeOf(Vizg_ProjectSource)) or
+        !validSourceScalars(args)) return .INVALID_ARGUMENT;
+    if (sourceLengthStatus(owned, args.source_len)) |status| return status;
+    if (!sourceInputsOutsideWorkspace(owned, args)) return .INVALID_ARGUMENT;
+    const source = moduleSource(args) orelse return .INVALID_ARGUMENT;
+    owned.project.addGlobalRoot(source) catch |err| return statusFromError(owned, err);
     return .OK;
 }
 
@@ -1690,27 +1707,25 @@ pub fn projectResultImport(result: ?*const Vizg_ProjectResult, index: usize, out
     const semantic = projectSemantic(owned) orelse return .INVALID_STATE;
     if (index >= semantic.imports.len) return .INVALID_ARGUMENT;
     const item = semantic.imports[index];
-    if (item.edge_index >= owned.owner.project.edges().len) return .INTERNAL_ERROR;
-    const edge = owned.owner.project.edges()[item.edge_index];
     output.* = .{
         .module_id = item.module_id,
-        .target_module_id = if (edge.target) |target| target.value() else 0,
-        .external_module_id = if (edge.external_target) |target| target.value() else 0,
-        .edge_index = item.edge_index,
+        .target_module_id = item.target_module_id orelse 0,
+        .external_module_id = item.external_module_id orelse 0,
+        .edge_index = item.edge_index orelse 0,
         .target_type_id = if (item.target) |target| target.type_id else 0,
         .link_state = @intFromEnum(item.state),
-        .request_operation = @intFromEnum(edge.operation),
+        .request_operation = @intFromEnum(item.request_operation),
         .local_name_ptr = if (item.local_name.len == 0) null else item.local_name.ptr,
         .local_name_len = item.local_name.len,
         .imported_name_ptr = if (item.imported_name.len == 0) null else item.imported_name.ptr,
         .imported_name_len = item.imported_name.len,
-        .specifier_ptr = if (edge.raw_specifier.len == 0) null else edge.raw_specifier.ptr,
-        .specifier_len = edge.raw_specifier.len,
+        .specifier_ptr = if (item.specifier.len == 0) null else item.specifier.ptr,
+        .specifier_len = item.specifier.len,
         .type_only = @intFromBool(item.type_only),
         .runtime_binding = @intFromBool(item.runtime_binding),
-        .has_target_module = @intFromBool(edge.target != null),
-        .has_external_target = @intFromBool(edge.external_target != null),
-        .has_edge_index = 1,
+        .has_target_module = @intFromBool(item.target_module_id != null),
+        .has_external_target = @intFromBool(item.external_module_id != null),
+        .has_edge_index = @intFromBool(item.edge_index != null),
         .has_semantic_target = @intFromBool(item.target != null),
         .reserved = .{ 0, 0 },
         .span = span(item.span),
@@ -3048,6 +3063,7 @@ comptime {
     @export(&projectDestroy, .{ .name = "vizg_project_destroy" });
     @export(&projectLimitKind, .{ .name = "vizg_project_limit_kind" });
     @export(&projectAddSource, .{ .name = "vizg_project_add_source" });
+    @export(&projectAddGlobalRoot, .{ .name = "vizg_project_add_global_root" });
     @export(&projectRegisterAmbientGlobals, .{ .name = "vizg_project_register_ambient_globals" });
     @export(&projectRegisterAmbientGlobalsV2, .{ .name = "vizg_project_register_ambient_globals_v2" });
     @export(&projectRegisterSourceHostBindings, .{ .name = "vizg_project_register_source_host_bindings" });
@@ -3113,6 +3129,7 @@ test "public diagnostic ABI mappings are stable" {
     try std.testing.expectEqual(@as(u32, 5004), diagnosticCode(.module_access_denied));
     try std.testing.expectEqual(@as(u32, 5005), diagnosticCode(.module_host_failed));
     try std.testing.expectEqual(@as(u32, 6009), diagnosticCode(.invalid_argument_type));
+    try std.testing.expectEqual(@as(u32, 8001), diagnosticCode(.global_ambient_collision));
 }
 
 test "public limit ABI values and exact error mappings are stable" {

@@ -6,8 +6,6 @@ const tokens = @import("tokens.zig");
 
 const NodeId = ast_mod.NodeId;
 
-const PredeclaredAmbients: []const []const u8 = &.{};
-
 pub const ReferenceId = u32;
 
 pub const ReferenceKind = enum {
@@ -326,21 +324,16 @@ const Resolver = struct {
         });
 
         if (symbol == null) {
-            const is_ambient: bool = blk: for (PredeclaredAmbients) |ambient| {
-                if (std.mem.eql(u8, ambient, name)) break :blk true;
-            } else false;
-            if (!is_ambient) {
-                try self.diagnostic_list.ensureUnusedCapacity(1);
-                const message = try std.fmt.allocPrint(self.allocator, "cannot find name '{s}'", .{name});
-                try self.diagnostic_list.append(self.allocator, .{
-                    .severity = .@"error",
-                    .code = .cannot_find_name,
-                    .phase = .resolver,
-                    .message = message,
-                    .span = node.span,
-                    .label = "name is not declared in this scope",
-                });
-            }
+            try self.diagnostic_list.ensureUnusedCapacity(1);
+            const message = try std.fmt.allocPrint(self.allocator, "cannot find name '{s}'", .{name});
+            try self.diagnostic_list.append(self.allocator, .{
+                .severity = .@"error",
+                .code = .cannot_find_name,
+                .phase = .resolver,
+                .message = message,
+                .span = node.span,
+                .label = "name is not declared in this scope",
+            });
         }
     }
 

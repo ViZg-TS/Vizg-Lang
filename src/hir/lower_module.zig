@@ -20,6 +20,14 @@ pub fn lower(builder: *builder_mod.Builder, project: *const project_mod.Project,
         const target = edge.target orelse continue;
         if (!containsModule(dependency_ids.items, target)) try dependency_ids.append(builder.allocator, target);
     }
+    for (semantic_result.imports) |item| {
+        if (item.module_id != module_id or item.type_only or !item.runtime_binding) continue;
+        const target = item.target orelse continue;
+        if (target.external_module_id != null) continue;
+        const target_id = project_mod.ModuleId.init(target.declaration.module_id);
+        if (target_id != module.id and !containsModule(dependency_ids.items, target_id))
+            try dependency_ids.append(builder.allocator, target_id);
+    }
     std.mem.sort(project_mod.ModuleId, dependency_ids.items, {}, lessModuleId);
     const dependencies = try builder.allocator.alloc(model.HirModuleDependency, dependency_ids.items.len);
     for (dependency_ids.items, 0..) |target, index| dependencies[index] = .{

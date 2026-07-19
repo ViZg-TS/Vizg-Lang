@@ -62,7 +62,11 @@ pub const SemanticExport = struct {
 
 pub const SemanticImport = struct {
     module_id: ModuleId,
-    edge_index: usize,
+    edge_index: ?usize,
+    target_module_id: ?ModuleId,
+    external_module_id: ?u64,
+    specifier: []const u8,
+    request_operation: @import("../project/contracts.zig").RequestOperation,
     import_symbol: ?binder.SymbolId,
     local_name: []const u8,
     imported_name: []const u8,
@@ -942,7 +946,11 @@ fn collectSemanticImports(
         }
         try imports.append(allocator, .{
             .module_id = link.from_module,
-            .edge_index = edge.project_edge_index,
+            .edge_index = if (edge.project_edge_index == std.math.maxInt(usize)) null else edge.project_edge_index,
+            .target_module_id = edge.to,
+            .external_module_id = edge.external_to,
+            .specifier = edge.specifier,
+            .request_operation = if (edge.re_export) .re_export else .static_import,
             .import_symbol = link.import_symbol,
             .local_name = link.local_name,
             .imported_name = link.imported_name,
