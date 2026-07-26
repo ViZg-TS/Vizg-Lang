@@ -1195,6 +1195,21 @@ fn buildTypeInfo(
         }
         try symbol_types.append(allocator, entry);
     }
+    for (result.bind.symbols) |symbol| {
+        if (symbol.declaration == ast.invalid_node or
+            @as(usize, symbol.declaration) >= result.ast.nodes.len) continue;
+        switch (result.ast.node(symbol.declaration).data) {
+            .Identifier => {
+                const entry = symbolType(symbol_types.items, symbol.id) orelse continue;
+                try putNodeType(allocator, &node_types, .{
+                    .node_id = symbol.declaration,
+                    .type_id = entry.effective() orelse builtins.unknown,
+                    .state = entry.state,
+                });
+            },
+            else => {},
+        }
+    }
 
     // Resolve references and primitive expressions to a fixed point. This lets
     // inferred declaration types flow through chains such as `a -> b -> c`

@@ -485,7 +485,9 @@ pub const PatternItem = union(enum) {
     property_static: []const u8,
     property_computed: ids.ValueId,
     rest,
-    default_value: ids.ValueId,
+    /// A zero-argument closure whose body evaluates the default initializer.
+    /// Consumers invoke it only when the selected projection is `undefined`.
+    default_initializer: ids.ValueId,
     binding_target: ids.BindingId,
     place_target: ids.PlaceId,
 };

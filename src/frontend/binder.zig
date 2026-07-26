@@ -228,7 +228,13 @@ const Binder = struct {
                 for (function_decl.params) |param_id| {
                     const param_node = self.ast.node(param_id);
                     switch (param_node.data) {
-                        .Parameter => |param| _ = try self.declare(function_scope, param.name, .parameter, param_id, param_node.span),
+                        .Parameter => |param| {
+                            if (param.pattern) |pattern| {
+                                try self.declarePattern(function_scope, pattern, .parameter, false);
+                            } else {
+                                _ = try self.declare(function_scope, param.name, .parameter, param_id, param_node.span);
+                            }
+                        },
                         else => {},
                     }
                 }
@@ -244,7 +250,13 @@ const Binder = struct {
                 for (function_expr.params) |param_id| {
                     const param_node = self.ast.node(param_id);
                     switch (param_node.data) {
-                        .Parameter => |param| _ = try self.declare(function_scope, param.name, .parameter, param_id, param_node.span),
+                        .Parameter => |param| {
+                            if (param.pattern) |pattern| {
+                                try self.declarePattern(function_scope, pattern, .parameter, false);
+                            } else {
+                                _ = try self.declare(function_scope, param.name, .parameter, param_id, param_node.span);
+                            }
+                        },
                         else => {},
                     }
                 }
@@ -283,8 +295,12 @@ const Binder = struct {
                 const function_scope = try self.addScope(.function, scope);
                 for (method.params) |param_id| switch (self.ast.node(param_id).data) {
                     .Parameter => |param| {
-                        _ = try self.declare(function_scope, param.name, .parameter, param_id, self.ast.node(param_id).span);
-                        if (method.kind == .constructor and (param.access != .none or param.readonly)) {
+                        if (param.pattern) |pattern| {
+                            try self.declarePattern(function_scope, pattern, .parameter, false);
+                        } else {
+                            _ = try self.declare(function_scope, param.name, .parameter, param_id, self.ast.node(param_id).span);
+                        }
+                        if (param.pattern == null and method.kind == .constructor and (param.access != .none or param.readonly)) {
                             const property_symbol = try self.declare(scope, param.name, .field, param_id, self.ast.node(param_id).span);
                             try self.node_symbols.append(self.allocator, .{ .node = param_id, .symbol = property_symbol });
                         }
@@ -299,7 +315,13 @@ const Binder = struct {
                 for (arrow.params) |param_id| {
                     const param_node = self.ast.node(param_id);
                     switch (param_node.data) {
-                        .Parameter => |param| _ = try self.declare(function_scope, param.name, .parameter, param_id, param_node.span),
+                        .Parameter => |param| {
+                            if (param.pattern) |pattern| {
+                                try self.declarePattern(function_scope, pattern, .parameter, false);
+                            } else {
+                                _ = try self.declare(function_scope, param.name, .parameter, param_id, param_node.span);
+                            }
+                        },
                         else => {},
                     }
                 }
@@ -340,9 +362,14 @@ const Binder = struct {
                 if (member.initializer) |initializer| try self.bindNode(initializer, scope);
             },
             .VariableDeclarator => |declarator| {
-                const symbol_id = try self.declare(scope, declarator.name, .variable, node_id, node.span);
-                self.attachSourceHostBinding(scope, symbol_id);
-                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                if (declarator.pattern) |pattern| {
+                    try self.declarePattern(scope, pattern, .variable, true);
+                    try self.bindPatternExpressions(pattern, scope);
+                } else {
+                    const symbol_id = try self.declare(scope, declarator.name, .variable, node_id, node.span);
+                    self.attachSourceHostBinding(scope, symbol_id);
+                    try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                }
                 if (declarator.init) |initializer| try self.bindNode(initializer, scope);
             },
             .ReturnStatement => |return_stmt| {
@@ -359,7 +386,12 @@ const Binder = struct {
                 if (catch_clause.parameter) |parameter_id| {
                     const parameter_node = self.ast.node(parameter_id);
                     switch (parameter_node.data) {
-                        .Parameter => |parameter| _ = try self.declare(catch_scope, parameter.name, .variable, parameter_id, parameter_node.span),
+                        .Parameter => |parameter| if (parameter.pattern) |pattern| {
+                            try self.declarePattern(catch_scope, pattern, .variable, false);
+                            try self.bindPatternExpressions(pattern, catch_scope);
+                        } else {
+                            _ = try self.declare(catch_scope, parameter.name, .variable, parameter_id, parameter_node.span);
+                        },
                         else => {},
                     }
                 }
@@ -491,9 +523,51 @@ const Binder = struct {
     // Defaults are traversed in the parameter scope after all names are bound.
     fn bindParameterInitializers(self: *Binder, parameters: []const NodeId, scope: ScopeId) !void {
         for (parameters) |parameter_id| switch (self.ast.node(parameter_id).data) {
-            .Parameter => |parameter| if (parameter.initializer) |initializer| try self.bindNode(initializer, scope),
+            .Parameter => |parameter| {
+                if (parameter.pattern) |pattern| try self.bindPatternExpressions(pattern, scope);
+                if (parameter.initializer) |initializer| try self.bindNode(initializer, scope);
+            },
             else => {},
         };
+    }
+
+    fn declarePattern(self: *Binder, scope: ScopeId, node_id: NodeId, kind: SymbolKind, attach_host_binding: bool) !void {
+        const node = self.ast.node(node_id);
+        switch (node.data) {
+            .Identifier => |identifier| {
+                const symbol_id = try self.declare(scope, identifier.name, kind, node_id, node.span);
+                if (attach_host_binding) self.attachSourceHostBinding(scope, symbol_id);
+                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+            },
+            .AssignmentExpression => |assignment| try self.declarePattern(scope, assignment.left, kind, attach_host_binding),
+            .ArrayExpression => |array| for (array.elements) |element| {
+                if (element) |item| try self.declarePattern(scope, item, kind, attach_host_binding);
+            },
+            .ObjectExpression => |object| for (object.properties) |property| {
+                try self.declarePattern(scope, property.value, kind, attach_host_binding);
+            },
+            .SpreadElement => |spread| try self.declarePattern(scope, spread.argument, kind, attach_host_binding),
+            else => {},
+        }
+    }
+
+    fn bindPatternExpressions(self: *Binder, node_id: NodeId, scope: ScopeId) !void {
+        switch (self.ast.node(node_id).data) {
+            .Identifier => {},
+            .AssignmentExpression => |assignment| {
+                try self.bindPatternExpressions(assignment.left, scope);
+                try self.bindNode(assignment.right, scope);
+            },
+            .ArrayExpression => |array| for (array.elements) |element| {
+                if (element) |item| try self.bindPatternExpressions(item, scope);
+            },
+            .ObjectExpression => |object| for (object.properties) |property| {
+                if (property.computed_key) |computed| try self.bindNode(computed, scope);
+                try self.bindPatternExpressions(property.value, scope);
+            },
+            .SpreadElement => |spread| try self.bindPatternExpressions(spread.argument, scope),
+            else => {},
+        }
     }
 
     fn declare(self: *Binder, scope_id: ScopeId, name: []const u8, kind: SymbolKind, declaration: NodeId, span: tokens.Span) !SymbolId {
@@ -594,11 +668,27 @@ const Binder = struct {
             .VariableDeclaration => |var_decl| {
                 for (var_decl.declarations) |declaration_id| try self.recordDeclarationExports(declaration_id);
             },
-            .VariableDeclarator => |declarator| try self.appendExport(declarator.name, declarator.name, node_id),
+            .VariableDeclarator => |declarator| if (declarator.pattern) |pattern|
+                try self.recordPatternExports(pattern)
+            else
+                try self.appendExport(declarator.name, declarator.name, node_id),
             .TypeAliasDeclaration => |decl| try self.appendExportDetails(decl.name, decl.name, node_id, .declaration, true, ""),
             .InterfaceDeclaration => |decl| try self.appendExportDetails(decl.name, decl.name, node_id, .declaration, true, ""),
             .EnumDeclaration => |decl| try self.appendExport(decl.name, decl.name, node_id),
             .ClassDeclaration => |decl| try self.appendExport(decl.name, decl.name, node_id),
+            else => {},
+        }
+    }
+
+    fn recordPatternExports(self: *Binder, node_id: NodeId) !void {
+        switch (self.ast.node(node_id).data) {
+            .Identifier => |identifier| try self.appendExport(identifier.name, identifier.name, node_id),
+            .AssignmentExpression => |assignment| try self.recordPatternExports(assignment.left),
+            .ArrayExpression => |array| for (array.elements) |element| {
+                if (element) |item| try self.recordPatternExports(item);
+            },
+            .ObjectExpression => |object| for (object.properties) |property| try self.recordPatternExports(property.value),
+            .SpreadElement => |spread| try self.recordPatternExports(spread.argument),
             else => {},
         }
     }

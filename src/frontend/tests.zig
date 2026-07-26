@@ -2855,6 +2855,46 @@ test "frontend suite: spread elements and rest parameters preserve AST shape and
     try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "source", .read));
 }
 
+test "frontend suite: parameter and catch bindings preserve structural patterns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\const fallback = 1;
+        \\function unpack([head, { value: renamed = fallback }]) {
+        \\    return head + renamed;
+        \\}
+        \\try {} catch ({ message: caught }) { caught; }
+    );
+
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    const function = parsed.ast.node(program.statements[1]).data.FunctionDeclaration;
+    try std.testing.expectEqual(@as(usize, 1), function.params.len);
+    const parameter = parsed.ast.node(function.params[0]).data.Parameter;
+    try std.testing.expectEqualStrings("", parameter.name);
+    try std.testing.expect(parameter.pattern != null);
+    try expectNodeTag(parsed.ast, parameter.pattern.?, .ArrayExpression);
+
+    const try_statement = parsed.ast.node(program.statements[2]).data.TryStatement;
+    const catch_clause = parsed.ast.node(try_statement.handler.?).data.CatchClause;
+    const catch_parameter = parsed.ast.node(catch_clause.parameter.?).data.Parameter;
+    try std.testing.expectEqualStrings("", catch_parameter.name);
+    try std.testing.expect(catch_parameter.pattern != null);
+    try expectNodeTag(parsed.ast, catch_parameter.pattern.?, .ObjectExpression);
+
+    const bound = try binder.bind(allocator, parsed.ast);
+    const head = symbolByNameKindScope(bound, "head", .parameter, null).?;
+    const renamed = symbolByNameKindScope(bound, "renamed", .parameter, null).?;
+    const caught = symbolByNameKindScope(bound, "caught", .variable, null).?;
+    const resolved = try resolver.resolve(allocator, parsed.ast, bound);
+    try expectReference(resolved, "head", .read, head.id);
+    try expectReference(resolved, "renamed", .read, renamed.id);
+    try expectReference(resolved, "caught", .read, caught.id);
+    try std.testing.expectEqual(@as(usize, 1), countReferences(resolved, "fallback", .read));
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+}
+
 test "frontend suite: rest parameter must be last" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

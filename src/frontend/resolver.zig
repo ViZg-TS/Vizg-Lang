@@ -138,6 +138,7 @@ const Resolver = struct {
                 if (member.initializer) |initializer| try self.resolveNode(initializer, scope);
             },
             .VariableDeclarator => |declarator| {
+                if (declarator.pattern) |pattern| try self.resolvePatternExpressions(pattern, scope);
                 if (declarator.init) |initializer| try self.resolveNode(initializer, scope);
             },
             .Parameter => {},
@@ -153,6 +154,10 @@ const Resolver = struct {
             },
             .CatchClause => |catch_clause| {
                 const catch_scope = self.takeScope();
+                if (catch_clause.parameter) |parameter_id| switch (self.ast.node(parameter_id).data) {
+                    .Parameter => |parameter| if (parameter.pattern) |pattern| try self.resolvePatternExpressions(pattern, catch_scope),
+                    else => {},
+                };
                 try self.resolveNode(catch_clause.body, catch_scope);
             },
             .FinallyClause => |finally_clause| try self.resolveNode(finally_clause.body, scope),
@@ -358,9 +363,31 @@ const Resolver = struct {
 
     fn resolveParameterInitializers(self: *Resolver, parameters: []const NodeId, scope: binder.ScopeId) !void {
         for (parameters) |parameter_id| switch (self.ast.node(parameter_id).data) {
-            .Parameter => |parameter| if (parameter.initializer) |initializer| try self.resolveNode(initializer, scope),
+            .Parameter => |parameter| {
+                if (parameter.pattern) |pattern| try self.resolvePatternExpressions(pattern, scope);
+                if (parameter.initializer) |initializer| try self.resolveNode(initializer, scope);
+            },
             else => {},
         };
+    }
+
+    fn resolvePatternExpressions(self: *Resolver, node_id: NodeId, scope: binder.ScopeId) !void {
+        switch (self.ast.node(node_id).data) {
+            .Identifier => {},
+            .AssignmentExpression => |assignment| {
+                try self.resolvePatternExpressions(assignment.left, scope);
+                try self.resolveNode(assignment.right, scope);
+            },
+            .ArrayExpression => |array| for (array.elements) |element| {
+                if (element) |item| try self.resolvePatternExpressions(item, scope);
+            },
+            .ObjectExpression => |object| for (object.properties) |property| {
+                if (property.computed_key) |computed| try self.resolveNode(computed, scope);
+                try self.resolvePatternExpressions(property.value, scope);
+            },
+            .SpreadElement => |spread| try self.resolvePatternExpressions(spread.argument, scope),
+            else => {},
+        }
     }
 };
 

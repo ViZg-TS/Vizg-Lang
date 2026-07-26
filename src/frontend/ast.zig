@@ -220,6 +220,7 @@ pub const VariableDeclaration = struct {
 
 pub const VariableDeclarator = struct {
     name: []const u8,
+    pattern: ?NodeId = null,
     init: ?NodeId,
     type_annotation: ?TypeAnnotation = null,
 };
@@ -262,6 +263,7 @@ pub const ArrowFunctionExpression = struct {
 
 pub const Parameter = struct {
     name: []const u8,
+    pattern: ?NodeId = null,
     type_annotation: ?TypeAnnotation = null,
     rest: bool = false,
     optional: bool = false,

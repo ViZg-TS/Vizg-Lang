@@ -12,6 +12,11 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
   declaration, assignment, parameter, and catch-binding destructuring. The
   payload preserves nested array/object order, defaults, rest, binding targets,
   and assignment places without exposing syntax trees or runtime policy.
+- Variable declarations and destructuring assignments now emit that shared
+  ordered pattern plan. Assignment sources are evaluated once and remain the
+  expression result; default items carry deferred initializer closures so
+  consumers can invoke them only when a projection is undefined. Parameter and
+  catch-binding patterns are preserved structurally for downstream lowering.
 - Added a source-backed global-root project operation and the additive
   `vizg_project_add_global_root` C entry point. Global declarations remain
   ordinary source-owned declarations with their source identity preserved in

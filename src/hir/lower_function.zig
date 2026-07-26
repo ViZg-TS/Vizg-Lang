@@ -11,6 +11,7 @@ const lower_expression = @import("lower_expression.zig");
 const lower_control = @import("lower_control.zig");
 const lower_exceptions = @import("lower_exceptions.zig");
 const lower_place = @import("lower_place.zig");
+const lower_pattern = @import("lower_pattern.zig");
 const model = @import("model.zig");
 const project = @import("../project/root.zig");
 const region_validation = @import("region_validation.zig");
@@ -272,6 +273,43 @@ pub fn createFieldInitializer(
     return function_id;
 }
 
+pub fn createPatternInitializer(inputs: Inputs, expression: ast.NodeId, outer: []const SymbolBinding) !ids.FunctionId {
+    const function_id = try inputs.builder.makeId(ids.FunctionId, inputs.builder.functions.items.len);
+    try inputs.builder.reserveFunction(0);
+    var anf = try anf_builder.AnfBuilder.init(inputs.builder);
+    var context: Context = .{
+        .inputs = inputs,
+        .builder = inputs.builder,
+        .local = inputs.local,
+        .anf = &anf,
+        .function_id = function_id,
+        .function_scope = std.math.maxInt(binder.ScopeId),
+        .is_arrow = true,
+        .is_async = false,
+        .is_generator = false,
+    };
+    try context.visible.appendSlice(inputs.builder.allocator, outer);
+    const value = try context.lowerExpression(expression);
+    try anf.terminate(.{ .return_ = value });
+    const function: model.HirFunction = .{
+        .id = function_id,
+        .module_id = inputs.module.id,
+        .symbol = null,
+        .kind = .ordinary,
+        .flags = .{ .lexical_this = true },
+        .signature_type = inputs.builder.result.semanticResult().type_store.builtins.unknown,
+        .bindings = try context.bindings.toOwnedSlice(inputs.builder.allocator),
+        .captures = try context.captures.toOwnedSlice(inputs.builder.allocator),
+        .places = try anf.finishPlaces(),
+        .blocks = try anf.finish(),
+        .entry = anf.entry,
+        .origin = .invalid,
+    };
+    try region_validation.validateFunction(inputs.builder.allocator, &function, inputs.builder.regions.items);
+    try inputs.builder.appendFunction(function);
+    return function_id;
+}
+
 pub fn lowerReserved(inputs: Inputs, function_id: ids.FunctionId, node_id: ast.NodeId, kind: model.HirFunctionKind, outer: []const SymbolBinding) anyerror!void {
     return lowerReservedInternal(inputs, function_id, node_id, kind, outer, false);
 }
@@ -432,13 +470,17 @@ const Context = struct {
             .VariableDeclaration => |declaration| for (declaration.declarations) |declarator_id| {
                 const declarator = self.inputs.local.frontend.ast.node(declarator_id).data.VariableDeclarator;
                 if (declarator.type_annotation) |annotation| self.eraseTypeNode(annotation.root);
-                const symbol = self.symbolForDeclaration(declarator_id) orelse return error.MissingSemanticIdentity;
                 const kind: model.HirBindingKind = switch (declaration.kind) {
                     .Keyword_var => .var_,
                     .Keyword_let => .let_,
                     .Keyword_const => .const_,
                     else => return error.InvalidVariableKind,
                 };
+                if (declarator.pattern) |pattern| {
+                    try lower_pattern.predeclare(self, pattern, kind);
+                    continue;
+                }
+                const symbol = self.symbolForDeclaration(declarator_id) orelse return error.MissingSemanticIdentity;
                 _ = try self.addBinding(symbol, declarator.name, kind, kind != .const_, if (kind == .var_) .hoisted_undefined else .temporal_dead_zone, declarator_id);
             },
             .FunctionDeclaration => |function| {
@@ -575,6 +617,11 @@ const Context = struct {
             },
             .VariableDeclaration => |declaration| for (declaration.declarations) |declarator_id| {
                 const declarator = self.inputs.local.frontend.ast.node(declarator_id).data.VariableDeclarator;
+                if (declarator.pattern) |pattern| {
+                    const initializer = declarator.init orelse return error.MissingPatternInitializer;
+                    try lower_pattern.lower(self, .declaration, pattern, try self.lowerExpression(initializer));
+                    continue;
+                }
                 const symbol = self.symbolForDeclaration(declarator_id) orelse return error.MissingSemanticIdentity;
                 const binding = self.mappedBinding(symbol) orelse return error.MissingHirBinding;
                 if (declarator.init) |initializer| {
@@ -598,6 +645,28 @@ const Context = struct {
 
     pub fn astNode(self: *Context, node_id: ast.NodeId) ast.Node {
         return self.inputs.local.frontend.ast.node(node_id);
+    }
+
+    pub fn declarePatternIdentifier(self: *Context, node_id: ast.NodeId, kind: model.HirBindingKind) !void {
+        const symbol = self.symbolForDeclaration(node_id) orelse return error.MissingSemanticIdentity;
+        _ = try self.addBinding(
+            symbol,
+            self.astNode(node_id).data.Identifier.name,
+            kind,
+            kind != .const_,
+            if (kind == .var_) .hoisted_undefined else .temporal_dead_zone,
+            node_id,
+        );
+    }
+
+    pub fn patternBinding(self: *const Context, node_id: ast.NodeId) !ids.BindingId {
+        const symbol = self.symbolForDeclaration(node_id) orelse return error.MissingSemanticIdentity;
+        return self.mappedBinding(symbol) orelse error.MissingHirBinding;
+    }
+
+    pub fn lowerPatternInitializer(self: *Context, expression: ast.NodeId) !ids.ValueId {
+        const function = try createPatternInitializer(self.inputs, expression, self.visible.items);
+        return self.emitValue(.{ .create_closure = function }, self.nodeType(expression));
     }
 
     pub fn labelBodyIsIteration(self: *Context, node_id: ast.NodeId) bool {

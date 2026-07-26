@@ -66,7 +66,7 @@ fn patternItems(allocator: std.mem.Allocator, replacements: []const ValueReplace
     const output = try allocator.alloc(model.PatternItem, input.len);
     for (input, 0..) |item, index| output[index] = switch (item) {
         .property_computed => |operand| .{ .property_computed = value(replacements, operand) },
-        .default_value => |operand| .{ .default_value = value(replacements, operand) },
+        .default_initializer => |operand| .{ .default_initializer = value(replacements, operand) },
         else => item,
     };
     return output;

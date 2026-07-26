@@ -292,7 +292,7 @@ pub const AnfBuilder = struct {
             .apply_pattern => |plan| {
                 try self.requireValue(plan.source);
                 for (plan.items) |item| switch (item) {
-                    .property_computed, .default_value => |value| try self.requireValue(value),
+                    .property_computed, .default_initializer => |value| try self.requireValue(value),
                     .place_target => |place| try self.requirePlace(place),
                     else => {},
                 };

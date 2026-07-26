@@ -100,10 +100,15 @@ in `string0`, or `tag=VIZG_HIR_TEMPLATE_PART_VALUE` with the value ID in
 Pattern-plan items use `tag` as `VIZG_HIR_PATTERN_ITEM_*`. Container begin/end,
 elision, and rest items have no fields. `ELEMENT` stores the array index in
 `operand0`; `PROPERTY_STATIC` stores the key in `string0`;
-`PROPERTY_COMPUTED` and `DEFAULT_VALUE` store a value ID in `operand0`;
+`PROPERTY_COMPUTED` stores a value ID in `operand0`; `DEFAULT_VALUE` stores the
+value ID of a deferred initializer closure in `operand0`;
 `BINDING_TARGET` stores a binding ID in `operand0`; and `PLACE_TARGET` stores a
 place ID in `operand0`. The balanced stream is source ordered. Consumers own
-projection, default evaluation, rest materialization, and storage lowering.
+projection, conditional default invocation, rest materialization, and storage
+lowering. Variable declarations and destructuring assignments emit
+`APPLY_PATTERN` directly; the latter evaluate their source once and retain that
+same value as the assignment result. Parameter and catch-binding patterns are
+preserved in the frontend structure for phase-specific downstream lowering.
 
 ## Terminator payloads
 

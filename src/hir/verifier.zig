@@ -213,6 +213,9 @@ fn verifyOperation(context: Context, instruction: model.HirInstruction, block: u
         .load_meta => |kind| if (kind == .new_target and !context.function.flags.uses_new_target) return .illegal_operation,
         .apply_pattern => |plan| {
             for (plan.items) |item| switch (item) {
+                .property_computed, .default_initializer => |value| {
+                    if (!context.validValue(value, block, position)) return .invalid_value_binding_or_place;
+                },
                 .binding_target => |binding| {
                     if (!localBinding(context.function, binding)) return .invalid_value_binding_or_place;
                     if (plan.position == .assignment) {

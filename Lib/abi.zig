@@ -2909,7 +2909,7 @@ fn operationPayloadItem(operation: vizg.hir.HirOperation, index: usize) ?Vizg_Hi
             switch (item) {
                 .element => |element_index| output.operand0 = element_index,
                 .property_static => |name| setString0(&output, name),
-                .property_computed, .default_value => |value| output.operand0 = idIndex(value),
+                .property_computed, .default_initializer => |value| output.operand0 = idIndex(value),
                 .binding_target => |binding| output.operand0 = idIndex(binding),
                 .place_target => |place| output.operand0 = idIndex(place),
                 else => {},
@@ -3142,12 +3142,12 @@ test "HIR origin flags distinguish absent type from TypeId zero in v2" {
 test "ordered pattern plans have stable public payload mappings" {
     var domain: vizg.hir.ids.IdentityDomain = .{};
     const source = try vizg.hir.ValueId.init(&domain, 7);
-    const default_value = try vizg.hir.ValueId.init(&domain, 11);
+    const default_initializer = try vizg.hir.ValueId.init(&domain, 11);
     const binding = try vizg.hir.BindingId.init(&domain, 13);
     const items = [_]vizg.hir.PatternItem{
         .array_begin,
         .{ .element = 0 },
-        .{ .default_value = default_value },
+        .{ .default_initializer = default_initializer },
         .{ .binding_target = binding },
         .array_end,
     };

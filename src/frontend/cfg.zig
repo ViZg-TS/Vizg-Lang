@@ -75,9 +75,15 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
         },
         .ClassMethod => unreachable,
         .ClassField => |field| if (field.initializer) |initializer| try collectFunctions(allocator, tree, initializer, functions),
-        .Parameter => |parameter| if (parameter.initializer) |initializer| try collectFunctions(allocator, tree, initializer, functions),
+        .Parameter => |parameter| {
+            if (parameter.pattern) |pattern| try collectPatternFunctions(allocator, tree, pattern, functions);
+            if (parameter.initializer) |initializer| try collectFunctions(allocator, tree, initializer, functions);
+        },
         .VariableDeclaration => |declaration| for (declaration.declarations) |item| try collectFunctions(allocator, tree, item, functions),
-        .VariableDeclarator => |declarator| if (declarator.init) |init| try collectFunctions(allocator, tree, init, functions),
+        .VariableDeclarator => |declarator| {
+            if (declarator.pattern) |pattern| try collectPatternFunctions(allocator, tree, pattern, functions);
+            if (declarator.init) |init| try collectFunctions(allocator, tree, init, functions);
+        },
         .BlockStatement => |block| {
             for (block.statements) |statement| try collectFunctions(allocator, tree, statement, functions);
         },
@@ -86,7 +92,10 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
             if (try_stmt.handler) |handler| try collectFunctions(allocator, tree, handler, functions);
             if (try_stmt.finalizer) |finalizer| try collectFunctions(allocator, tree, finalizer, functions);
         },
-        .CatchClause => |catch_clause| try collectFunctions(allocator, tree, catch_clause.body, functions),
+        .CatchClause => |catch_clause| {
+            if (catch_clause.parameter) |parameter| try collectFunctions(allocator, tree, parameter, functions);
+            try collectFunctions(allocator, tree, catch_clause.body, functions);
+        },
         .FinallyClause => |finally_clause| try collectFunctions(allocator, tree, finally_clause.body, functions),
         .LabeledStatement => |labeled| try collectFunctions(allocator, tree, labeled.body, functions),
         .SwitchStatement => |switch_stmt| {
@@ -168,6 +177,25 @@ fn collectFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: No
             try collectFunctions(allocator, tree, expression.alternate, functions);
         },
         .SequenceExpression => |expression| for (expression.expressions) |child| try collectFunctions(allocator, tree, child, functions),
+        else => {},
+    }
+}
+
+fn collectPatternFunctions(allocator: std.mem.Allocator, tree: ast_mod.Ast, node_id: NodeId, functions: *std.ArrayList(FunctionCfg)) anyerror!void {
+    switch (tree.node(node_id).data) {
+        .Identifier => {},
+        .AssignmentExpression => |assignment| {
+            try collectPatternFunctions(allocator, tree, assignment.left, functions);
+            try collectFunctions(allocator, tree, assignment.right, functions);
+        },
+        .ArrayExpression => |array| for (array.elements) |element| {
+            if (element) |item| try collectPatternFunctions(allocator, tree, item, functions);
+        },
+        .ObjectExpression => |object| for (object.properties) |property| {
+            if (property.computed_key) |computed| try collectFunctions(allocator, tree, computed, functions);
+            try collectPatternFunctions(allocator, tree, property.value, functions);
+        },
+        .SpreadElement => |spread| try collectPatternFunctions(allocator, tree, spread.argument, functions),
         else => {},
     }
 }

@@ -2,10 +2,16 @@
 
 const ast = @import("../frontend/ast.zig");
 const ids = @import("ids.zig");
+const lower_pattern = @import("lower_pattern.zig");
 const model = @import("model.zig");
 const tokens = @import("../frontend/tokens.zig");
 
 pub fn lowerAssignment(context: anytype, node_id: ast.NodeId, expression: ast.AssignmentExpression) anyerror!ids.ValueId {
+    if (expression.operator == .Equal and lower_pattern.isComposite(context.astNode(expression.left))) {
+        const value = try context.lowerExpression(expression.right);
+        try lower_pattern.lower(context, .assignment, expression.left, value);
+        return value;
+    }
     const place = try context.lowerPlace(expression.left);
     if (expression.operator == .Equal) {
         const value = try context.lowerExpression(expression.right);

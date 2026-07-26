@@ -12,6 +12,7 @@ const lower_control = @import("lower_control.zig");
 const lower_exceptions = @import("lower_exceptions.zig");
 const lower_assignment = @import("lower_assignment.zig");
 const lower_place = @import("lower_place.zig");
+const lower_pattern = @import("lower_pattern.zig");
 const model = @import("model.zig");
 const project = @import("../project/root.zig");
 const semantics = @import("../semantics/root.zig");
@@ -149,15 +150,19 @@ const Lowerer = struct {
                 for (declaration.declarations) |declarator_id| {
                     const declarator = self.local.frontend.ast.node(declarator_id).data.VariableDeclarator;
                     if (declarator.type_annotation) |annotation| self.eraseTypeNode(annotation.root);
-                    const symbol_id = self.symbolForDeclaration(declarator_id) orelse return error.MissingSemanticIdentity;
-                    if (self.local.frontend.bind.symbols[symbol_id].host_bound) continue;
-                    const binding_id = try self.builder.makeId(ids.BindingId, self.builder.budget.usage.bindings);
                     const kind: model.HirBindingKind = switch (declaration.kind) {
                         .Keyword_var => .var_,
                         .Keyword_let => .let_,
                         .Keyword_const => .const_,
                         else => return error.InvalidVariableKind,
                     };
+                    if (declarator.pattern) |pattern| {
+                        try lower_pattern.predeclare(self, pattern, kind);
+                        continue;
+                    }
+                    const symbol_id = self.symbolForDeclaration(declarator_id) orelse return error.MissingSemanticIdentity;
+                    if (self.local.frontend.bind.symbols[symbol_id].host_bound) continue;
+                    const binding_id = try self.builder.makeId(ids.BindingId, self.builder.budget.usage.bindings);
                     try self.builder.appendBinding(&self.bindings, .{
                         .id = binding_id,
                         .name = try self.builder.copyString(declarator.name),
@@ -286,6 +291,11 @@ const Lowerer = struct {
             .VariableDeclaration => |declaration| {
                 for (declaration.declarations) |declarator_id| {
                     const declarator = self.local.frontend.ast.node(declarator_id).data.VariableDeclarator;
+                    if (declarator.pattern) |pattern| {
+                        const initializer = declarator.init orelse return error.MissingPatternInitializer;
+                        try lower_pattern.lower(self, .declaration, pattern, try self.lowerExpression(initializer));
+                        continue;
+                    }
                     const symbol_id = self.symbolForDeclaration(declarator_id) orelse return error.MissingSemanticIdentity;
                     if (self.local.frontend.bind.symbols[symbol_id].host_bound) continue;
                     const binding_id = self.bindingForSymbol(symbol_id) orelse return error.MissingHirBinding;
@@ -327,6 +337,37 @@ const Lowerer = struct {
 
     pub fn astNode(self: *Lowerer, node_id: ast.NodeId) ast.Node {
         return self.local.frontend.ast.node(node_id);
+    }
+
+    pub fn declarePatternIdentifier(self: *Lowerer, node_id: ast.NodeId, kind: model.HirBindingKind) !void {
+        const symbol = self.symbolForDeclaration(node_id) orelse return error.MissingSemanticIdentity;
+        if (self.local.frontend.bind.symbols[symbol].host_bound) return;
+        const binding = try self.builder.makeId(ids.BindingId, self.builder.budget.usage.bindings);
+        try self.builder.appendBinding(&self.bindings, .{
+            .id = binding,
+            .name = try self.builder.copyString(self.astNode(node_id).data.Identifier.name),
+            .kind = kind,
+            .type_id = self.symbolType(symbol),
+            .declaration = self.declarationId(node_id),
+            .mutable = kind != .const_,
+            .initial_state = if (kind == .var_) .hoisted_undefined else .temporal_dead_zone,
+            .origin = .invalid,
+        });
+        try self.symbol_bindings.append(self.builder.allocator, .{ .symbol = symbol, .binding = binding });
+    }
+
+    pub fn patternBinding(self: *const Lowerer, node_id: ast.NodeId) !ids.BindingId {
+        const symbol = self.symbolForDeclaration(node_id) orelse return error.MissingSemanticIdentity;
+        return self.bindingForSymbol(symbol) orelse error.MissingHirBinding;
+    }
+
+    pub fn lowerPatternInitializer(self: *Lowerer, expression: ast.NodeId) !ids.ValueId {
+        const function = try lower_function.createPatternInitializer(
+            self.functionInputs(),
+            expression,
+            self.symbol_bindings.items,
+        );
+        return self.emitValue(.{ .create_closure = function }, self.nodeType(expression));
     }
 
     pub fn labelBodyIsIteration(self: *Lowerer, node_id: ast.NodeId) bool {

@@ -326,6 +326,31 @@ fn placeLoweringProject() !project_mod.Project {
     return project;
 }
 
+fn patternLoweringProject() !project_mod.Project {
+    var project = project_mod.Project.init(std.testing.allocator);
+    errdefer project.deinit();
+    try project.addRoot(.{
+        .id = .init(225),
+        .logical_name = "goal-225.ts",
+        .bytes =
+        \\function source(): any { return null; }
+        \\function fallback(): number { return 7; }
+        \\const seed = 3;
+        \\let [first, , [nested = seed]] = source();
+        \\const { alpha: renamed, beta } = source();
+        \\let target: any = null;
+        \\const assignment_result = ([target] = source());
+        ,
+    });
+    while (switch (try project.step()) {
+        .complete => false,
+        .request => return error.UnexpectedModuleRequest,
+    }) {}
+    const result = try project.finish();
+    if (result.has_failures) return error.UnexpectedSemanticDiagnostics;
+    return project;
+}
+
 fn operatorLoweringProject() !project_mod.Project {
     var project = project_mod.Project.init(std.testing.allocator);
     errdefer project.deinit();
@@ -1276,6 +1301,64 @@ test "HIR place lowering evaluates targets once and preserves assignment results
     try std.testing.expect(operationForValue(initialization, post_value orelse return error.MissingPostValue) == .load_place);
     try std.testing.expect(operationForValue(initialization, pre_value orelse return error.MissingPreValue) == .add);
     try std.testing.expect(operationForValue(initialization, removed_value orelse return error.MissingDeleteValue) == .delete_place);
+}
+
+test "HIR pattern lowering preserves structure deferred defaults and assignment results" {
+    var project = try patternLoweringProject();
+    defer project.deinit();
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    const initialization_id = result.project.modules[0].initialization;
+    const initialization = result.project.functions[initialization_id.index().?];
+
+    var plans: std.ArrayList(hir.PatternPlan) = .empty;
+    defer plans.deinit(std.testing.allocator);
+    var source_calls: usize = 0;
+    var assignment_result: ?hir.ValueId = null;
+    const assignment_binding = try findBinding(initialization, "assignment_result", 0);
+    for (initialization.blocks) |block| for (block.instructions) |instruction| switch (instruction.operation) {
+        .call => source_calls += 1,
+        .apply_pattern => |plan| try plans.append(std.testing.allocator, plan),
+        .initialize_binding => |initialize| {
+            if (initialize.binding.eql(assignment_binding.id)) assignment_result = initialize.value;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 3), source_calls);
+    try std.testing.expectEqual(@as(usize, 3), plans.items.len);
+    try std.testing.expectEqual(hir.PatternPosition.declaration, plans.items[0].position);
+    try std.testing.expectEqual(hir.PatternPosition.declaration, plans.items[1].position);
+    try std.testing.expectEqual(hir.PatternPosition.assignment, plans.items[2].position);
+    try std.testing.expect(plans.items[0].items[0] == .array_begin);
+    try std.testing.expect(plans.items[0].items[3] == .elision);
+    try std.testing.expect(plans.items[0].items[5] == .array_begin);
+    try std.testing.expect(plans.items[0].items[7] == .default_initializer);
+    try std.testing.expect(plans.items[0].items[9] == .array_end);
+    try std.testing.expect(plans.items[0].items[10] == .array_end);
+    try std.testing.expect(plans.items[1].items[0] == .object_begin);
+    try std.testing.expectEqualStrings("alpha", plans.items[1].items[1].property_static);
+    try std.testing.expectEqualStrings("beta", plans.items[1].items[3].property_static);
+    try std.testing.expect(plans.items[1].items[5] == .object_end);
+    try std.testing.expect(plans.items[2].items[2] == .place_target);
+    try std.testing.expect((assignment_result orelse return error.MissingAssignmentResult).eql(plans.items[2].source));
+
+    const initializer_value = plans.items[0].items[7].default_initializer;
+    const initializer_function = switch (operationForValue(initialization, initializer_value)) {
+        .create_closure => findOperation(initialization, initializer_value).create_closure,
+        else => return error.MissingPatternInitializer,
+    };
+    const deferred = result.project.functions[initializer_function.index().?];
+    try std.testing.expectEqual(@as(usize, 1), deferred.captures.len);
+    const captured_binding = switch (deferred.captures[0].source) {
+        .binding => |binding| binding,
+        else => return error.MissingPatternInitializerCapture,
+    };
+    try std.testing.expectEqualStrings("seed", initialization.bindings[captured_binding.index().?].name);
 }
 
 test "ANF builder owns all semantic place forms and rejects unknown places" {
@@ -2288,6 +2371,13 @@ fn findBlock(function: hir.HirFunction, id: hir.BlockId) !hir.HirBlock {
 }
 
 fn operationForValue(function: hir.HirFunction, value: hir.ValueId) std.meta.Tag(hir.HirOperation) {
+    for (function.blocks) |block| for (block.instructions) |instruction| {
+        if (instruction.result != null and instruction.result.?.eql(value)) return instruction.operation;
+    };
+    unreachable;
+}
+
+fn findOperation(function: hir.HirFunction, value: hir.ValueId) hir.HirOperation {
     for (function.blocks) |block| for (block.instructions) |instruction| {
         if (instruction.result != null and instruction.result.?.eql(value)) return instruction.operation;
     };

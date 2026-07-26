@@ -1309,22 +1309,34 @@ const Parser = struct {
             }
             if (first_modifier != null and !allow_parameter_properties) self.reportAt(first_modifier.?, "parameter properties are only allowed in constructors", .unsupported_ts_syntax);
             const rest_token: ?Token = if (self.at(.Spread)) self.advance() else null;
-            const param_token = self.expectIdentifierLike("expected parameter name");
+            const param_start = self.current();
+            var param_name: []const u8 = "";
+            var param_pattern: ?NodeId = null;
+            var param_span = param_start.span;
+            if (self.at(.LBracket) or self.at(.LBrace)) {
+                param_pattern = try self.parsePrimary();
+                param_span = self.nodes.items[@intCast(param_pattern.?)].span;
+            } else {
+                const param_token = self.expectIdentifierLike("expected parameter name");
+                param_name = param_token.lexeme;
+                param_span = param_token.span;
+            }
             const optional_token: ?Token = if (self.at(.Question)) self.advance() else null;
             const param_type = try self.parseOptionalTypeAnnotation();
             const initializer: ?NodeId = if (self.eat(.Equal)) try self.parseAssignmentExpression() else null;
             if (rest_token != null and optional_token != null) self.reportAt(optional_token.?, "rest parameter cannot be optional", .unexpected_token);
-            if (rest_token != null and initializer != null) self.reportAt(param_token, "rest parameter cannot have an initializer", .unexpected_token);
+            if (rest_token != null and initializer != null) self.reportAt(param_start, "rest parameter cannot have an initializer", .unexpected_token);
             if (optional_token != null and initializer != null) self.reportAt(optional_token.?, "optional parameter cannot have an initializer", .unexpected_token);
             if (!self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) {
                 self.report("unexpected token in parameter", .unexpected_token);
                 while (!self.at(.Comma) and !self.at(.RParen) and !self.at(.EOF)) _ = self.advance();
             }
-            const end_span = if (initializer) |id| self.nodes.items[@intCast(id)].span else if (param_type) |annotation| annotation.span else if (optional_token) |token| token.span else param_token.span;
+            const end_span = if (initializer) |id| self.nodes.items[@intCast(id)].span else if (param_type) |annotation| annotation.span else if (optional_token) |token| token.span else param_span;
             try params.append(self.allocator, try self.addNode(.{
-                .span = joinSpans(if (modifier_span) |span| span else if (rest_token) |token| token.span else param_token.span, end_span),
+                .span = joinSpans(if (modifier_span) |span| span else if (rest_token) |token| token.span else param_span, end_span),
                 .data = .{ .Parameter = .{
-                    .name = param_token.lexeme,
+                    .name = param_name,
+                    .pattern = param_pattern,
                     .type_annotation = param_type,
                     .rest = rest_token != null,
                     .optional = optional_token != null,
@@ -1370,7 +1382,18 @@ const Parser = struct {
         errdefer declarations.deinit(self.allocator);
 
         while (!self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) {
-            const name = self.expectIdentifierLike("expected variable name");
+            const binding_start = self.current();
+            var name: []const u8 = "";
+            var pattern: ?NodeId = null;
+            var binding_span = binding_start.span;
+            if (self.at(.LBracket) or self.at(.LBrace)) {
+                pattern = try self.parsePrimary();
+                binding_span = self.nodes.items[@intCast(pattern.?)].span;
+            } else {
+                const name_token = self.expectIdentifierLike("expected variable name");
+                name = name_token.lexeme;
+                binding_span = name_token.span;
+            }
             const type_annotation: ?ast_mod.TypeAnnotation = try self.parseOptionalTypeAnnotation();
             if (!self.at(.Equal) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.EOF) and !(for_header and (self.at(.Keyword_in) or self.atIdentifierText("of")))) {
                 self.report("unexpected token in variable declaration", .unexpected_token);
@@ -1378,8 +1401,8 @@ const Parser = struct {
             }
             const init = if (self.eat(.Equal)) try self.parseAssignmentExpression() else null;
             try declarations.append(self.allocator, try self.addNode(.{
-                .span = joinSpans(name.span, self.previousOrCurrent().span),
-                .data = .{ .VariableDeclarator = .{ .name = name.lexeme, .init = init, .type_annotation = type_annotation } },
+                .span = joinSpans(binding_span, self.previousOrCurrent().span),
+                .data = .{ .VariableDeclarator = .{ .name = name, .pattern = pattern, .init = init, .type_annotation = type_annotation } },
             }));
             if (!self.eat(.Comma)) break;
         }
@@ -1455,14 +1478,18 @@ const Parser = struct {
             const catch_start = self.advance().span;
             var parameter: ?NodeId = null;
             if (self.eat(.LParen)) {
-                if (self.at(.Identifier)) {
-                    const binding = self.advance();
+                if (self.at(.LBracket) or self.at(.LBrace)) {
+                    const pattern = try self.parsePrimary();
+                    parameter = try self.addNode(.{
+                        .span = self.nodes.items[@intCast(pattern)].span,
+                        .data = .{ .Parameter = .{ .name = "", .pattern = pattern } },
+                    });
+                } else {
+                    const binding = self.expectIdentifierLike("expected catch binding");
                     parameter = try self.addNode(.{
                         .span = binding.span,
                         .data = .{ .Parameter = .{ .name = binding.lexeme } },
                     });
-                } else {
-                    self.report("expected catch binding", .expected_token);
                 }
                 _ = self.expect(.RParen, "expected ) after catch binding");
             }
@@ -2337,12 +2364,23 @@ const Parser = struct {
                     .value = value,
                 });
             } else if ((key_tok_kind == .Identifier or key_tok_kind == .PrivateIdentifier or key_tok_kind == .Keyword_with) and
-                (self.at(.Comma) or self.at(.RBrace)))
+                (self.at(.Comma) or self.at(.RBrace) or self.at(.Equal)))
             {
-                const value = try self.addNode(.{
+                const identifier = try self.addNode(.{
                     .span = key_tok.span,
                     .data = .{ .Identifier = .{ .name = key } },
                 });
+                const value = if (self.eat(.Equal)) blk: {
+                    const right = try self.parseAssignmentExpression();
+                    break :blk try self.addNode(.{
+                        .span = joinSpans(key_tok.span, self.nodes.items[@intCast(right)].span),
+                        .data = .{ .AssignmentExpression = .{
+                            .operator = .Equal,
+                            .left = identifier,
+                            .right = right,
+                        } },
+                    });
+                } else identifier;
                 try properties.append(self.allocator, .{
                     .kind = .shorthand,
                     .key = key,

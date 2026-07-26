@@ -1518,11 +1518,23 @@ pub fn inferLiteralNodeTypes(
                 if (member.computed_name) |computed| try stack.append(allocator, computed);
                 if (member.initializer) |initializer| try stack.append(allocator, initializer);
             },
-            .VariableDeclarator => |vd| if (vd.init) |i| try stack.append(allocator, i),
-            .FunctionDeclaration => |fn_decl| try stack.append(allocator, fn_decl.body),
-            .FunctionExpression => |fn_expr| try stack.append(allocator, fn_expr.body),
+            .VariableDeclarator => |vd| {
+                if (vd.pattern) |pattern| try stack.append(allocator, pattern);
+                if (vd.init) |i| try stack.append(allocator, i);
+            },
+            .FunctionDeclaration => |fn_decl| {
+                for (fn_decl.params) |param| try stack.append(allocator, param);
+                try stack.append(allocator, fn_decl.body);
+            },
+            .FunctionExpression => |fn_expr| {
+                for (fn_expr.params) |param| try stack.append(allocator, param);
+                try stack.append(allocator, fn_expr.body);
+            },
             .YieldExpression => |yield_expr| if (yield_expr.argument) |argument| try stack.append(allocator, argument),
-            .ArrowFunctionExpression => |arrow| try stack.append(allocator, arrow.body),
+            .ArrowFunctionExpression => |arrow| {
+                for (arrow.params) |param| try stack.append(allocator, param);
+                try stack.append(allocator, arrow.body);
+            },
             .ClassDeclaration => |class_decl| {
                 if (class_decl.super_class) |super_class| try stack.append(allocator, super_class);
                 for (class_decl.members) |member| try stack.append(allocator, member);
@@ -1532,8 +1544,14 @@ pub fn inferLiteralNodeTypes(
                 for (class_expr.members) |member| try stack.append(allocator, member);
             },
             .ClassField => |field| if (field.initializer) |initializer| try stack.append(allocator, initializer),
-            .ClassMethod => |method| try stack.append(allocator, method.body),
-            .Parameter => {},
+            .ClassMethod => |method| {
+                for (method.params) |param| try stack.append(allocator, param);
+                try stack.append(allocator, method.body);
+            },
+            .Parameter => |parameter| {
+                if (parameter.pattern) |pattern| try stack.append(allocator, pattern);
+                if (parameter.initializer) |initializer| try stack.append(allocator, initializer);
+            },
             .SpreadElement => |spread| try stack.append(allocator, spread.argument),
             .ReturnStatement => |ret| {
                 if (ret.argument) |a| _ = try stack.append(allocator, a);
@@ -1544,7 +1562,10 @@ pub fn inferLiteralNodeTypes(
                 if (try_stmt.handler) |handler| try stack.append(allocator, handler);
                 if (try_stmt.finalizer) |finalizer| try stack.append(allocator, finalizer);
             },
-            .CatchClause => |catch_clause| try stack.append(allocator, catch_clause.body),
+            .CatchClause => |catch_clause| {
+                if (catch_clause.parameter) |parameter| try stack.append(allocator, parameter);
+                try stack.append(allocator, catch_clause.body);
+            },
             .FinallyClause => |finally_clause| try stack.append(allocator, finally_clause.body),
             .BreakStatement, .ContinueStatement, .DebuggerStatement => {},
             .LabeledStatement => |labeled| try stack.append(allocator, labeled.body),
