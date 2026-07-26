@@ -289,6 +289,14 @@ pub const AnfBuilder = struct {
                 try self.requireValue(item.iterable);
             },
             .build_string => |parts| for (parts) |part| if (part == .value) try self.requireValue(part.value),
+            .apply_pattern => |plan| {
+                try self.requireValue(plan.source);
+                for (plan.items) |item| switch (item) {
+                    .property_computed, .default_value => |value| try self.requireValue(value),
+                    .place_target => |place| try self.requirePlace(place),
+                    else => {},
+                };
+            },
             .to_string => |value| try self.requireValue(value),
             .constant,
             .load_binding,

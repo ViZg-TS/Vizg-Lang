@@ -1,8 +1,9 @@
 # HIR payload consumer API v1
 
 `VIZG_HIR_PAYLOAD_API_VERSION` versions an additive, read-only projection of
-the frozen HIR v1 operations and terminators. It does not change the HIR model.
-Callers must pass this version to every payload accessor.
+the HIR v1 operations and terminators. Post-freeze operation additions append
+new ordinals and do not alter existing payload layouts or ordinals. Callers
+must pass this version to every payload accessor.
 
 Operation ordinals are identical to `VIZG_HIR_ENTITY_INSTRUCTION` record
 ordinals. Terminator ordinals are identical to `VIZG_HIR_ENTITY_BLOCK` record
@@ -84,6 +85,7 @@ Fields not named below are zero. Operation names correspond to the
 | `TO_STRING`, iterator/enumerator operations, `AWAIT`, `YIELD`, `YIELD_DELEGATE` | `operand0=value` |
 | `COLLECT_REST_ARGUMENTS`, `READ_ARGUMENT` | `operand0=argument index` |
 | `CREATE_ARGUMENTS_OBJECT`, `DEBUGGER_TRAP` | no fields |
+| `APPLY_PATTERN` | `tag0=Vizg_HirPatternPosition`, `operand0=source value`, ordered pattern stream in items |
 
 `item_count` is the number of available items. Call and construct items use
 `tag` as `VIZG_HIR_CALL_ARGUMENT_VALUE` or
@@ -94,6 +96,14 @@ bit 0 when cooked text is present, store cooked text in `string0`, and raw text
 in `string1`. Build-string items use `tag=VIZG_HIR_TEMPLATE_PART_TEXT` with text
 in `string0`, or `tag=VIZG_HIR_TEMPLATE_PART_VALUE` with the value ID in
 `operand0`.
+
+Pattern-plan items use `tag` as `VIZG_HIR_PATTERN_ITEM_*`. Container begin/end,
+elision, and rest items have no fields. `ELEMENT` stores the array index in
+`operand0`; `PROPERTY_STATIC` stores the key in `string0`;
+`PROPERTY_COMPUTED` and `DEFAULT_VALUE` store a value ID in `operand0`;
+`BINDING_TARGET` stores a binding ID in `operand0`; and `PLACE_TARGET` stores a
+place ID in `operand0`. The balanced stream is source ordered. Consumers own
+projection, default evaluation, rest materialization, and storage lowering.
 
 ## Terminator payloads
 

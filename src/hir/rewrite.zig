@@ -61,6 +61,17 @@ fn arguments(allocator: std.mem.Allocator, replacements: []const ValueReplacemen
     return output;
 }
 
+fn patternItems(allocator: std.mem.Allocator, replacements: []const ValueReplacement, input: []const model.PatternItem) ![]const model.PatternItem {
+    if (input.len == 0) return input;
+    const output = try allocator.alloc(model.PatternItem, input.len);
+    for (input, 0..) |item, index| output[index] = switch (item) {
+        .property_computed => |operand| .{ .property_computed = value(replacements, operand) },
+        .default_value => |operand| .{ .default_value = value(replacements, operand) },
+        else => item,
+    };
+    return output;
+}
+
 pub fn operation(allocator: std.mem.Allocator, replacements: []const ValueReplacement, input: model.HirOperation) !model.HirOperation {
     return switch (input) {
         .copy => |v| .{ .copy = value(replacements, v) },
@@ -113,6 +124,11 @@ pub fn operation(allocator: std.mem.Allocator, replacements: []const ValueReplac
         .await_ => |v| .{ .await_ = value(replacements, v) },
         .yield_ => |v| .{ .yield_ = value(replacements, v) },
         .yield_delegate => |v| .{ .yield_delegate = value(replacements, v) },
+        .apply_pattern => |plan| .{ .apply_pattern = .{
+            .position = plan.position,
+            .source = value(replacements, plan.source),
+            .items = try patternItems(allocator, replacements, plan.items),
+        } },
         else => input,
     };
 }

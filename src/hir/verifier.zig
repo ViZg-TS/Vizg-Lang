@@ -211,6 +211,21 @@ fn verifyOperation(context: Context, instruction: model.HirInstruction, block: u
         .load_super, .call_super_method => if (!context.function.flags.uses_super) return .illegal_operation,
         .call_super_constructor => if (!context.function.flags.constructor or !context.function.flags.uses_super) return .illegal_operation,
         .load_meta => |kind| if (kind == .new_target and !context.function.flags.uses_new_target) return .illegal_operation,
+        .apply_pattern => |plan| {
+            for (plan.items) |item| switch (item) {
+                .binding_target => |binding| {
+                    if (!localBinding(context.function, binding)) return .invalid_value_binding_or_place;
+                    if (plan.position == .assignment) {
+                        const record = findBinding(context.function, binding) orelse return .invalid_value_binding_or_place;
+                        if (!record.mutable or record.initial_state == .live_import) return .invalid_value_binding_or_place;
+                    }
+                },
+                .place_target => |place| {
+                    if (plan.position != .assignment or findPlace(context.function, place) == null) return .invalid_value_binding_or_place;
+                },
+                else => {},
+            };
+        },
         else => {},
     }
     if (phase == .canonical and ((operation == .copy and canonicalize.copyCanBeEliminated(context.function, instruction)) or operation == .void_value)) return .internal_invariant;

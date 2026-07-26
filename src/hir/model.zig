@@ -465,6 +465,37 @@ pub const TemplatePart = union(enum) {
     value: ids.ValueId,
 };
 
+/// Ordered, structural pattern vocabulary published for downstream lowering.
+/// The item stream is balanced and preserves source order. Projection and
+/// storage semantics remain with the HIR consumer.
+pub const PatternPosition = enum {
+    declaration,
+    assignment,
+    parameter,
+    catch_binding,
+};
+
+pub const PatternItem = union(enum) {
+    array_begin,
+    array_end,
+    object_begin,
+    object_end,
+    elision,
+    element: u32,
+    property_static: []const u8,
+    property_computed: ids.ValueId,
+    rest,
+    default_value: ids.ValueId,
+    binding_target: ids.BindingId,
+    place_target: ids.PlaceId,
+};
+
+pub const PatternPlan = struct {
+    position: PatternPosition,
+    source: ids.ValueId,
+    items: []const PatternItem,
+};
+
 pub const HirOperation = union(enum) {
     constant: HirConstant,
     copy: ids.ValueId,
@@ -536,6 +567,7 @@ pub const HirOperation = union(enum) {
     yield_: ids.ValueId,
     yield_delegate: ids.ValueId,
     debugger_trap,
+    apply_pattern: PatternPlan,
 
     pub fn checked(self: HirOperation) OperationError!HirOperation {
         switch (self) {
@@ -550,6 +582,10 @@ pub const HirOperation = union(enum) {
             .build_string => |parts| {
                 if (parts.len == 0) return error.EmptyStringBuild;
                 try checkArity(parts.len);
+            },
+            .apply_pattern => |plan| {
+                if (plan.items.len == 0) return error.EmptyPatternPlan;
+                try checkArity(plan.items.len);
             },
             else => {},
         }
@@ -573,6 +609,7 @@ pub const HirOperation = union(enum) {
             .array_append_iterable,
             .iterator_close,
             .debugger_trap,
+            .apply_pattern,
             => false,
             else => true,
         };
@@ -625,6 +662,7 @@ pub const HirOperation = union(enum) {
             .get_async_iterator, .await_, .yield_, .yield_delegate => EffectSet.suspend_effect,
             .collect_rest_arguments => EffectSet.read_effect,
             .debugger_trap => EffectSet.debug_effect,
+            .apply_pattern => EffectSet.user_write_effect,
         };
     }
 };
@@ -632,6 +670,7 @@ pub const HirOperation = union(enum) {
 pub const OperationError = error{
     ArityOverflow,
     EmptyStringBuild,
+    EmptyPatternPlan,
     TemplateArityMismatch,
     ResultPresenceMismatch,
     ResultTypeMismatch,

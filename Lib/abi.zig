@@ -2848,6 +2848,11 @@ fn operationPayload(operation: vizg.hir.HirOperation) Vizg_HirPayload {
         => |value| output.operand0 = idIndex(value),
         .collect_rest_arguments, .read_argument => |argument_index| output.operand0 = argument_index,
         .create_arguments_object, .debugger_trap => {},
+        .apply_pattern => |plan| {
+            output.tag0 = @intFromEnum(plan.position);
+            output.operand0 = idIndex(plan.source);
+            output.item_count = plan.items.len;
+        },
     }
     return output;
 }
@@ -2895,6 +2900,19 @@ fn operationPayloadItem(operation: vizg.hir.HirOperation, index: usize) ?Vizg_Hi
             switch (parts[index]) {
                 .text => |value| setString0(&output, value),
                 .value => |value| output.operand0 = idIndex(value),
+            }
+        },
+        .apply_pattern => |plan| {
+            if (index >= plan.items.len) return null;
+            const item = plan.items[index];
+            output.tag = @intFromEnum(std.meta.activeTag(item));
+            switch (item) {
+                .element => |element_index| output.operand0 = element_index,
+                .property_static => |name| setString0(&output, name),
+                .property_computed, .default_value => |value| output.operand0 = idIndex(value),
+                .binding_target => |binding| output.operand0 = idIndex(binding),
+                .place_target => |place| output.operand0 = idIndex(place),
+                else => {},
             }
         },
         else => return null,
@@ -3119,6 +3137,39 @@ test "HIR origin flags distinguish absent type from TypeId zero in v2" {
     try std.testing.expectEqual(@as(u8, 0), hirOriginFlags(2, null));
     try std.testing.expectEqual(@as(u8, 1), hirOriginFlags(2, 0));
     try std.testing.expectEqual(@as(u8, 1), hirOriginFlags(2, 42));
+}
+
+test "ordered pattern plans have stable public payload mappings" {
+    var domain: vizg.hir.ids.IdentityDomain = .{};
+    const source = try vizg.hir.ValueId.init(&domain, 7);
+    const default_value = try vizg.hir.ValueId.init(&domain, 11);
+    const binding = try vizg.hir.BindingId.init(&domain, 13);
+    const items = [_]vizg.hir.PatternItem{
+        .array_begin,
+        .{ .element = 0 },
+        .{ .default_value = default_value },
+        .{ .binding_target = binding },
+        .array_end,
+    };
+    const operation: vizg.hir.HirOperation = .{ .apply_pattern = .{
+        .position = .declaration,
+        .source = source,
+        .items = &items,
+    } };
+
+    const payload = operationPayload(operation);
+    try std.testing.expectEqual(@as(u32, 61), payload.tag);
+    try std.testing.expectEqual(@as(u32, 0), payload.tag0);
+    try std.testing.expectEqual(@as(u64, 7), payload.operand0);
+    try std.testing.expectEqual(@as(usize, items.len), payload.item_count);
+
+    const default_item = operationPayloadItem(operation, 2).?;
+    try std.testing.expectEqual(@as(u32, 9), default_item.tag);
+    try std.testing.expectEqual(@as(u64, 11), default_item.operand0);
+    const target_item = operationPayloadItem(operation, 3).?;
+    try std.testing.expectEqual(@as(u32, 10), target_item.tag);
+    try std.testing.expectEqual(@as(u64, 13), target_item.operand0);
+    try std.testing.expect(operationPayloadItem(operation, items.len) == null);
 }
 
 test "public diagnostic ABI mappings are stable" {

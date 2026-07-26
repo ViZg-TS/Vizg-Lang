@@ -674,6 +674,16 @@ test "variable-arity HIR operations reject malformed payloads" {
             .raw = raw,
         } }).checked(),
     );
+
+    const no_pattern_items: []const hir.PatternItem = &.{};
+    try std.testing.expectError(
+        error.EmptyPatternPlan,
+        (hir.HirOperation{ .apply_pattern = .{
+            .position = .declaration,
+            .source = hir.ValueId.invalid,
+            .items = no_pattern_items,
+        } }).checked(),
+    );
 }
 
 test "HIR represents branch merges with block parameters and semantic places" {

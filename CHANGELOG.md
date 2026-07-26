@@ -8,6 +8,10 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Added an ordered pattern-plan HIR operation and additive payload constants for
+  declaration, assignment, parameter, and catch-binding destructuring. The
+  payload preserves nested array/object order, defaults, rest, binding targets,
+  and assignment places without exposing syntax trees or runtime policy.
 - Added a source-backed global-root project operation and the additive
   `vizg_project_add_global_root` C entry point. Global declarations remain
   ordinary source-owned declarations with their source identity preserved in
