@@ -2933,3 +2933,72 @@ fn expectStableSnapshot(factory: anytype) !void {
     try std.testing.expectEqualStrings(first, second);
     try std.testing.expect(std.mem.startsWith(u8, first, "hir-v1 "));
 }
+
+fn restLoweringProject() !project_mod.Project {
+    var project = project_mod.Project.init(std.testing.allocator);
+    errdefer project.deinit();
+    try project.addRoot(.{
+        .id = .init(227),
+        .logical_name = "goal-227.ts",
+        .bytes =
+        \\function source(): any { return null; }
+        \\let first: any = null;
+        \\let rest_arr: any = null;
+        \\let alpha: any = null;
+        \\let rest_obj: any = null;
+        \\[first, ...rest_arr] = source();
+        \\const { alpha: renamed, ...rest_obj_local } = source();
+        ,
+    });
+    while (switch (try project.step()) {
+        .complete => false,
+        .request => return error.UnexpectedModuleRequest,
+    }) {}
+    const result = try project.finish();
+    if (result.has_failures) return error.UnexpectedSemanticDiagnostics;
+    return project;
+}
+
+test "HIR pattern lowering emits rest items for array and object rest" {
+    var project = try restLoweringProject();
+    defer project.deinit();
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    const initialization_id = result.project.modules[0].initialization;
+    const initialization = result.project.functions[initialization_id.index().?];
+
+    var plans: std.ArrayList(hir.PatternPlan) = .empty;
+    defer plans.deinit(std.testing.allocator);
+    for (initialization.blocks) |block| for (block.instructions) |instruction| switch (instruction.operation) {
+        .apply_pattern => |plan| try plans.append(std.testing.allocator, plan),
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), plans.items.len);
+
+    // Array rest: [first, ...rest_arr] = source();
+    //   array_begin, element=0, binding_target(first), rest, binding_target(rest_arr), array_end
+    const array_plan = plans.items[0];
+    try std.testing.expectEqual(hir.PatternPosition.assignment, array_plan.position);
+    try std.testing.expect(array_plan.items[0] == .array_begin);
+    try std.testing.expect(array_plan.items[1] == .element);
+    try std.testing.expect(array_plan.items[2] == .place_target);
+    try std.testing.expect(array_plan.items[3] == .rest);
+    try std.testing.expect(array_plan.items[4] == .place_target);
+    try std.testing.expect(array_plan.items[5] == .array_end);
+
+    // Object rest: { alpha: renamed, ...rest_obj_local } = source();
+    //   object_begin, property_static="alpha", binding_target(renamed), rest, binding_target(rest_obj_local), object_end
+    const object_plan = plans.items[1];
+    try std.testing.expectEqual(hir.PatternPosition.declaration, object_plan.position);
+    try std.testing.expect(object_plan.items[0] == .object_begin);
+    try std.testing.expectEqualStrings("alpha", object_plan.items[1].property_static);
+    try std.testing.expect(object_plan.items[2] == .binding_target);
+    try std.testing.expect(object_plan.items[3] == .rest);
+    try std.testing.expect(object_plan.items[4] == .binding_target);
+    try std.testing.expect(object_plan.items[5] == .object_end);
+}

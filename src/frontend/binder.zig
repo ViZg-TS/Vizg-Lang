@@ -364,7 +364,7 @@ const Binder = struct {
             .VariableDeclarator => |declarator| {
                 if (declarator.pattern) |pattern| {
                     try self.declarePattern(scope, pattern, .variable, true);
-                    try self.bindPatternExpressions(pattern, scope);
+                    try self.bindPatternExpressions(pattern, scope, true);
                 } else {
                     const symbol_id = try self.declare(scope, declarator.name, .variable, node_id, node.span);
                     self.attachSourceHostBinding(scope, symbol_id);
@@ -388,7 +388,7 @@ const Binder = struct {
                     switch (parameter_node.data) {
                         .Parameter => |parameter| if (parameter.pattern) |pattern| {
                             try self.declarePattern(catch_scope, pattern, .variable, false);
-                            try self.bindPatternExpressions(pattern, catch_scope);
+                            try self.bindPatternExpressions(pattern, catch_scope, false);
                         } else {
                             _ = try self.declare(catch_scope, parameter.name, .variable, parameter_id, parameter_node.span);
                         },
@@ -454,7 +454,7 @@ const Binder = struct {
                 // a hard internal error. Ordinary assignments keep the general
                 // expression binding.
                 if (assignment.operator == .Equal and self.isCompositePattern(assignment.left))
-                    try self.bindPatternExpressions(assignment.left, scope)
+                    try self.bindPatternExpressions(assignment.left, scope, true)
                 else
                     try self.bindNode(assignment.left, scope);
                 try self.bindNode(assignment.right, scope);
@@ -533,7 +533,7 @@ const Binder = struct {
     fn bindParameterInitializers(self: *Binder, parameters: []const NodeId, scope: ScopeId) !void {
         for (parameters) |parameter_id| switch (self.ast.node(parameter_id).data) {
             .Parameter => |parameter| {
-                if (parameter.pattern) |pattern| try self.bindPatternExpressions(pattern, scope);
+                if (parameter.pattern) |pattern| try self.bindPatternExpressions(pattern, scope, false);
                 if (parameter.initializer) |initializer| try self.bindNode(initializer, scope);
             },
             else => {},
@@ -560,28 +560,53 @@ const Binder = struct {
         }
     }
 
-    fn bindPatternExpressions(self: *Binder, node_id: NodeId, scope: ScopeId) !void {
+    fn bindPatternExpressions(self: *Binder, node_id: NodeId, scope: ScopeId, allow_rest: bool) !void {
         switch (self.ast.node(node_id).data) {
             .Identifier => {},
             .AssignmentExpression => |assignment| {
-                try self.bindPatternExpressions(assignment.left, scope);
+                try self.bindPatternExpressions(assignment.left, scope, allow_rest);
                 try self.bindNode(assignment.right, scope);
             },
-            .ArrayExpression => |array| for (array.elements) |element| {
-                if (element) |item| try self.bindPatternExpressions(item, scope);
-            },
-            .ObjectExpression => |object| for (object.properties) |property| {
-                if (property.computed_key) |computed| {
-                    self.reportUnsupportedPattern(self.ast.node(computed).span, "computed property keys in patterns are not supported");
-                    try self.bindNode(computed, scope);
+            .ArrayExpression => |array| {
+                var rest_seen = false;
+                for (array.elements) |element| {
+                    if (element) |item| {
+                        if (self.ast.node(item).data == .SpreadElement) {
+                            if (!allow_rest)
+                                self.reportUnsupportedPattern(self.ast.node(item).span, "rest elements in array patterns are not supported in this position");
+                            if (rest_seen)
+                                self.reportUnsupportedPattern(self.ast.node(item).span, "rest element must be last in array pattern");
+                            rest_seen = true;
+                        } else if (rest_seen) {
+                            self.reportUnsupportedPattern(self.ast.node(item).span, "rest element must be last in array pattern");
+                        }
+                        try self.bindPatternExpressions(item, scope, allow_rest);
+                    }
                 }
-                if (property.kind == .spread)
-                    self.reportUnsupportedPattern(property.key_span, "rest elements in object patterns are not supported");
-                try self.bindPatternExpressions(property.value, scope);
+            },
+            .ObjectExpression => |object| {
+                var rest_seen = false;
+                for (object.properties) |property| {
+                    if (property.computed_key) |computed| {
+                        self.reportUnsupportedPattern(self.ast.node(computed).span, "computed property keys in patterns are not supported");
+                        try self.bindNode(computed, scope);
+                    }
+                    if (property.kind == .spread) {
+                        if (!allow_rest)
+                            self.reportUnsupportedPattern(property.key_span, "rest elements in object patterns are not supported in this position");
+                        if (rest_seen)
+                            self.reportUnsupportedPattern(property.key_span, "rest element must be last in object pattern");
+                        rest_seen = true;
+                    } else if (rest_seen) {
+                        self.reportUnsupportedPattern(property.key_span, "rest element must be last in object pattern");
+                    }
+                    try self.bindPatternExpressions(property.value, scope, allow_rest);
+                }
             },
             .SpreadElement => |spread| {
-                self.reportUnsupportedPattern(self.ast.node(node_id).span, "rest elements in array patterns are not supported");
-                try self.bindPatternExpressions(spread.argument, scope);
+                if (!allow_rest)
+                    self.reportUnsupportedPattern(self.ast.node(node_id).span, "rest elements in array patterns are not supported in this position");
+                try self.bindPatternExpressions(spread.argument, scope, allow_rest);
             },
             else => {},
         }

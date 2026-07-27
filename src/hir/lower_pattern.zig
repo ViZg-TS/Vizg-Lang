@@ -23,7 +23,7 @@ pub fn predeclare(context: anytype, pattern: ast.NodeId, kind: model.HirBindingK
             if (property.computed_key != null or property.kind == .computed) return error.UnsupportedHirPattern;
             switch (property.kind) {
                 .key_value, .shorthand => try predeclare(context, property.value, kind),
-                .spread => return error.UnsupportedHirPattern,
+                .spread => try predeclare(context, property.value, kind),
                 else => return error.UnsupportedHirPattern,
             }
         },
@@ -31,7 +31,7 @@ pub fn predeclare(context: anytype, pattern: ast.NodeId, kind: model.HirBindingK
             if (assignment.operator != .Equal) return error.UnsupportedHirPattern;
             try predeclare(context, assignment.left, kind);
         },
-        .SpreadElement => return error.UnsupportedHirPattern,
+        .SpreadElement => |spread| try predeclare(context, spread.argument, kind),
         else => return error.UnsupportedHirPattern,
     }
 }
@@ -74,7 +74,14 @@ fn append(
                     try items.append(context.builder.allocator, .elision);
                     continue;
                 };
-                if (context.astNode(child).data == .SpreadElement) return error.UnsupportedHirPattern;
+                if (context.astNode(child).data == .SpreadElement) {
+                    // Rest must be the last element; the binder enforces this
+                    // with a semantic diagnostic and the plan validator rejects
+                    // any projection after rest.
+                    try items.append(context.builder.allocator, .rest);
+                    try append(context, position, child, items);
+                    continue;
+                }
                 try items.append(context.builder.allocator, .{ .element = @intCast(index) });
                 try append(context, position, child, items);
             }
@@ -91,7 +98,10 @@ fn append(
                         });
                         try append(context, position, property.value, items);
                     },
-                    .spread => return error.UnsupportedHirPattern,
+                    .spread => {
+                        try items.append(context.builder.allocator, .rest);
+                        try append(context, position, property.value, items);
+                    },
                     else => return error.UnsupportedHirPattern,
                 }
             }
@@ -104,7 +114,21 @@ fn append(
             });
             try append(context, position, assignment.left, items);
         },
-        .SpreadElement => return error.UnsupportedHirPattern,
+        .SpreadElement => |spread| {
+            // A SpreadElement at this point is the rest target inside an array
+            // pattern. Its argument is the binding/place identifier. The `.rest`
+            // marker was already emitted by the array branch before recursing
+            // here; emit only the target.
+            switch (position) {
+                .declaration => try items.append(context.builder.allocator, .{
+                    .binding_target = try context.patternBinding(spread.argument),
+                }),
+                .assignment => try items.append(context.builder.allocator, .{
+                    .place_target = try context.lowerPlace(spread.argument),
+                }),
+                else => return error.UnsupportedHirPattern,
+            }
+        },
         else => return error.UnsupportedHirPattern,
     }
 }
