@@ -447,7 +447,16 @@ const Binder = struct {
                 try self.bindNode(conditional.alternate, scope);
             },
             .AssignmentExpression => |assignment| {
-                try self.bindNode(assignment.left, scope);
+                // A composite `=` assignment (`([a, ...rest] = rhs)` or
+                // `({ x, ...rest } = rhs)`) is a destructuring pattern. Bind its
+                // left side as a pattern so rest/computed forms are rejected with
+                // a clean semantic diagnostic instead of reaching HIR lowering as
+                // a hard internal error. Ordinary assignments keep the general
+                // expression binding.
+                if (assignment.operator == .Equal and self.isCompositePattern(assignment.left))
+                    try self.bindPatternExpressions(assignment.left, scope)
+                else
+                    try self.bindNode(assignment.left, scope);
                 try self.bindNode(assignment.right, scope);
             },
             .IfStatement => |if_stmt| {
@@ -562,12 +571,37 @@ const Binder = struct {
                 if (element) |item| try self.bindPatternExpressions(item, scope);
             },
             .ObjectExpression => |object| for (object.properties) |property| {
-                if (property.computed_key) |computed| try self.bindNode(computed, scope);
+                if (property.computed_key) |computed| {
+                    self.reportUnsupportedPattern(self.ast.node(computed).span, "computed property keys in patterns are not supported");
+                    try self.bindNode(computed, scope);
+                }
+                if (property.kind == .spread)
+                    self.reportUnsupportedPattern(property.key_span, "rest elements in object patterns are not supported");
                 try self.bindPatternExpressions(property.value, scope);
             },
-            .SpreadElement => |spread| try self.bindPatternExpressions(spread.argument, scope),
+            .SpreadElement => |spread| {
+                self.reportUnsupportedPattern(self.ast.node(node_id).span, "rest elements in array patterns are not supported");
+                try self.bindPatternExpressions(spread.argument, scope);
+            },
             else => {},
         }
+    }
+
+    fn isCompositePattern(self: *const Binder, node_id: NodeId) bool {
+        return switch (self.ast.node(node_id).data) {
+            .ArrayExpression, .ObjectExpression => true,
+            else => false,
+        };
+    }
+
+    fn reportUnsupportedPattern(self: *Binder, span: tokens.Span, message: []const u8) void {
+        self.diagnostic_list.append(self.allocator, .{
+            .severity = .@"error",
+            .code = .unsupported_ts_syntax,
+            .phase = .binder,
+            .message = message,
+            .span = span,
+        }) catch {};
     }
 
     fn declare(self: *Binder, scope_id: ScopeId, name: []const u8, kind: SymbolKind, declaration: NodeId, span: tokens.Span) !SymbolId {

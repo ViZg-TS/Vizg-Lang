@@ -16,6 +16,7 @@ const model = @import("model.zig");
 const project = @import("../project/root.zig");
 const region_validation = @import("region_validation.zig");
 const semantics = @import("../semantics/root.zig");
+const types = @import("../types/root.zig");
 
 pub const SymbolBinding = struct {
     symbol: binder.SymbolId,
@@ -297,7 +298,7 @@ pub fn createPatternInitializer(inputs: Inputs, expression: ast.NodeId, outer: [
         .symbol = null,
         .kind = .ordinary,
         .flags = .{ .lexical_this = true },
-        .signature_type = inputs.builder.result.semanticResult().type_store.builtins.unknown,
+        .signature_type = patternInitializerSignature(inputs, expression),
         .bindings = try context.bindings.toOwnedSlice(inputs.builder.allocator),
         .captures = try context.captures.toOwnedSlice(inputs.builder.allocator),
         .places = try anf.finishPlaces(),
@@ -1016,6 +1017,26 @@ fn nodeScope(local: *const semantics.SemanticResult, node_id: ast.NodeId) ?binde
 
 fn resolvedNodeType(inputs: Inputs, node_id: ast.NodeId) model.TypeId {
     return inputs.project_module.type_info.lookupNode(node_id) orelse inputs.builder.result.semanticResult().type_store.builtins.unknown;
+}
+
+/// Build (or reuse) a zero-parameter function signature for a pattern default
+/// initializer closure whose return type is the default expression's type.
+///
+/// HIR lowering runs before `HirResult.seal()` clones the project type store
+/// read-only, so the project-owned `BorrowedProjectSemanticResult.type_store`
+/// is still the mutable store the semantic phase built. The closure has no
+/// source function node, so it has no pre-existing signature; synthesizing one
+/// here lets the consumer invoke the closure without a special-cased `unknown`
+/// signature. The store is borrowed mutably through a `@constCast` of the
+/// already-mutable project-owned storage; this is safe because the project
+/// owns the store mutably until `seal()` and no other HIR-lowering pass mutates
+/// signatures concurrently.
+fn patternInitializerSignature(inputs: Inputs, expression: ast.NodeId) model.TypeId {
+    const return_type = resolvedNodeType(inputs, expression);
+    const borrowed = inputs.builder.result.semanticResult();
+    const type_store: *types.TypeStore = @constCast(&borrowed.type_store);
+    return type_store.addFunctionDetailed(&.{}, return_type, 0, .{}) catch
+        borrowed.type_store.builtins.unknown;
 }
 
 fn declarationId(module_id: project.ModuleId, node_id: ast.NodeId) model.SemanticDeclId {
