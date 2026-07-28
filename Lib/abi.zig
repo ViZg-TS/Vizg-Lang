@@ -8,7 +8,9 @@ pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
 pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 2;
-pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 2;
+pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 3;
+pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
+pub const VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED: u32 = 1;
 pub const VIZG_HIR_ID_NONE: u64 = std.math.maxInt(u64);
 pub const VIZG_HIR_U32_NONE: u32 = std.math.maxInt(u32);
 pub const VIZG_HIR_TYPE_PRIMITIVE: u32 = 0;
@@ -251,6 +253,76 @@ pub const Vizg_ExternalModuleV2 = extern struct {
     export_count: usize,
 };
 
+pub const Vizg_ExternalTypeReferenceV3 = extern struct {
+    kind: u32,
+    builtin_type: u32,
+    external_type_id: u64,
+};
+
+pub const Vizg_ExternalTypeMemberV3 = extern struct {
+    name_ptr: [*c]const u8,
+    name_len: usize,
+    type_reference: Vizg_ExternalTypeReferenceV3,
+    optional: u8,
+    readonly: u8,
+    reserved: [6]u8,
+};
+
+pub const Vizg_ExternalTypeV3 = extern struct {
+    external_type_id: u64,
+    name_ptr: [*c]const u8,
+    name_len: usize,
+    members_ptr: [*c]const Vizg_ExternalTypeMemberV3,
+    member_count: usize,
+};
+
+pub const Vizg_ExternalParameterV3 = extern struct {
+    name_ptr: [*c]const u8,
+    name_len: usize,
+    type_reference: Vizg_ExternalTypeReferenceV3,
+    optional: u8,
+    has_default: u8,
+    rest: u8,
+    reserved: [5]u8,
+};
+
+pub const Vizg_ExternalFunctionV3 = extern struct {
+    parameters_ptr: [*c]const Vizg_ExternalParameterV3,
+    parameter_count: usize,
+    return_type: Vizg_ExternalTypeReferenceV3,
+    type_parameter_count: u32,
+    is_async: u8,
+    is_generator: u8,
+    is_constructor: u8,
+    reserved: u8,
+};
+
+pub const Vizg_ExternalExportV3 = extern struct {
+    name_ptr: [*c]const u8,
+    name_len: usize,
+    kind: u32,
+    namespace_flags: Vizg_ExternalNamespaceFlags,
+    has_type_reference: u8,
+    has_function: u8,
+    reserved: u8,
+    type_reference: Vizg_ExternalTypeReferenceV3,
+    declaration_kind: u32,
+    effect_flags: u16,
+    reserved2: u16,
+    external_symbol_id: u64,
+    function: Vizg_ExternalFunctionV3,
+};
+
+pub const Vizg_ExternalModuleV3 = extern struct {
+    external_module_id: u64,
+    logical_name_ptr: [*c]const u8,
+    logical_name_len: usize,
+    exports_ptr: [*c]const Vizg_ExternalExportV3,
+    export_count: usize,
+    types_ptr: [*c]const Vizg_ExternalTypeV3,
+    type_count: usize,
+};
+
 /// Borrowed ambient global descriptor passed to `vizg_project_register_ambient_globals`.
 /// `name_ptr`/`name_len` reference host memory borrowed for the call. When
 /// `has_type_metadata` is 0, `type_metadata` must be `VIZG_EXTERNAL_TYPE_UNKNOWN`.
@@ -474,6 +546,14 @@ pub const Vizg_HirTypeDetail = extern struct {
     kind: u32,
     builtin_kind: u32,
     reserved: u32,
+};
+
+pub const Vizg_HirTypeMember = extern struct {
+    name_ptr: [*c]const u8,
+    name_len: usize,
+    type_id: u32,
+    flags: u8,
+    reserved: [3]u8,
 };
 
 pub const Vizg_HirFunctionSignature = extern struct {
@@ -1545,6 +1625,190 @@ pub fn projectRespondExternalV2(project: ?*Vizg_Project, request_id: u64, input:
     return .OK;
 }
 
+fn externalTypeReferenceV3(item: Vizg_ExternalTypeReferenceV3) ?vizg.ExternalTypeReference {
+    return switch (item.kind) {
+        VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN => if (item.external_type_id == 0)
+            .{ .builtin = externalType(item.builtin_type) orelse return null }
+        else
+            null,
+        VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED => if (item.builtin_type == 0)
+            .{ .declared = .init(item.external_type_id) }
+        else
+            null,
+        else => null,
+    };
+}
+
+fn zeroExternalFunctionV3(item: Vizg_ExternalFunctionV3) bool {
+    return item.parameters_ptr == null and item.parameter_count == 0 and
+        item.return_type.kind == VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN and
+        item.return_type.builtin_type == 0 and item.return_type.external_type_id == 0 and
+        item.type_parameter_count == 0 and item.is_async == 0 and item.is_generator == 0 and
+        item.is_constructor == 0 and item.reserved == 0;
+}
+
+fn validExternalFunctionV3(owned: *const OwnedProject, item: *const Vizg_ExternalFunctionV3) bool {
+    if (!validAlignedHostArray(Vizg_ExternalParameterV3, item.parameters_ptr, item.parameter_count) or
+        item.is_async > 1 or item.is_generator > 1 or item.is_constructor > 1 or item.reserved != 0 or
+        externalTypeReferenceV3(item.return_type) == null) return false;
+    const bytes_len = checkedByteLen(Vizg_ExternalParameterV3, item.parameter_count) orelse return false;
+    if (!inputOutsideWorkspace(owned, item.parameters_ptr, bytes_len)) return false;
+    if (item.parameter_count != 0) {
+        for (item.parameters_ptr[0..item.parameter_count], 0..) |*parameter, index| {
+            if (!validAlignedHostArray(u8, parameter.name_ptr, parameter.name_len) or
+                !inputOutsideWorkspace(owned, parameter.name_ptr, parameter.name_len) or
+                externalTypeReferenceV3(parameter.type_reference) == null or
+                parameter.optional > 1 or parameter.has_default > 1 or parameter.rest > 1 or
+                !std.mem.allEqual(u8, &parameter.reserved, 0) or
+                (parameter.rest == 1 and index + 1 != item.parameter_count)) return false;
+        }
+    }
+    return true;
+}
+
+fn validExternalExportV3(owned: *const OwnedProject, item: *const Vizg_ExternalExportV3) bool {
+    if (!validAlignedHostArray(u8, item.name_ptr, item.name_len) or
+        !inputOutsideWorkspace(owned, item.name_ptr, item.name_len) or
+        item.namespace_flags == 0 or
+        item.namespace_flags & ~@as(Vizg_ExternalNamespaceFlags, VIZG_EXTERNAL_NAMESPACE_BOTH) != 0 or
+        item.has_type_reference > 1 or item.has_function > 1 or item.reserved != 0 or item.reserved2 != 0 or
+        exportKind(item.kind) == null or externalDeclarationKind(item.declaration_kind) == null or
+        externalEffects(item.effect_flags) == null) return false;
+    if (item.has_type_reference == 1 and externalTypeReferenceV3(item.type_reference) == null) return false;
+    if (item.has_function == 0) return zeroExternalFunctionV3(item.function) and item.declaration_kind != 0;
+    return item.declaration_kind == 0 and validExternalFunctionV3(owned, &item.function);
+}
+
+fn carveScratch(comptime T: type, cursor: *usize, lower_bound: usize, count: usize) ?[]T {
+    const byte_len = checkedByteLen(T, count) orelse return null;
+    const unaligned = std.math.sub(usize, cursor.*, byte_len) catch return null;
+    const start = std.mem.alignBackward(usize, unaligned, @alignOf(T));
+    if (start < lower_bound) return null;
+    cursor.* = start;
+    const ptr: [*]T = @ptrFromInt(start);
+    return ptr[0..count];
+}
+
+pub fn projectRespondExternalV3(project: ?*Vizg_Project, request_id: u64, input: ?*const Vizg_ExternalModuleV3) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
+    beginProjectCall(owned);
+    const args = input orelse return .INVALID_ARGUMENT;
+    if (!validAlignedHostObject(Vizg_ExternalModuleV3, args) or
+        !inputOutsideWorkspace(owned, args, @sizeOf(Vizg_ExternalModuleV3)) or
+        !validAlignedHostArray(u8, args.logical_name_ptr, args.logical_name_len) or
+        !validAlignedHostArray(Vizg_ExternalExportV3, args.exports_ptr, args.export_count) or
+        !validAlignedHostArray(Vizg_ExternalTypeV3, args.types_ptr, args.type_count)) return .INVALID_ARGUMENT;
+    const export_bytes = checkedByteLen(Vizg_ExternalExportV3, args.export_count) orelse return .INVALID_ARGUMENT;
+    const type_bytes = checkedByteLen(Vizg_ExternalTypeV3, args.type_count) orelse return .INVALID_ARGUMENT;
+    if (!inputOutsideWorkspace(owned, args.logical_name_ptr, args.logical_name_len) or
+        !inputOutsideWorkspace(owned, args.exports_ptr, export_bytes) or
+        !inputOutsideWorkspace(owned, args.types_ptr, type_bytes)) return .INVALID_ARGUMENT;
+
+    var parameter_count: usize = 0;
+    if (args.export_count != 0) {
+        for (args.exports_ptr[0..args.export_count]) |*item| {
+            if (!validExternalExportV3(owned, item)) return .INVALID_ARGUMENT;
+            parameter_count = std.math.add(usize, parameter_count, item.function.parameter_count) catch return .INVALID_ARGUMENT;
+        }
+    }
+    var member_count: usize = 0;
+    if (args.type_count != 0) {
+        for (args.types_ptr[0..args.type_count]) |*item| {
+            if (!validAlignedHostArray(u8, item.name_ptr, item.name_len) or item.name_len == 0 or
+                !inputOutsideWorkspace(owned, item.name_ptr, item.name_len) or
+                !validAlignedHostArray(Vizg_ExternalTypeMemberV3, item.members_ptr, item.member_count)) return .INVALID_ARGUMENT;
+            const member_bytes = checkedByteLen(Vizg_ExternalTypeMemberV3, item.member_count) orelse return .INVALID_ARGUMENT;
+            if (!inputOutsideWorkspace(owned, item.members_ptr, member_bytes)) return .INVALID_ARGUMENT;
+            member_count = std.math.add(usize, member_count, item.member_count) catch return .INVALID_ARGUMENT;
+            if (item.member_count != 0) for (item.members_ptr[0..item.member_count]) |*member| {
+                if (!validAlignedHostArray(u8, member.name_ptr, member.name_len) or member.name_len == 0 or
+                    !inputOutsideWorkspace(owned, member.name_ptr, member.name_len) or
+                    externalTypeReferenceV3(member.type_reference) == null or member.optional > 1 or member.readonly > 1 or
+                    !std.mem.allEqual(u8, &member.reserved, 0)) return .INVALID_ARGUMENT;
+            };
+        }
+    }
+
+    const buffer = owned.fba.buffer;
+    const buffer_start = @intFromPtr(buffer.ptr);
+    const buffer_end = std.math.add(usize, buffer_start, buffer.len) catch return .OUT_OF_MEMORY;
+    const used_end = std.math.add(usize, buffer_start, owned.fba.end_index) catch return .OUT_OF_MEMORY;
+    var cursor = buffer_end;
+    const descriptors = carveScratch(vizg.ExternalExportDescriptor, &cursor, used_end, args.export_count) orelse return .OUT_OF_MEMORY;
+    const parameters = carveScratch(vizg.ExternalParameterDescriptor, &cursor, used_end, parameter_count) orelse return .OUT_OF_MEMORY;
+    const external_types = carveScratch(vizg.ExternalTypeDescriptor, &cursor, used_end, args.type_count) orelse return .OUT_OF_MEMORY;
+    const members = carveScratch(vizg.ExternalTypeMemberDescriptor, &cursor, used_end, member_count) orelse return .OUT_OF_MEMORY;
+    owned.fba.buffer = buffer[0 .. cursor - buffer_start];
+    defer owned.fba.buffer = buffer;
+
+    var next_parameter: usize = 0;
+    for (descriptors, 0..) |*output, index| {
+        const item = args.exports_ptr[index];
+        var function: ?vizg.ExternalFunctionDescriptor = null;
+        if (item.has_function == 1) {
+            const start = next_parameter;
+            if (item.function.parameter_count != 0) for (item.function.parameters_ptr[0..item.function.parameter_count]) |parameter| {
+                parameters[next_parameter] = .{
+                    .name = bytes(parameter.name_ptr, parameter.name_len),
+                    .type_reference = externalTypeReferenceV3(parameter.type_reference).?,
+                    .optional = parameter.optional == 1,
+                    .has_default = parameter.has_default == 1,
+                    .rest = parameter.rest == 1,
+                };
+                next_parameter += 1;
+            };
+            function = .{
+                .parameters = parameters[start..next_parameter],
+                .return_type_reference = externalTypeReferenceV3(item.function.return_type).?,
+                .type_parameter_count = item.function.type_parameter_count,
+                .is_async = item.function.is_async == 1,
+                .is_generator = item.function.is_generator == 1,
+                .is_constructor = item.function.is_constructor == 1,
+            };
+        }
+        output.* = .{
+            .name = bytes(item.name_ptr, item.name_len),
+            .kind = exportKind(item.kind).?,
+            .namespace = .{
+                .value = item.namespace_flags & VIZG_EXTERNAL_NAMESPACE_VALUE != 0,
+                .type = item.namespace_flags & VIZG_EXTERNAL_NAMESPACE_TYPE != 0,
+            },
+            .type_reference = if (item.has_type_reference == 1) externalTypeReferenceV3(item.type_reference).? else null,
+            .symbol_id = .init(item.external_symbol_id),
+            .declaration_kind = externalDeclarationKind(item.declaration_kind).?,
+            .function = function,
+            .effects = externalEffects(item.effect_flags).?,
+        };
+    }
+    var next_member: usize = 0;
+    for (external_types, 0..) |*output, index| {
+        const item = args.types_ptr[index];
+        const start = next_member;
+        if (item.member_count != 0) for (item.members_ptr[0..item.member_count]) |member| {
+            members[next_member] = .{
+                .name = bytes(member.name_ptr, member.name_len),
+                .type_reference = externalTypeReferenceV3(member.type_reference).?,
+                .optional = member.optional == 1,
+                .readonly = member.readonly == 1,
+            };
+            next_member += 1;
+        };
+        output.* = .{
+            .id = .init(item.external_type_id),
+            .name = bytes(item.name_ptr, item.name_len),
+            .members = members[start..next_member],
+        };
+    }
+    owned.project.respondExternalModule(.init(request_id), .{
+        .id = .init(args.external_module_id),
+        .logical_name = bytes(args.logical_name_ptr, args.logical_name_len),
+        .exports = descriptors,
+        .types = external_types,
+    }) catch |err| return statusFromError(owned, err);
+    return .OK;
+}
+
 pub fn projectRespondFailure(project: ?*Vizg_Project, request_id: u64, failure_kind: u32) callconv(.c) Vizg_ProjectStatus {
     const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
     if (owned.creation_limited) return .INVALID_STATE;
@@ -2191,6 +2455,60 @@ pub fn hirTypeDetailAt(
         },
         .reserved = 0,
     };
+    return .OK;
+}
+
+pub fn hirTypeMemberCount(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    type_id: u32,
+    out_count: ?*usize,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_count orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(usize, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(usize))) return .INVALID_ARGUMENT;
+    const item = owned.hir_result.?.lookupType(type_id) orelse return .INVALID_ARGUMENT;
+    output.* = switch (item.kind) {
+        .object => |properties| properties.len,
+        .interface => |interface| interface.members.members.len,
+        else => return .INVALID_ARGUMENT,
+    };
+    return .OK;
+}
+
+pub fn hirTypeMemberAt(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    type_id: u32,
+    index: usize,
+    out_member: ?*Vizg_HirTypeMember,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_member orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirTypeMember, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirTypeMember))) return .INVALID_ARGUMENT;
+    const item = owned.hir_result.?.lookupType(type_id) orelse return .INVALID_ARGUMENT;
+    output.* = std.mem.zeroes(Vizg_HirTypeMember);
+    switch (item.kind) {
+        .object => |properties| {
+            if (index >= properties.len) return .INVALID_ARGUMENT;
+            const member = properties[index];
+            output.name_ptr = member.name.ptr;
+            output.name_len = member.name.len;
+            output.type_id = member.type_id;
+            output.flags = @intFromBool(member.optional) | (@as(u8, @intFromBool(member.readonly)) << 1);
+        },
+        .interface => |interface| {
+            if (index >= interface.members.members.len) return .INVALID_ARGUMENT;
+            const member = interface.members.members[index];
+            output.name_ptr = member.name.ptr;
+            output.name_len = member.name.len;
+            output.type_id = member.type_id;
+            output.flags = @intFromBool(member.optional) | (@as(u8, @intFromBool(member.readonly)) << 1);
+        },
+        else => return .INVALID_ARGUMENT,
+    }
     return .OK;
 }
 
@@ -3091,6 +3409,7 @@ comptime {
     @export(&projectRespondExternal, .{ .name = "vizg_project_respond_external" });
     @export(&externalModuleApiVersion, .{ .name = "vizg_external_module_api_version" });
     @export(&projectRespondExternalV2, .{ .name = "vizg_project_respond_external_v2" });
+    @export(&projectRespondExternalV3, .{ .name = "vizg_project_respond_external_v3" });
     @export(&projectRespondFailure, .{ .name = "vizg_project_respond_failure" });
     @export(&projectFinish, .{ .name = "vizg_project_finish" });
     @export(&projectResultSummary, .{ .name = "vizg_project_result_summary" });
@@ -3106,6 +3425,8 @@ comptime {
     @export(&hirRecordAt, .{ .name = "vizg_hir_record_at" });
     @export(&hirDetailApiVersion, .{ .name = "vizg_hir_detail_api_version" });
     @export(&hirTypeDetailAt, .{ .name = "vizg_hir_type_detail_at" });
+    @export(&hirTypeMemberCount, .{ .name = "vizg_hir_type_member_count" });
+    @export(&hirTypeMemberAt, .{ .name = "vizg_hir_type_member_at" });
     @export(&hirFunctionSignature, .{ .name = "vizg_hir_function_signature" });
     @export(&hirFunctionCompletionType, .{ .name = "vizg_hir_function_completion_type" });
     @export(&hirSignatureParameterAt, .{ .name = "vizg_hir_signature_parameter_at" });

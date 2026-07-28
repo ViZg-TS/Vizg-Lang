@@ -416,6 +416,8 @@ pub fn build(b: *std.Build) void {
         \\vizg_hir_terminator_at
         \\vizg_hir_terminator_item_at
         \\vizg_hir_type_detail_at
+        \\vizg_hir_type_member_at
+        \\vizg_hir_type_member_count
         \\vizg_project_add_global_root
         \\vizg_project_add_source
         \\vizg_project_analyze_source
@@ -428,6 +430,7 @@ pub fn build(b: *std.Build) void {
         \\vizg_project_register_source_host_bindings
         \\vizg_project_respond_external
         \\vizg_project_respond_external_v2
+        \\vizg_project_respond_external_v3
         \\vizg_project_respond_failure
         \\vizg_project_respond_source
         \\vizg_project_result_destroy

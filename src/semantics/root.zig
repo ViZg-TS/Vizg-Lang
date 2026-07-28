@@ -582,7 +582,29 @@ fn collectExternalExports(
     for (modules) |module| {
         for (module.exports, 0..) |exported, index| {
             const declaration = types.SemanticDeclId.initExternal(module.id, @intCast(index));
-            var value_type = externalBuiltinTypeId(&type_store.builtins, exported.type_metadata);
+            var value_type = if (exported.function) |function| blk: {
+                const parameters = try allocator.alloc(types.ParameterType, function.parameters.len);
+                for (function.parameters, 0..) |parameter, parameter_index| parameters[parameter_index] = .{
+                    .name = parameter.name,
+                    .type_id = try graphExternalTypeId(allocator, type_store, module, parameter.type_reference, &.{}),
+                    .optional = parameter.optional,
+                    .has_default = parameter.has_default,
+                    .rest = parameter.rest,
+                };
+                break :blk try type_store.addFunctionDetailed(
+                    parameters,
+                    try graphExternalTypeId(allocator, type_store, module, function.return_type, &.{}),
+                    function.type_parameter_count,
+                    .{
+                        .is_async = function.is_async,
+                        .is_generator = function.is_generator,
+                        .is_constructor = function.is_constructor,
+                    },
+                );
+            } else if (exported.type_reference) |reference|
+                try graphExternalTypeId(allocator, type_store, module, reference, &.{})
+            else
+                externalBuiltinTypeId(&type_store.builtins, exported.type_metadata);
             var type_type = value_type;
             if (exported.type_metadata == .object and exported.namespace.value and exported.namespace.type) {
                 const class_type = try type_store.createClassSemanticType(declaration, exported.name);
@@ -610,6 +632,35 @@ fn collectExternalExports(
             });
         }
     }
+}
+
+fn graphExternalTypeId(
+    allocator: std.mem.Allocator,
+    type_store: *types.TypeStore,
+    module: modules_mod.graph.ExternalModule,
+    reference: modules_mod.graph.ExternalTypeReference,
+    ancestors: []const u64,
+) !types.TypeId {
+    return switch (reference) {
+        .builtin => |metadata| externalBuiltinTypeId(&type_store.builtins, metadata),
+        .declared => |external_id| blk: {
+            for (ancestors) |ancestor| if (ancestor == external_id) return error.RecursiveExternalType;
+            const descriptor = for (module.types) |item| {
+                if (item.id == external_id) break item;
+            } else return error.InvalidExternalType;
+            const next_ancestors = try allocator.alloc(u64, ancestors.len + 1);
+            @memcpy(next_ancestors[0..ancestors.len], ancestors);
+            next_ancestors[ancestors.len] = external_id;
+            const properties = try allocator.alloc(types.ObjectProperty, descriptor.members.len);
+            for (descriptor.members, 0..) |member, index| properties[index] = .{
+                .name = member.name,
+                .type_id = try graphExternalTypeId(allocator, type_store, module, member.type_reference, next_ancestors),
+                .optional = member.optional,
+                .readonly = member.readonly,
+            };
+            break :blk try type_store.intern(.{ .object = properties });
+        },
+    };
 }
 
 fn createArena(backing_allocator: std.mem.Allocator) !*std.heap.ArenaAllocator {

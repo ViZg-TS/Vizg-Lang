@@ -933,25 +933,60 @@ pub const Project = struct {
         for (self.external_modules.items) |owned| {
             const descriptor = owned.descriptor;
             const graph_exports = try allocator.alloc(modules_mod.graph.ExternalExport, descriptor.exports.len);
-            for (descriptor.exports, 0..) |exported, index| graph_exports[index] = .{
-                .name = exported.name,
-                .kind = @enumFromInt(@intFromEnum(exported.kind)),
-                .namespace = .{ .value = exported.namespace.value, .type = exported.namespace.type },
-                // A detailed function signature supersedes the coarse primitive
-                // fallback. It is attached after graph linking, so exposing an
-                // `object` fallback here would produce a premature not-callable
-                // diagnostic before the external identity is enriched.
-                .type_metadata = if (exported.function != null)
-                    null
-                else if (exported.type_metadata) |metadata|
-                    @enumFromInt(@intFromEnum(metadata))
-                else
-                    null,
-            };
+            for (descriptor.exports, 0..) |exported, index| {
+                var function: ?modules_mod.graph.ExternalFunction = null;
+                if (exported.function) |source_function| {
+                    const parameters = try allocator.alloc(modules_mod.graph.ExternalParameter, source_function.parameters.len);
+                    for (source_function.parameters, 0..) |parameter, parameter_index| parameters[parameter_index] = .{
+                        .name = parameter.name,
+                        .type_reference = graphExternalTypeReference(parameter.type_reference orelse .{ .builtin = parameter.type_metadata }),
+                        .optional = parameter.optional,
+                        .has_default = parameter.has_default,
+                        .rest = parameter.rest,
+                    };
+                    function = .{
+                        .parameters = parameters,
+                        .return_type = graphExternalTypeReference(source_function.return_type_reference orelse .{ .builtin = source_function.return_type }),
+                        .type_parameter_count = source_function.type_parameter_count,
+                        .is_async = source_function.is_async,
+                        .is_generator = source_function.is_generator,
+                        .is_constructor = source_function.is_constructor,
+                    };
+                }
+                graph_exports[index] = .{
+                    .name = exported.name,
+                    .kind = @enumFromInt(@intFromEnum(exported.kind)),
+                    .namespace = .{ .value = exported.namespace.value, .type = exported.namespace.type },
+                    .type_metadata = if (exported.function != null or exported.type_reference != null)
+                        null
+                    else if (exported.type_metadata) |metadata|
+                        @enumFromInt(@intFromEnum(metadata))
+                    else
+                        null,
+                    .type_reference = if (exported.type_reference) |reference| graphExternalTypeReference(reference) else null,
+                    .function = function,
+                };
+            }
+            const graph_types = try allocator.alloc(modules_mod.graph.ExternalTypeDescriptor, descriptor.types.len);
+            for (descriptor.types, 0..) |external_type, type_index| {
+                const members = try allocator.alloc(modules_mod.graph.ExternalTypeMember, external_type.members.len);
+                for (external_type.members, 0..) |member, member_index| members[member_index] = .{
+                    .name = member.name,
+                    .type_reference = graphExternalTypeReference(member.type_reference),
+                    .optional = member.optional,
+                    .readonly = member.readonly,
+                };
+                graph_types[type_index] = .{
+                    .id = external_type.id.value(),
+                    .name = external_type.name,
+                    .members = members,
+                };
+            }
             try graph_external_modules.append(allocator, .{
                 .id = descriptor.id.value(),
                 .logical_name = descriptor.logical_name,
                 .exports = graph_exports,
+                .types = graph_types,
             });
         }
 
@@ -1166,6 +1201,7 @@ pub const Project = struct {
                 .type_id = try externalDeclarationTypeId(
                     allocator,
                     &result.type_store,
+                    external,
                     exported.?,
                     if (existing) |identity| identity.type_id else null,
                 ),
@@ -1185,9 +1221,9 @@ pub const Project = struct {
             const external = self.findExternal(.init(external_module_id)) orelse continue;
             const import_kind: ast.ImportSpecifierKind = if (std.mem.eql(u8, item.name, "default")) .default else .named;
             const exported = findExternalExport(external.exports, item.name, import_kind, item.type_only) orelse continue;
-            item.identity = try enrichExternalIdentity(allocator, &result.type_store, item.identity, exported);
+            item.identity = try enrichExternalIdentity(allocator, &result.type_store, item.identity, external, exported);
             if (item.type_identity) |identity| {
-                item.type_identity = try enrichExternalIdentity(allocator, &result.type_store, identity, exported);
+                item.type_identity = try enrichExternalIdentity(allocator, &result.type_store, identity, external, exported);
             }
         }
 
@@ -1267,12 +1303,38 @@ pub const Project = struct {
             }
             initialized += 1;
         }
-        return .{ .id = source.id, .logical_name = logical_name, .exports = exports };
+        const external_types = try self.allocator.alloc(contracts.ExternalTypeDescriptor, source.types.len);
+        var type_count: usize = 0;
+        errdefer {
+            for (external_types[0..type_count]) |item| freeExternalType(self.allocator, item);
+            self.allocator.free(external_types);
+        }
+        for (source.types, 0..) |item, index| {
+            external_types[index] = item;
+            external_types[index].name = try self.allocator.dupe(u8, item.name);
+            errdefer self.allocator.free(external_types[index].name);
+            const members = try self.allocator.alloc(contracts.ExternalTypeMemberDescriptor, item.members.len);
+            var member_count: usize = 0;
+            errdefer {
+                for (members[0..member_count]) |member| self.allocator.free(member.name);
+                self.allocator.free(members);
+            }
+            for (item.members, 0..) |member, member_index| {
+                members[member_index] = member;
+                members[member_index].name = try self.allocator.dupe(u8, member.name);
+                member_count += 1;
+            }
+            external_types[index].members = members;
+            type_count += 1;
+        }
+        return .{ .id = source.id, .logical_name = logical_name, .exports = exports, .types = external_types };
     }
 
     fn freeExternalDescriptor(self: *Project, descriptor: contracts.ExternalModuleDescriptor) void {
         for (descriptor.exports) |item| freeExternalExport(self.allocator, item);
         self.allocator.free(descriptor.exports);
+        for (descriptor.types) |item| freeExternalType(self.allocator, item);
+        self.allocator.free(descriptor.types);
         self.allocator.free(descriptor.logical_name);
     }
 
@@ -1407,6 +1469,19 @@ fn projectDiagnosticsEqual(left: ProjectDiagnostic, right: ProjectDiagnostic) bo
 }
 
 fn validateExternalDescriptor(descriptor: contracts.ExternalModuleDescriptor) !void {
+    for (descriptor.types, 0..) |item, index| {
+        if (item.name.len == 0) return error.InvalidExternalType;
+        for (descriptor.types[0..index]) |previous| {
+            if (previous.id == item.id or std.mem.eql(u8, previous.name, item.name)) return error.DuplicateExternalType;
+        }
+        for (item.members, 0..) |member, member_index| {
+            if (member.name.len == 0 or !validExternalTypeReference(descriptor.types, member.type_reference))
+                return error.InvalidExternalType;
+            for (item.members[0..member_index]) |previous| {
+                if (std.mem.eql(u8, previous.name, member.name)) return error.DuplicateExternalTypeMember;
+            }
+        }
+    }
     for (descriptor.exports, 0..) |item, index| {
         if (item.name.len == 0 or !item.namespace.isValid()) return error.InvalidExternalExport;
         switch (item.kind) {
@@ -1420,21 +1495,47 @@ fn validateExternalDescriptor(descriptor: contracts.ExternalModuleDescriptor) !v
         if (item.function != null and item.declaration_kind != .function) return error.InvalidExternalExport;
         if (item.declaration_kind == .function and item.function == null) return error.InvalidExternalExport;
         if (item.declaration_kind == .type and (!item.namespace.type or item.namespace.value)) return error.InvalidExternalExport;
+        if (item.type_reference) |reference| {
+            if (!validExternalTypeReference(descriptor.types, reference)) return error.InvalidExternalExport;
+        }
         if (item.function) |function| {
             for (function.parameters, 0..) |parameter, parameter_index| {
                 if (parameter.rest and parameter_index + 1 != function.parameters.len) return error.InvalidExternalExport;
+                if (parameter.type_reference) |reference| {
+                    if (!validExternalTypeReference(descriptor.types, reference)) return error.InvalidExternalExport;
+                }
+            }
+            if (function.return_type_reference) |reference| {
+                if (!validExternalTypeReference(descriptor.types, reference)) return error.InvalidExternalExport;
             }
         }
     }
 }
 
+fn validExternalTypeReference(types_: []const contracts.ExternalTypeDescriptor, reference: contracts.ExternalTypeReference) bool {
+    return switch (reference) {
+        .builtin => true,
+        .declared => |id| for (types_) |item| {
+            if (item.id == id) break true;
+        } else false,
+    };
+}
+
 fn externalDescriptorsEqual(left: contracts.ExternalModuleDescriptor, right: contracts.ExternalModuleDescriptor) bool {
-    if (left.id != right.id or !std.mem.eql(u8, left.logical_name, right.logical_name) or left.exports.len != right.exports.len) return false;
+    if (left.id != right.id or !std.mem.eql(u8, left.logical_name, right.logical_name) or
+        left.exports.len != right.exports.len or left.types.len != right.types.len) return false;
     for (left.exports, right.exports) |a, b| {
         if (!std.mem.eql(u8, a.name, b.name) or a.kind != b.kind or !std.meta.eql(a.namespace, b.namespace) or
-            a.type_metadata != b.type_metadata or a.symbol_id != b.symbol_id or
+            a.type_metadata != b.type_metadata or !std.meta.eql(a.type_reference, b.type_reference) or a.symbol_id != b.symbol_id or
             a.declaration_kind != b.declaration_kind or a.effects != b.effects or
             !externalFunctionsEqual(a.function, b.function)) return false;
+    }
+    for (left.types, right.types) |a, b| {
+        if (a.id != b.id or !std.mem.eql(u8, a.name, b.name) or a.members.len != b.members.len) return false;
+        for (a.members, b.members) |x, y| {
+            if (!std.mem.eql(u8, x.name, y.name) or !std.meta.eql(x.type_reference, y.type_reference) or
+                x.optional != y.optional or x.readonly != y.readonly) return false;
+        }
     }
     return true;
 }
@@ -1474,24 +1575,41 @@ fn externalTypeId(builtins: *const types.Builtins, metadata: ?contracts.External
     };
 }
 
+fn graphExternalTypeReference(reference: contracts.ExternalTypeReference) modules_mod.graph.ExternalTypeReference {
+    return switch (reference) {
+        .builtin => |metadata| .{ .builtin = @enumFromInt(@intFromEnum(metadata)) },
+        .declared => |id| .{ .declared = id.value() },
+    };
+}
+
 fn externalDeclarationTypeId(
     allocator: std.mem.Allocator,
     store: *types.TypeStore,
+    module: contracts.ExternalModuleDescriptor,
     descriptor: contracts.ExternalExportDescriptor,
     fallback: ?types.TypeId,
 ) !types.TypeId {
-    const function = descriptor.function orelse return fallback orelse externalTypeId(&store.builtins, descriptor.type_metadata);
+    const function = descriptor.function orelse {
+        if (descriptor.type_reference) |reference| return externalTypeReferenceId(allocator, store, module, reference, &.{});
+        return fallback orelse externalTypeId(&store.builtins, descriptor.type_metadata);
+    };
     const parameters = try allocator.alloc(types.ParameterType, function.parameters.len);
     for (function.parameters, 0..) |parameter, index| parameters[index] = .{
         .name = parameter.name,
-        .type_id = externalTypeId(&store.builtins, parameter.type_metadata),
+        .type_id = if (parameter.type_reference) |reference|
+            try externalTypeReferenceId(allocator, store, module, reference, &.{})
+        else
+            externalTypeId(&store.builtins, parameter.type_metadata),
         .optional = parameter.optional,
         .has_default = parameter.has_default,
         .rest = parameter.rest,
     };
     return store.addFunctionDetailed(
         parameters,
-        externalTypeId(&store.builtins, function.return_type),
+        if (function.return_type_reference) |reference|
+            try externalTypeReferenceId(allocator, store, module, reference, &.{})
+        else
+            externalTypeId(&store.builtins, function.return_type),
         function.type_parameter_count,
         .{
             .is_async = function.is_async,
@@ -1501,14 +1619,44 @@ fn externalDeclarationTypeId(
     );
 }
 
+fn externalTypeReferenceId(
+    allocator: std.mem.Allocator,
+    store: *types.TypeStore,
+    module: contracts.ExternalModuleDescriptor,
+    reference: contracts.ExternalTypeReference,
+    ancestors: []const contracts.ExternalTypeId,
+) !types.TypeId {
+    return switch (reference) {
+        .builtin => |metadata| externalTypeId(&store.builtins, metadata),
+        .declared => |external_id| blk: {
+            for (ancestors) |ancestor| if (ancestor == external_id) return error.RecursiveExternalType;
+            const descriptor = for (module.types) |item| {
+                if (item.id == external_id) break item;
+            } else return error.InvalidExternalType;
+            const next_ancestors = try allocator.alloc(contracts.ExternalTypeId, ancestors.len + 1);
+            @memcpy(next_ancestors[0..ancestors.len], ancestors);
+            next_ancestors[ancestors.len] = external_id;
+            const properties = try allocator.alloc(types.ObjectProperty, descriptor.members.len);
+            for (descriptor.members, 0..) |member, index| properties[index] = .{
+                .name = member.name,
+                .type_id = try externalTypeReferenceId(allocator, store, module, member.type_reference, next_ancestors),
+                .optional = member.optional,
+                .readonly = member.readonly,
+            };
+            break :blk try store.intern(.{ .object = properties });
+        },
+    };
+}
+
 fn enrichExternalIdentity(
     allocator: std.mem.Allocator,
     store: *types.TypeStore,
     identity: semantics.SemanticIdentity,
+    module: contracts.ExternalModuleDescriptor,
     descriptor: contracts.ExternalExportDescriptor,
 ) !semantics.SemanticIdentity {
     var enriched = identity;
-    enriched.type_id = try externalDeclarationTypeId(allocator, store, descriptor, identity.type_id);
+    enriched.type_id = try externalDeclarationTypeId(allocator, store, module, descriptor, identity.type_id);
     enriched.external_symbol_id = if (descriptor.symbol_id) |id| id.value() else null;
     enriched.external_declaration_kind = descriptor.declaration_kind;
     enriched.external_effects = descriptor.effects;
@@ -1523,15 +1671,23 @@ fn freeExternalExport(allocator: std.mem.Allocator, item: contracts.ExternalExpo
     allocator.free(item.name);
 }
 
+fn freeExternalType(allocator: std.mem.Allocator, item: contracts.ExternalTypeDescriptor) void {
+    for (item.members) |member| allocator.free(member.name);
+    allocator.free(item.members);
+    allocator.free(item.name);
+}
+
 fn externalFunctionsEqual(left: ?contracts.ExternalFunctionDescriptor, right: ?contracts.ExternalFunctionDescriptor) bool {
     if (left == null or right == null) return left == null and right == null;
     const a = left.?;
     const b = right.?;
-    if (a.return_type != b.return_type or a.type_parameter_count != b.type_parameter_count or
+    if (a.return_type != b.return_type or !std.meta.eql(a.return_type_reference, b.return_type_reference) or
+        a.type_parameter_count != b.type_parameter_count or
         a.is_async != b.is_async or a.is_generator != b.is_generator or
         a.is_constructor != b.is_constructor or a.parameters.len != b.parameters.len) return false;
     for (a.parameters, b.parameters) |x, y| {
         if (!std.mem.eql(u8, x.name, y.name) or x.type_metadata != y.type_metadata or
+            !std.meta.eql(x.type_reference, y.type_reference) or
             x.optional != y.optional or x.has_default != y.has_default or x.rest != y.rest) return false;
     }
     return true;

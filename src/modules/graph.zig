@@ -36,6 +36,41 @@ pub const ExternalType = enum {
     object,
 };
 
+pub const ExternalTypeReference = union(enum) {
+    builtin: ExternalType,
+    declared: u64,
+};
+
+pub const ExternalTypeMember = struct {
+    name: []const u8,
+    type_reference: ExternalTypeReference,
+    optional: bool = false,
+    readonly: bool = false,
+};
+
+pub const ExternalTypeDescriptor = struct {
+    id: u64,
+    name: []const u8,
+    members: []const ExternalTypeMember,
+};
+
+pub const ExternalParameter = struct {
+    name: []const u8,
+    type_reference: ExternalTypeReference,
+    optional: bool = false,
+    has_default: bool = false,
+    rest: bool = false,
+};
+
+pub const ExternalFunction = struct {
+    parameters: []const ExternalParameter,
+    return_type: ExternalTypeReference,
+    type_parameter_count: u32 = 0,
+    is_async: bool = false,
+    is_generator: bool = false,
+    is_constructor: bool = false,
+};
+
 pub const ExternalNamespace = packed struct(u8) {
     value: bool = false,
     type: bool = false,
@@ -51,12 +86,15 @@ pub const ExternalExport = struct {
     kind: ExternalExportKind,
     namespace: ExternalNamespace,
     type_metadata: ?ExternalType,
+    type_reference: ?ExternalTypeReference = null,
+    function: ?ExternalFunction = null,
 };
 
 pub const ExternalModule = struct {
     id: u64,
     logical_name: []const u8,
     exports: []const ExternalExport,
+    types: []const ExternalTypeDescriptor = &.{},
 };
 
 /// Portable, owned module data. Hosts choose how source bytes and paths are obtained.

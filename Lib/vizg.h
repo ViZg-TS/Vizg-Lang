@@ -10,7 +10,9 @@
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
 #define VIZG_HIR_DETAIL_API_VERSION 2u
-#define VIZG_EXTERNAL_MODULE_API_VERSION 2u
+#define VIZG_EXTERNAL_MODULE_API_VERSION 3u
+#define VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN 0u
+#define VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED 1u
 #define VIZG_HIR_ID_NONE UINT64_MAX
 #define VIZG_HIR_U32_NONE UINT32_MAX
 #define VIZG_MAX_SOURCE_LENGTH UINT32_MAX
@@ -420,6 +422,76 @@ typedef struct Vizg_ExternalModuleV2 {
     const Vizg_ExternalExportV2 *exports_ptr;
     size_t export_count;
 } Vizg_ExternalModuleV2;
+
+typedef struct Vizg_ExternalTypeReferenceV3 {
+    uint32_t kind;
+    Vizg_ExternalType builtin_type;
+    uint64_t external_type_id;
+} Vizg_ExternalTypeReferenceV3;
+
+typedef struct Vizg_ExternalTypeMemberV3 {
+    const char *name_ptr;
+    size_t name_len;
+    Vizg_ExternalTypeReferenceV3 type_reference;
+    uint8_t optional;
+    uint8_t readonly;
+    uint8_t reserved[6];
+} Vizg_ExternalTypeMemberV3;
+
+typedef struct Vizg_ExternalTypeV3 {
+    uint64_t external_type_id;
+    const char *name_ptr;
+    size_t name_len;
+    const Vizg_ExternalTypeMemberV3 *members_ptr;
+    size_t member_count;
+} Vizg_ExternalTypeV3;
+
+typedef struct Vizg_ExternalParameterV3 {
+    const char *name_ptr;
+    size_t name_len;
+    Vizg_ExternalTypeReferenceV3 type_reference;
+    uint8_t optional;
+    uint8_t has_default;
+    uint8_t rest;
+    uint8_t reserved[5];
+} Vizg_ExternalParameterV3;
+
+typedef struct Vizg_ExternalFunctionV3 {
+    const Vizg_ExternalParameterV3 *parameters_ptr;
+    size_t parameter_count;
+    Vizg_ExternalTypeReferenceV3 return_type;
+    uint32_t type_parameter_count;
+    uint8_t is_async;
+    uint8_t is_generator;
+    uint8_t is_constructor;
+    uint8_t reserved;
+} Vizg_ExternalFunctionV3;
+
+typedef struct Vizg_ExternalExportV3 {
+    const char *name_ptr;
+    size_t name_len;
+    Vizg_ExternalExportKind kind;
+    Vizg_ExternalNamespaceFlags namespace_flags;
+    uint8_t has_type_reference;
+    uint8_t has_function;
+    uint8_t reserved;
+    Vizg_ExternalTypeReferenceV3 type_reference;
+    Vizg_ExternalDeclarationKind declaration_kind;
+    Vizg_ExternalEffectFlags effect_flags;
+    uint16_t reserved2;
+    uint64_t external_symbol_id;
+    Vizg_ExternalFunctionV3 function;
+} Vizg_ExternalExportV3;
+
+typedef struct Vizg_ExternalModuleV3 {
+    uint64_t external_module_id;
+    const char *logical_name_ptr;
+    size_t logical_name_len;
+    const Vizg_ExternalExportV3 *exports_ptr;
+    size_t export_count;
+    const Vizg_ExternalTypeV3 *types_ptr;
+    size_t type_count;
+} Vizg_ExternalModuleV3;
 
 typedef struct Vizg_AmbientGlobal {
     const char *name_ptr;
@@ -847,6 +919,14 @@ typedef struct Vizg_HirTypeDetail {
     uint32_t reserved;
 } Vizg_HirTypeDetail;
 
+typedef struct Vizg_HirTypeMember {
+    const char *name_ptr;
+    size_t name_len;
+    uint32_t type_id;
+    uint8_t flags; /* bit 0 optional, bit 1 readonly */
+    uint8_t reserved[3];
+} Vizg_HirTypeMember;
+
 typedef struct Vizg_HirFunctionSignature {
     uint32_t type_id;
     uint32_t return_type_id;
@@ -1055,6 +1135,11 @@ Vizg_ProjectStatus vizg_project_respond_external(
 Vizg_ProjectStatus vizg_project_respond_external_v2(
     Vizg_Project *project, uint64_t request_id,
     const Vizg_ExternalModuleV2 *external_module);
+/* V3 adds named structural type descriptors and stable type references in
+ * exports and function signatures while preserving V2 unchanged. */
+Vizg_ProjectStatus vizg_project_respond_external_v3(
+    Vizg_Project *project, uint64_t request_id,
+    const Vizg_ExternalModuleV3 *external_module);
 Vizg_ProjectStatus vizg_project_respond_failure(
     Vizg_Project *project, uint64_t request_id,
     Vizg_ProjectFailureKind failure_kind);
@@ -1094,6 +1179,12 @@ uint32_t vizg_hir_detail_api_version(void);
 Vizg_ProjectStatus vizg_hir_type_detail_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     size_t index, Vizg_HirTypeDetail *out_detail);
+Vizg_ProjectStatus vizg_hir_type_member_count(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint32_t type_id, size_t *out_count);
+Vizg_ProjectStatus vizg_hir_type_member_at(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint32_t type_id, size_t index, Vizg_HirTypeMember *out_member);
 Vizg_ProjectStatus vizg_hir_function_signature(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     uint32_t type_id, Vizg_HirFunctionSignature *out_signature);

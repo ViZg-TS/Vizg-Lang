@@ -8,6 +8,10 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Added external-module API v3 with stable external type identities, ordered
+  structural member descriptors, and named type references in exports and
+  function signatures. HIR detail consumers can enumerate object/interface
+  members by `TypeId` without depending on ViZG's private type-store layout.
 - Added an ordered pattern-plan HIR operation and additive payload constants for
   declaration, assignment, parameter, and catch-binding destructuring. The
   payload preserves nested array/object order, defaults, rest, binding targets,

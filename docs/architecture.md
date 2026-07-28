@@ -60,6 +60,14 @@ the extension through `vizg_external_module_api_version()` and answer with
 available unchanged; neither form accepts filesystem, header, library, linker,
 or other origin policy.
 
+External-module API v3 adds a module-local type graph. A host assigns stable
+`external_type_id` values to named closed structural types, publishes their
+members in declaration order, and refers to those types from exports and
+function parameters/returns. ViZG resolves those references into ordinary
+semantic object and function types. The graph contains only TypeScript type
+semantics: native layout, ABI classification and linker policy remain outside
+ViZG. V1 and V2 response entry points remain unchanged.
+
 `Project` is one-shot. A source identity is supplied once, `step()` analyzes
 reachable modules and returns one pending request at a time, every request is
 answered once, and `finish()` is terminal. There are no source revisions or
@@ -128,6 +136,9 @@ The separately versioned HIR detail projection preserves wrapped public
 function return types and also exposes each function body's completion type.
 For async functions and generators this lets downstream consumers validate
 `return` instructions without depending on ViZg's private type-store layout.
+Object and interface types additionally expose ordered member count/lookup by
+`TypeId`; each member reports its name, member `TypeId`, optional flag and
+readonly flag.
 
 Finalization computes the closure reachable from submitted roots through
 resolved local import edges. Only that closure is validated and retained in the

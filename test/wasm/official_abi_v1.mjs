@@ -42,6 +42,8 @@ const expectedExports = [
   "vizg_hir_terminator_at",
   "vizg_hir_terminator_item_at",
   "vizg_hir_type_detail_at",
+  "vizg_hir_type_member_at",
+  "vizg_hir_type_member_count",
   "vizg_project_add_global_root",
   "vizg_project_add_source",
   "vizg_project_analyze_source",
@@ -54,6 +56,7 @@ const expectedExports = [
   "vizg_project_register_source_host_bindings",
   "vizg_project_respond_external",
   "vizg_project_respond_external_v2",
+  "vizg_project_respond_external_v3",
   "vizg_project_respond_failure",
   "vizg_project_respond_source",
   "vizg_project_result_diagnostic",
@@ -78,7 +81,7 @@ const { exports: api } = await WebAssembly.instantiate(module);
 if (api.vizg_abi_version() !== 1) {
   throw new Error(`unexpected ABI version: ${api.vizg_abi_version()}`);
 }
-if (api.vizg_external_module_api_version() !== 2) {
+if (api.vizg_external_module_api_version() !== 3) {
   throw new Error(`unexpected external-module API version: ${api.vizg_external_module_api_version()}`);
 }
 if (api.vizg_hir_api_version() !== 2) {

@@ -865,6 +865,130 @@ test "external-module API v2 publishes stable function declarations to HIR" {
     try std.testing.expect(saw_external_live_import);
 }
 
+test "external-module API v3 publishes ordered structural record types and signature references" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(
+        1,
+        "root.ts",
+        "import { Fade } from 'raylib.h'; export const faded = Fade({ r: 1, g: 2, b: 3, a: 255 }, 0.5);",
+        true,
+    );
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(project, &step));
+    try std.testing.expectEqualStrings("raylib.h", stepSpecifier(&step));
+
+    const number_ref: c.Vizg_ExternalTypeReferenceV3 = .{
+        .kind = c.VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN,
+        .builtin_type = c.VIZG_EXTERNAL_TYPE_NUMBER,
+        .external_type_id = 0,
+    };
+    const color_ref: c.Vizg_ExternalTypeReferenceV3 = .{
+        .kind = c.VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED,
+        .builtin_type = c.VIZG_EXTERNAL_TYPE_UNKNOWN,
+        .external_type_id = 0xC010,
+    };
+    var members = [_]c.Vizg_ExternalTypeMemberV3{
+        .{ .name_ptr = "r".ptr, .name_len = 1, .type_reference = number_ref, .optional = 0, .readonly = 0, .reserved = .{ 0, 0, 0, 0, 0, 0 } },
+        .{ .name_ptr = "g".ptr, .name_len = 1, .type_reference = number_ref, .optional = 0, .readonly = 0, .reserved = .{ 0, 0, 0, 0, 0, 0 } },
+        .{ .name_ptr = "b".ptr, .name_len = 1, .type_reference = number_ref, .optional = 0, .readonly = 0, .reserved = .{ 0, 0, 0, 0, 0, 0 } },
+        .{ .name_ptr = "a".ptr, .name_len = 1, .type_reference = number_ref, .optional = 0, .readonly = 0, .reserved = .{ 0, 0, 0, 0, 0, 0 } },
+    };
+    var types_ = [_]c.Vizg_ExternalTypeV3{.{
+        .external_type_id = 0xC010,
+        .name_ptr = "Color".ptr,
+        .name_len = "Color".len,
+        .members_ptr = &members,
+        .member_count = members.len,
+    }};
+    var parameters = [_]c.Vizg_ExternalParameterV3{
+        .{ .name_ptr = "color".ptr, .name_len = "color".len, .type_reference = color_ref, .optional = 0, .has_default = 0, .rest = 0, .reserved = .{ 0, 0, 0, 0, 0 } },
+        .{ .name_ptr = "alpha".ptr, .name_len = "alpha".len, .type_reference = number_ref, .optional = 0, .has_default = 0, .rest = 0, .reserved = .{ 0, 0, 0, 0, 0 } },
+    };
+    const no_function = std.mem.zeroes(c.Vizg_ExternalFunctionV3);
+    var exports = [_]c.Vizg_ExternalExportV3{
+        .{
+            .name_ptr = "Color".ptr,
+            .name_len = "Color".len,
+            .kind = c.VIZG_EXTERNAL_EXPORT_NAMED,
+            .namespace_flags = c.VIZG_EXTERNAL_NAMESPACE_TYPE,
+            .has_type_reference = 1,
+            .has_function = 0,
+            .reserved = 0,
+            .type_reference = color_ref,
+            .declaration_kind = c.VIZG_EXTERNAL_DECLARATION_TYPE,
+            .effect_flags = c.VIZG_EXTERNAL_EFFECT_UNKNOWN,
+            .reserved2 = 0,
+            .external_symbol_id = 0xC011,
+            .function = no_function,
+        },
+        .{
+            .name_ptr = "Fade".ptr,
+            .name_len = "Fade".len,
+            .kind = c.VIZG_EXTERNAL_EXPORT_NAMED,
+            .namespace_flags = c.VIZG_EXTERNAL_NAMESPACE_VALUE,
+            .has_type_reference = 0,
+            .has_function = 1,
+            .reserved = 0,
+            .type_reference = number_ref,
+            .declaration_kind = c.VIZG_EXTERNAL_DECLARATION_FUNCTION,
+            .effect_flags = c.VIZG_EXTERNAL_EFFECT_UNKNOWN,
+            .reserved2 = 0,
+            .external_symbol_id = 0xFADE,
+            .function = .{
+                .parameters_ptr = &parameters,
+                .parameter_count = parameters.len,
+                .return_type = color_ref,
+                .type_parameter_count = 0,
+                .is_async = 0,
+                .is_generator = 0,
+                .is_constructor = 0,
+                .reserved = 0,
+            },
+        },
+    };
+    var external: c.Vizg_ExternalModuleV3 = .{
+        .external_module_id = 81,
+        .logical_name_ptr = "raylib.h".ptr,
+        .logical_name_len = "raylib.h".len,
+        .exports_ptr = &exports,
+        .export_count = exports.len,
+        .types_ptr = &types_,
+        .type_count = types_.len,
+    };
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_respond_external_v3(project, step.request_id, &external),
+    );
+
+    const result = try finishProject(project);
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary));
+    var found_color = false;
+    for (0..summary.type_count) |index| {
+        var detail: c.Vizg_HirTypeDetail = undefined;
+        try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail));
+        if (detail.kind != c.VIZG_HIR_TYPE_OBJECT) continue;
+        var member_count: usize = 0;
+        try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_type_member_count(result, c.VIZG_HIR_DETAIL_API_VERSION, detail.id, &member_count));
+        if (member_count != members.len) continue;
+        const expected_names = [_][]const u8{ "r", "g", "b", "a" };
+        for (expected_names, 0..) |expected, member_index| {
+            var member: c.Vizg_HirTypeMember = undefined;
+            try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_type_member_at(result, c.VIZG_HIR_DETAIL_API_VERSION, detail.id, member_index, &member));
+            try std.testing.expectEqualStrings(expected, member.name_ptr[0..member.name_len]);
+            try std.testing.expectEqual(@as(u8, 0), member.flags);
+        }
+        found_color = true;
+        break;
+    }
+    try std.testing.expect(found_color);
+}
+
 test "HIR detail ABI preserves source module initialization and live imports" {
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();

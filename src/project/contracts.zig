@@ -50,6 +50,20 @@ pub const ExternalSymbolId = enum(u64) {
     }
 };
 
+/// Stable host-assigned identity for one named type in a source-less module.
+/// This identity is distinct from external symbols and from ViZG-local TypeIds.
+pub const ExternalTypeId = enum(u64) {
+    _,
+
+    pub fn init(value_: u64) ExternalTypeId {
+        return @enumFromInt(value_);
+    }
+
+    pub fn value(self: ExternalTypeId) u64 {
+        return @intFromEnum(self);
+    }
+};
+
 /// Opaque identity assigned by the core to one unresolved module request.
 pub const RequestId = enum(u64) {
     _,
@@ -144,6 +158,13 @@ pub const ExternalType = enum(u32) {
     object,
 };
 
+/// A portable external type reference. Named references resolve only within
+/// the enclosing external module descriptor.
+pub const ExternalTypeReference = union(enum) {
+    builtin: ExternalType,
+    declared: ExternalTypeId,
+};
+
 /// Namespaces in which a source-less export may be referenced. The zero value
 /// is deliberately invalid at descriptor-validation boundaries.
 pub const ExternalNamespace = packed struct(u8) {
@@ -169,7 +190,8 @@ pub const ExternalDeclarationKind = enum(u32) {
 
 pub const ExternalParameterDescriptor = struct {
     name: []const u8 = "",
-    type_metadata: ExternalType,
+    type_metadata: ExternalType = .unknown,
+    type_reference: ?ExternalTypeReference = null,
     optional: bool = false,
     has_default: bool = false,
     rest: bool = false,
@@ -177,7 +199,8 @@ pub const ExternalParameterDescriptor = struct {
 
 pub const ExternalFunctionDescriptor = struct {
     parameters: []const ExternalParameterDescriptor = &.{},
-    return_type: ExternalType,
+    return_type: ExternalType = .unknown,
+    return_type_reference: ?ExternalTypeReference = null,
     type_parameter_count: u32 = 0,
     is_async: bool = false,
     is_generator: bool = false,
@@ -204,10 +227,26 @@ pub const ExternalExportDescriptor = struct {
     kind: ExternalExportKind = .named,
     namespace: ExternalNamespace = .{ .value = true },
     type_metadata: ?ExternalType = null,
+    type_reference: ?ExternalTypeReference = null,
     symbol_id: ?ExternalSymbolId = null,
     declaration_kind: ?ExternalDeclarationKind = null,
     function: ?ExternalFunctionDescriptor = null,
     effects: ?ExternalEffectSet = null,
+};
+
+/// One ordered member of a named structural external type.
+pub const ExternalTypeMemberDescriptor = struct {
+    name: []const u8,
+    type_reference: ExternalTypeReference,
+    optional: bool = false,
+    readonly: bool = false,
+};
+
+/// One closed, ordered structural type published by an external module.
+pub const ExternalTypeDescriptor = struct {
+    id: ExternalTypeId,
+    name: []const u8,
+    members: []const ExternalTypeMemberDescriptor,
 };
 
 /// Borrowed source-less module metadata. Retaining APIs copy every slice.
@@ -215,6 +254,7 @@ pub const ExternalModuleDescriptor = struct {
     id: ExternalModuleId,
     logical_name: []const u8,
     exports: []const ExternalExportDescriptor = &.{},
+    types: []const ExternalTypeDescriptor = &.{},
 };
 
 /// One borrowed structural member of an ambient global type. A self-reference
