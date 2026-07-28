@@ -154,6 +154,9 @@ fn checkCall(
         const actual = resolvedNode(type_info, argument, store) orelse continue;
         const parameter = parameterForArgument(signature, index) orelse continue;
         const expected = restArgumentType(parameter, store);
+        if ((parameter.optional or parameter.has_default) and
+            actual == store.builtins.undefined)
+            continue;
         if (type_compat.check(actual, expected, store).isCompatible()) continue;
         try appendDiagnostic(allocator, out, .invalid_argument_type, "argument is not assignable to the parameter type", "invalid argument type", tree.node(argument).span, tree.node(callee_id).span, "function signature is here");
         return;

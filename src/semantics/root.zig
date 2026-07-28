@@ -2568,6 +2568,8 @@ test "intrinsic undefined and array length type without lib declarations" {
         \\const missing = undefined;
         \\const values: number[] = [1, 2, 3];
         \\const count = values.length;
+        \\function optional(value?: number): number { return 1; }
+        \\const accepted = optional(undefined);
     );
     defer result.deinit();
 

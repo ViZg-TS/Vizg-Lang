@@ -10,7 +10,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 - `undefined` now resolves and lowers as an intrinsic source value without a
   library declaration, and array `.length` infers as `number` without a global
-  `Array` interface.
+  `Array` interface. Optional and defaulted parameters accept an explicit
+  `undefined` argument as well as omission.
 - Unannotated default parameters now infer their initializer type for both
   callable signatures and executable HIR parameter bindings. Added
   `vizg_hir_array_element_type` so C ABI consumers can inspect rest-parameter

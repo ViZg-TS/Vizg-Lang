@@ -402,6 +402,9 @@ fn validateCallArguments(
         const argument_type = findType(entries, argument) orelse return null;
         const parameter = parameterForArgument(signature, index) orelse continue;
         const parameter_type = restArgumentType(parameter, store);
+        if ((parameter.optional or parameter.has_default) and
+            argument_type == store.builtins.undefined)
+            continue;
         if (!type_compat.isAssignableInStore(argument_type, parameter_type, store)) return .{
             .type_id = result_type,
             .valid = false,
