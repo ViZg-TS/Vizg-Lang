@@ -2512,6 +2512,24 @@ pub fn hirTypeMemberAt(
     return .OK;
 }
 
+pub fn hirArrayElementType(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    type_id: u32,
+    out_type_id: ?*u32,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_type_id orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(u32, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(u32))) return .INVALID_ARGUMENT;
+    const item = owned.hir_result.?.lookupType(type_id) orelse return .INVALID_ARGUMENT;
+    output.* = switch (item.kind) {
+        .array => |array| array.element_type,
+        else => return .INVALID_ARGUMENT,
+    };
+    return .OK;
+}
+
 pub fn hirFunctionSignature(
     result: ?*const Vizg_ProjectResult,
     requested_version: u32,
@@ -3427,6 +3445,7 @@ comptime {
     @export(&hirTypeDetailAt, .{ .name = "vizg_hir_type_detail_at" });
     @export(&hirTypeMemberCount, .{ .name = "vizg_hir_type_member_count" });
     @export(&hirTypeMemberAt, .{ .name = "vizg_hir_type_member_at" });
+    @export(&hirArrayElementType, .{ .name = "vizg_hir_array_element_type" });
     @export(&hirFunctionSignature, .{ .name = "vizg_hir_function_signature" });
     @export(&hirFunctionCompletionType, .{ .name = "vizg_hir_function_completion_type" });
     @export(&hirSignatureParameterAt, .{ .name = "vizg_hir_signature_parameter_at" });

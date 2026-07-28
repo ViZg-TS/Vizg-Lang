@@ -8,6 +8,10 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Unannotated default parameters now infer their initializer type for both
+  callable signatures and executable HIR parameter bindings. Added
+  `vizg_hir_array_element_type` so C ABI consumers can inspect rest-parameter
+  array element types without reconstructing private type-store data.
 - Added external-module API v3 with stable external type identities, ordered
   structural member descriptors, and named type references in exports and
   function signatures. HIR detail consumers can enumerate object/interface

@@ -139,6 +139,11 @@ For async functions and generators this lets downstream consumers validate
 Object and interface types additionally expose ordered member count/lookup by
 `TypeId`; each member reports its name, member `TypeId`, optional flag and
 readonly flag.
+Array types expose their element `TypeId` through
+`vizg_hir_array_element_type`. Signature parameters retain optional/default/rest
+acceptance flags, while executable function parameters publish the narrowed
+value type observed inside the body; an unannotated default initializer supplies
+that type.
 
 Finalization computes the closure reachable from submitted roots through
 resolved local import edges. Only that closure is validated and retained in the

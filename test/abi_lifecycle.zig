@@ -989,6 +989,86 @@ test "external-module API v3 publishes ordered structural record types and signa
     try std.testing.expect(found_color);
 }
 
+test "HIR detail publishes narrowed default parameter values and rest array elements" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(
+        1,
+        "parameters.ts",
+        "export function power(value: number, exponent = 2, ...rest: number[]): number { return value ** exponent; }",
+        true,
+    );
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+    const result = try finishProject(project);
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary));
+
+    var found = false;
+    for (0..summary.function_count) |function_index| {
+        var detail: c.Vizg_HirFunctionDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_function_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, function_index, &detail),
+        );
+        if (detail.parameter_count != 3) continue;
+        var function_record: c.Vizg_HirRecord = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_FUNCTION, function_index, &function_record),
+        );
+        var signature_parameter: c.Vizg_HirSignatureParameter = undefined;
+        var value_parameter: c.Vizg_HirFunctionParameter = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_signature_parameter_at(result, c.VIZG_HIR_DETAIL_API_VERSION, function_record.type_id, 1, &signature_parameter),
+        );
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_function_parameter_at(result, c.VIZG_HIR_DETAIL_API_VERSION, function_index, 1, &value_parameter),
+        );
+        try std.testing.expect(signature_parameter.flags & (1 << 1) != 0);
+        try std.testing.expect(value_parameter.flags & (1 << 1) != 0);
+        try std.testing.expectEqual(signature_parameter.type_id, value_parameter.type_id);
+
+        var rest_parameter: c.Vizg_HirFunctionParameter = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_function_parameter_at(result, c.VIZG_HIR_DETAIL_API_VERSION, function_index, 2, &rest_parameter),
+        );
+        var element_type_id: u32 = 0;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_array_element_type(result, c.VIZG_HIR_DETAIL_API_VERSION, rest_parameter.type_id, &element_type_id),
+        );
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
+            c.vizg_hir_array_element_type(result, c.VIZG_HIR_DETAIL_API_VERSION, value_parameter.type_id, &element_type_id),
+        );
+
+        var saw_default_number = false;
+        var saw_element_number = false;
+        for (0..summary.type_count) |type_index| {
+            var type_detail: c.Vizg_HirTypeDetail = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, type_index, &type_detail),
+            );
+            if (type_detail.id == value_parameter.type_id)
+                saw_default_number = type_detail.kind == c.VIZG_HIR_TYPE_PRIMITIVE and type_detail.builtin_kind == c.VIZG_HIR_BUILTIN_NUMBER;
+            if (type_detail.id == element_type_id)
+                saw_element_number = type_detail.kind == c.VIZG_HIR_TYPE_PRIMITIVE and type_detail.builtin_kind == c.VIZG_HIR_BUILTIN_NUMBER;
+        }
+        try std.testing.expect(saw_default_number);
+        try std.testing.expect(saw_element_number);
+        found = true;
+        break;
+    }
+    try std.testing.expect(found);
+}
+
 test "HIR detail ABI preserves source module initialization and live imports" {
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();

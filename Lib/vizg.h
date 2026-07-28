@@ -1185,6 +1185,9 @@ Vizg_ProjectStatus vizg_hir_type_member_count(
 Vizg_ProjectStatus vizg_hir_type_member_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     uint32_t type_id, size_t index, Vizg_HirTypeMember *out_member);
+Vizg_ProjectStatus vizg_hir_array_element_type(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint32_t type_id, uint32_t *out_type_id);
 Vizg_ProjectStatus vizg_hir_function_signature(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     uint32_t type_id, Vizg_HirFunctionSignature *out_signature);

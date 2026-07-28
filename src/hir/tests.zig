@@ -1717,6 +1717,11 @@ test "HIR function lowering unifies parameters flags bodies and explicit capture
         }
         if (function.parameters.len == 2 and function.parameters[0].has_default and function.parameters[1].rest) {
             saw_default_rest = true;
+            const signature = result.lookupFunctionSignature(function.signature_type) orelse return error.MissingFunctionSignature;
+            try std.testing.expectEqual(signature.parameters[0].type_id, function.parameters[0].type_id);
+            const first_type = result.lookupType(function.parameters[0].type_id) orelse return error.MissingParameterType;
+            try std.testing.expect(first_type.kind == .primitive);
+            try std.testing.expectEqual(.number, first_type.kind.primitive);
             try std.testing.expectEqual(@as(u32, 0), function.parameters[0].argument_index);
             try std.testing.expectEqual(@as(u32, 1), function.parameters[1].argument_index);
             var read_first = false;

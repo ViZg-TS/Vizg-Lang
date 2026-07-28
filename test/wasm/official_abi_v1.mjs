@@ -15,6 +15,7 @@ const expectedExports = [
   "vizg_abi_version",
   "vizg_external_module_api_version",
   "vizg_hir_api_version",
+  "vizg_hir_array_element_type",
   "vizg_hir_binding_detail_at",
   "vizg_hir_block_detail_at",
   "vizg_hir_block_parameter_at",

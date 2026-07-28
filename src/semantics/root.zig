@@ -1209,7 +1209,13 @@ fn buildTypeInfo(
                 }
             },
             .parameter => if (entry.declared_type == null) {
-                entry.inferred_type = builtins.unknown;
+                entry.inferred_type = switch (result.ast.node(symbol.declaration).data) {
+                    .Parameter => |parameter| if (parameter.initializer) |initializer|
+                        nodeType(node_types.items, initializer) orelse builtins.unknown
+                    else
+                        builtins.unknown,
+                    else => builtins.unknown,
+                };
             },
             .function => if (entry.declared_type == null) {
                 entry.inferred_type = functionType(collected.function_signatures, symbol.id) orelse builtins.unknown;
@@ -1277,6 +1283,7 @@ fn buildTypeInfo(
             result.cfgs,
         );
         const variables_changed = refreshVariableTypes(result, symbol_types.items, node_types.items, builtins);
+        const parameters_changed = refreshParameterDefaultTypes(result, symbol_types.items, node_types.items, builtins);
         const functions_changed = try refreshFunctionReturns(
             allocator,
             module_id,
@@ -1286,7 +1293,7 @@ fn buildTypeInfo(
             collected.resolved_type_nodes,
             type_store,
         );
-        if (!variables_changed and !functions_changed) break;
+        if (!variables_changed and !parameters_changed and !functions_changed) break;
     }
 
     // Type queries consume the resolved value table, which intentionally does
@@ -1328,6 +1335,7 @@ fn buildTypeInfo(
             result.cfgs,
         );
         const variables_changed = refreshVariableTypes(result, symbol_types.items, node_types.items, builtins);
+        const parameters_changed = refreshParameterDefaultTypes(result, symbol_types.items, node_types.items, builtins);
         const functions_changed = try refreshFunctionReturns(
             allocator,
             module_id,
@@ -1337,7 +1345,7 @@ fn buildTypeInfo(
             collected.resolved_type_nodes,
             type_store,
         );
-        if (!variables_changed and !functions_changed) break;
+        if (!variables_changed and !parameters_changed and !functions_changed) break;
     }
 
     const coverage_diags = try completeExpressionCoverage(
@@ -1643,6 +1651,31 @@ fn refreshVariableTypes(
     return changed;
 }
 
+fn refreshParameterDefaultTypes(
+    result: frontend.FrontendResult,
+    symbol_types: []SymbolTypeInfo,
+    node_types: []const NodeTypeInfo,
+    builtins: *const types.Builtins,
+) bool {
+    var changed = false;
+    for (result.bind.symbols) |symbol| {
+        if (symbol.kind != .parameter) continue;
+        const entry = symbolTypePtr(symbol_types, symbol.id) orelse continue;
+        if (entry.declared_type != null or entry.state == .@"error") continue;
+        switch (result.ast.node(symbol.declaration).data) {
+            .Parameter => |parameter| if (parameter.initializer) |initializer| {
+                const inferred = nodeType(node_types, initializer) orelse builtins.unknown;
+                if (entry.inferred_type == null or entry.inferred_type.? != inferred) {
+                    entry.inferred_type = inferred;
+                    changed = true;
+                }
+            },
+            else => {},
+        }
+    }
+    return changed;
+}
+
 fn refreshFunctionReturns(
     allocator: std.mem.Allocator,
     module_id: ModuleId,
@@ -1656,7 +1689,7 @@ fn refreshFunctionReturns(
     for (result.bind.symbols) |symbol| {
         if (symbol.kind != .function and symbol.kind != .method) continue;
         const function = function_like.describe(result.ast, symbol.declaration) orelse continue;
-        const return_type = try type_inference.inferFunctionLikeReturnWithCfgs(
+        const inferred_return_type = try type_inference.inferFunctionLikeReturnWithCfgs(
             allocator,
             function,
             result.ast,
@@ -1664,31 +1697,45 @@ fn refreshFunctionReturns(
             type_store,
             result.cfgs,
         );
-
+        const sym_info_ptr = symbolTypePtr(symbol_types, symbol.id) orelse continue;
+        const prior_declared_signature = if (sym_info_ptr.declared_type) |type_id|
+            type_store.lookupFunction(type_id)
+        else
+            null;
         const new_sig_params = try type_inference.collectFunctionLikeParameters(
             allocator,
             function,
             result.ast,
+            node_types,
             type_store,
             resolved_type_nodes,
         );
-        const new_signature_id = try type_store.addFunctionDetailed(
+        const inferred_signature_id = try type_store.addFunctionDetailed(
             new_sig_params,
-            return_type,
+            inferred_return_type,
             @intCast(function.type_parameters.len),
             @import("../types/model.zig").FunctionFlags{
                 .is_async = function.flags.is_async,
                 .is_generator = function.flags.is_generator,
             },
         );
+        const declared_signature_id = if (prior_declared_signature) |signature|
+            try type_store.addFunctionDetailed(
+                new_sig_params,
+                signature.return_type,
+                @intCast(function.type_parameters.len),
+                @import("../types/model.zig").FunctionFlags{
+                    .is_async = function.flags.is_async,
+                    .is_generator = function.flags.is_generator,
+                },
+            )
+        else
+            null;
         allocator.free(new_sig_params);
 
-        // Body inference is always separate from declaration evidence. For an
-        // annotated function effective() continues to prefer declared_type.
-        const sym_info_ptr = symbolTypePtr(symbol_types, symbol.id) orelse continue;
         if (symbol.kind == .method) {
             const owner = enclosingClassNode(result, symbol.declaration) orelse continue;
-            const effective_signature = sym_info_ptr.declared_type orelse new_signature_id;
+            const effective_signature = declared_signature_id orelse inferred_signature_id;
             const member_type = switch (function.kind) {
                 .getter => if (type_store.lookupFunction(effective_signature)) |signature|
                     signature.return_type
@@ -1708,8 +1755,19 @@ fn refreshFunctionReturns(
                 member_type,
             );
         }
-        if (sym_info_ptr.inferred_type != null and sym_info_ptr.inferred_type.? == new_signature_id) continue;
-        sym_info_ptr.inferred_type = new_signature_id;
+        var signature_changed = false;
+        if (declared_signature_id) |signature_id| if (sym_info_ptr.declared_type.? != signature_id) {
+            // Preserve source-declared parameter/return evidence while
+            // completing unannotated default parameter types from their
+            // initializer expressions.
+            sym_info_ptr.declared_type = signature_id;
+            signature_changed = true;
+        };
+        if (sym_info_ptr.inferred_type == null or sym_info_ptr.inferred_type.? != inferred_signature_id) {
+            sym_info_ptr.inferred_type = inferred_signature_id;
+            signature_changed = true;
+        }
+        if (!signature_changed) continue;
         changed = true;
     }
     return changed;
@@ -2004,6 +2062,29 @@ test "arrow implicit returns and optional default rest parameters shape signatur
     try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(value).?);
     const defaulted = testVariableInitializer(&result, "defaulted").?;
     try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(defaulted).?);
+}
+
+test "unannotated default parameters infer one narrowed signature and binding type" {
+    var result = try analyze(std.testing.allocator,
+        \\function power(value: number, exponent = 2): number { return value ** exponent; }
+        \\const answer = power(3);
+    );
+    defer result.deinit();
+
+    var power_symbol: ?binder.SymbolId = null;
+    var exponent_symbol: ?binder.SymbolId = null;
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind == .function and std.mem.eql(u8, symbol.name, "power")) power_symbol = symbol.id;
+        if (symbol.kind == .parameter and std.mem.eql(u8, symbol.name, "exponent")) exponent_symbol = symbol.id;
+    }
+    const signature_id = result.lookupSymbolType(power_symbol orelse return error.MissingPowerSymbol).?.effective().?;
+    const signature = result.lookupFunctionType(signature_id) orelse return error.MissingPowerSignature;
+    try std.testing.expectEqual(result.type_store.builtins.number, signature.parameters[1].type_id);
+    try std.testing.expect(signature.parameters[1].has_default);
+    try std.testing.expectEqual(
+        result.type_store.builtins.number,
+        result.lookupSymbolType(exponent_symbol orelse return error.MissingExponentSymbol).?.effective().?,
+    );
 }
 
 test "method calls preserve receiver and async functions wrap return type" {

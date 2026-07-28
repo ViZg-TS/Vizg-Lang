@@ -860,6 +860,7 @@ pub fn collectFunctionLikeParameters(
     allocator: std.mem.Allocator,
     function: function_like.Descriptor,
     tree: ast_mod.Ast,
+    entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
     resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
 ) ![]const types.ParameterType {
@@ -869,6 +870,8 @@ pub fn collectFunctionLikeParameters(
             .name = param.name,
             .type_id = if (param.type_annotation) |annotation|
                 lookupResolvedTypeAnnotation(annotation, resolved_type_nodes, store)
+            else if (param.initializer) |initializer|
+                findType(entries, initializer) orelse store.builtins.unknown
             else
                 store.builtins.unknown,
             .optional = param.optional,
@@ -889,7 +892,7 @@ pub fn inferFunctionLike(
     resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
     cfgs: []const cfg_mod.FunctionCfg,
 ) !types.TypeId {
-    const parameters = try collectFunctionLikeParameters(allocator, function, tree, store, resolved_type_nodes);
+    const parameters = try collectFunctionLikeParameters(allocator, function, tree, entries, store, resolved_type_nodes);
     defer allocator.free(parameters);
     var return_type = if (function.return_type) |annotation|
         lookupResolvedTypeAnnotation(annotation, resolved_type_nodes, store)
