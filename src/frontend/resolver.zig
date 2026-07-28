@@ -328,7 +328,7 @@ const Resolver = struct {
             .span = node.span,
         });
 
-        if (symbol == null) {
+        if (symbol == null and !std.mem.eql(u8, name, "undefined")) {
             try self.diagnostic_list.ensureUnusedCapacity(1);
             const message = try std.fmt.allocPrint(self.allocator, "cannot find name '{s}'", .{name});
             try self.diagnostic_list.append(self.allocator, .{
@@ -767,4 +767,30 @@ test "resolver visits parameter default expressions in parameter scope" {
         first_read = first_read or std.mem.eql(u8, reference.name, "first");
     }
     try std.testing.expect(seed_read and first_read);
+}
+
+test "resolver treats undefined as an intrinsic value without a lib declaration" {
+    const scanner = @import("scanner.zig");
+    const parser = @import("parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const scanned = try scanner.scanAll(
+        allocator,
+        "function f(value?: number) { return value === undefined; }",
+        true,
+    );
+    const parsed = try parser.parse(allocator, scanned.tokens, .{});
+    const bound = try binder.bind(allocator, parsed.ast);
+    const resolved = try resolve(allocator, parsed.ast, bound);
+    try std.testing.expectEqual(@as(usize, 0), resolved.diagnostics.len);
+    var intrinsic_seen = false;
+    for (resolved.references) |reference| {
+        if (std.mem.eql(u8, reference.name, "undefined")) {
+            intrinsic_seen = true;
+            try std.testing.expectEqual(@as(?binder.SymbolId, null), reference.symbol);
+        }
+    }
+    try std.testing.expect(intrinsic_seen);
 }

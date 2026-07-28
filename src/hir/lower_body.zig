@@ -468,7 +468,15 @@ const Lowerer = struct {
     }
 
     pub fn lowerIdentifier(self: *Lowerer, node_id: ast.NodeId) !ids.ValueId {
-        const symbol_id = self.referenceSymbol(node_id) orelse return error.UnresolvedIdentifier;
+        const symbol_id = self.referenceSymbol(node_id) orelse {
+            const identifier = self.local.frontend.ast.node(node_id).data.Identifier;
+            if (std.mem.eql(u8, identifier.name, "undefined"))
+                return self.emitValue(
+                    .{ .constant = .undefined },
+                    self.builder.result.semanticResult().type_store.builtins.undefined,
+                );
+            return error.UnresolvedIdentifier;
+        };
         const binding_id = self.bindingForSymbol(symbol_id) orelse return error.MissingHirBinding;
         return self.emitValue(.{ .load_binding = binding_id }, self.nodeType(node_id));
     }

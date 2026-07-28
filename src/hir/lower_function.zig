@@ -736,7 +736,15 @@ const Context = struct {
     }
 
     pub fn lowerIdentifier(self: *Context, node_id: ast.NodeId) !ids.ValueId {
-        const symbol = self.referenceSymbol(node_id) orelse return error.UnresolvedIdentifier;
+        const symbol = self.referenceSymbol(node_id) orelse {
+            const identifier = self.inputs.local.frontend.ast.node(node_id).data.Identifier;
+            if (std.mem.eql(u8, identifier.name, "undefined"))
+                return self.emitValue(
+                    .{ .constant = .undefined },
+                    self.inputs.builder.result.semanticResult().type_store.builtins.undefined,
+                );
+            return error.UnresolvedIdentifier;
+        };
         return self.emitValue(.{ .load_binding = try self.bindingForReference(symbol) }, self.nodeType(node_id));
     }
 

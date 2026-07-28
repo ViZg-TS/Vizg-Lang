@@ -504,6 +504,11 @@ fn lookupAccessSingle(
         .tuple => |tuple| try lookupTupleElement(tuple, key, tree, store),
         .array => |array| if (isNumericIndex(key, tree, store))
             .{ .type_id = array.element_type }
+        else if (accessPropertyName(key, tree)) |name|
+            if (std.mem.eql(u8, name, "length"))
+                .{ .type_id = b.number }
+            else
+                invalidAccess(key, b.unknown)
         else
             invalidAccess(key, b.unknown),
         .primitive => |primitive| if (primitive == .string and isNumericIndex(key, tree, store))

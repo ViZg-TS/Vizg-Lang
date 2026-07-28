@@ -2563,6 +2563,25 @@ test "Goal 119 member access resolves properties and preserves method receiver" 
     );
 }
 
+test "intrinsic undefined and array length type without lib declarations" {
+    var result = try analyze(std.testing.allocator,
+        \\const missing = undefined;
+        \\const values: number[] = [1, 2, 3];
+        \\const count = values.length;
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(
+        result.type_store.builtins.undefined,
+        result.lookupNodeType(testVariableInitializer(&result, "missing").?).?,
+    );
+    try std.testing.expectEqual(
+        result.type_store.builtins.number,
+        result.lookupNodeType(testVariableInitializer(&result, "count").?).?,
+    );
+}
+
 test "Goal 119 indexed access handles tuples arrays objects and strings" {
     var result = try analyze(std.testing.allocator,
         \\const tuple: [number, string] = [1, "two"];
