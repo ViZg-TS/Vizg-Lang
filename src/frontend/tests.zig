@@ -1634,6 +1634,32 @@ test "frontend suite: complete import forms preserve kind and type-only metadata
     try std.testing.expectEqual(ast_mod.ImportSpecifierKind.named, result.bind.module.imports[4].kind);
 }
 
+test "frontend suite: named imports preserve per-specifier type-only metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try frontend.analyze(allocator, .{ .path = "imports.ts", .text =
+        \\import { value, type Shape, type Alias as LocalAlias } from "./mixed";
+    }, .{});
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+
+    const statements = result.ast.node(result.ast.root).data.Program.statements;
+    const import_decl = result.ast.node(statements[0]).data.ImportDeclaration;
+    try std.testing.expect(!import_decl.type_only);
+    try std.testing.expectEqual(@as(usize, 3), import_decl.specifiers.len);
+    try std.testing.expect(!import_decl.specifiers[0].type_only);
+    try std.testing.expect(import_decl.specifiers[1].type_only);
+    try std.testing.expect(import_decl.specifiers[2].type_only);
+    try std.testing.expectEqualStrings("Shape", import_decl.specifiers[1].imported_name);
+    try std.testing.expectEqualStrings("LocalAlias", import_decl.specifiers[2].local_name);
+
+    try std.testing.expectEqual(@as(usize, 3), result.bind.module.imports.len);
+    try std.testing.expect(!result.bind.module.imports[0].type_only);
+    try std.testing.expect(result.bind.module.imports[1].type_only);
+    try std.testing.expect(result.bind.module.imports[2].type_only);
+}
+
 test "frontend suite: parameter annotation captured" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

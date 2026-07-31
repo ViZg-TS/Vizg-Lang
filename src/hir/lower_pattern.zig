@@ -129,6 +129,15 @@ fn append(
                 else => return error.UnsupportedHirPattern,
             }
         },
+        .MemberExpression, .ElementAccessExpression => switch (position) {
+            // A member/element target is only meaningful for assignment patterns
+            // (e.g. `[target.x = 5] = source`). Declaration patterns cannot
+            // introduce a binding through a property place.
+            .assignment => try items.append(context.builder.allocator, .{
+                .place_target = try context.lowerPlace(pattern),
+            }),
+            else => return error.UnsupportedHirPattern,
+        },
         else => return error.UnsupportedHirPattern,
     }
 }

@@ -801,7 +801,11 @@ const Context = struct {
         if (self.scopeWithin(self.inputs.local.frontend.bind.symbols[symbol].scope))
             return self.mappedBinding(symbol) orelse error.MissingHirBinding;
         const source = self.mappedBinding(symbol) orelse return error.MissingOuterHirBinding;
-        const local = try self.addCaptureBinding(self.inputs.local.frontend.bind.symbols[symbol].name, self.symbolType(symbol));
+        const local = try self.addCaptureBinding(
+            self.inputs.local.frontend.bind.symbols[symbol].name,
+            self.symbolType(symbol),
+            true,
+        );
         try self.captures.append(self.inputs.builder.allocator, .{ .source = .{ .binding = source }, .local = local, .mode = .live_binding });
         try self.visible.append(self.inputs.builder.allocator, .{ .symbol = symbol, .binding = local });
         return local;
@@ -809,12 +813,21 @@ const Context = struct {
 
     fn specialCapture(self: *Context, source: model.CaptureSource, name: []const u8) !ids.BindingId {
         for (self.captures.items) |capture| if (std.meta.activeTag(capture.source) == std.meta.activeTag(source)) return capture.local;
-        const local = try self.addCaptureBinding(name, self.inputs.builder.result.semanticResult().type_store.builtins.unknown);
+        const local = try self.addCaptureBinding(
+            name,
+            self.inputs.builder.result.semanticResult().type_store.builtins.unknown,
+            false,
+        );
         try self.captures.append(self.inputs.builder.allocator, .{ .source = source, .local = local, .mode = .lexical_value });
         return local;
     }
 
-    fn addCaptureBinding(self: *Context, name: []const u8, type_id: model.TypeId) !ids.BindingId {
+    fn addCaptureBinding(
+        self: *Context,
+        name: []const u8,
+        type_id: model.TypeId,
+        mutable: bool,
+    ) !ids.BindingId {
         const binding = try self.inputs.builder.makeId(ids.BindingId, self.inputs.builder.budget.usage.bindings);
         try self.inputs.builder.appendBinding(&self.bindings, .{
             .id = binding,
@@ -822,7 +835,7 @@ const Context = struct {
             .kind = .synthetic,
             .type_id = type_id,
             .declaration = null,
-            .mutable = false,
+            .mutable = mutable,
             .initial_state = .initialized,
             .origin = .invalid,
         });

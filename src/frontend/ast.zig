@@ -157,6 +157,7 @@ pub const ImportSpecifierKind = enum {
 
 pub const ImportSpecifier = struct {
     kind: ImportSpecifierKind = .named,
+    type_only: bool = false,
     imported_name: []const u8,
     local_name: []const u8,
     imported_span: tokens.Span,

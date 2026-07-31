@@ -274,6 +274,13 @@ const Parser = struct {
             _ = self.advance();
             while (!self.at(.RBrace) and !self.at(.EOF)) {
                 if (self.at(.Identifier) and !self.atIdentifierText("as")) {
+                    const specifier_type_only = !type_only and
+                        self.atIdentifierText("type") and
+                        self.peek(1).kind == .Identifier and
+                        !std.mem.eql(u8, self.peek(1).lexeme, "as");
+                    if (specifier_type_only) _ = self.advance();
+                    if (!self.at(.Identifier) or self.atIdentifierText("as"))
+                        return error.UnexpectedToken;
                     const imported = self.advance();
                     const local = if (self.atIdentifierText("as")) local: {
                         _ = self.advance();
@@ -282,6 +289,7 @@ const Parser = struct {
                     try names.append(self.allocator, local.lexeme);
                     try specifiers.append(self.allocator, .{
                         .kind = .named,
+                        .type_only = specifier_type_only,
                         .imported_name = imported.lexeme,
                         .local_name = local.lexeme,
                         .imported_span = imported.span,
@@ -314,6 +322,13 @@ const Parser = struct {
                     _ = self.advance();
                     while (!self.at(.RBrace) and !self.at(.EOF)) {
                         if (self.at(.Identifier) and !self.atIdentifierText("as")) {
+                            const specifier_type_only = !type_only and
+                                self.atIdentifierText("type") and
+                                self.peek(1).kind == .Identifier and
+                                !std.mem.eql(u8, self.peek(1).lexeme, "as");
+                            if (specifier_type_only) _ = self.advance();
+                            if (!self.at(.Identifier) or self.atIdentifierText("as"))
+                                return error.UnexpectedToken;
                             const imported = self.advance();
                             const alias = if (self.atIdentifierText("as")) alias: {
                                 _ = self.advance();
@@ -322,6 +337,7 @@ const Parser = struct {
                             try names.append(self.allocator, alias.lexeme);
                             try specifiers.append(self.allocator, .{
                                 .kind = .named,
+                                .type_only = specifier_type_only,
                                 .imported_name = imported.lexeme,
                                 .local_name = alias.lexeme,
                                 .imported_span = imported.span,

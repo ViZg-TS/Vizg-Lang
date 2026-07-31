@@ -1161,7 +1161,20 @@ fn resolveTypeQuery(context: *TypeResolutionContext, name: []const u8, span: ast
 
 pub fn resolveTypeName(context: *TypeResolutionContext, name: []const u8) anyerror!TypeNameResolution {
     if (findVisibleSymbol(context, name, .type)) |symbol| {
-        if (symbol.kind == .import) if (findImportedType(context, name, symbol.id)) |imported| return importedResolution(imported);
+        if (symbol.kind == .import) {
+            if (findImportedType(context, name, symbol.id)) |imported| return importedResolution(imported);
+            if (findImportedType(context, name, null)) |imported| return importedResolution(imported);
+            // Import types are resolved at the project level, not during
+            // single-module analysis. Return unknown instead of unresolved
+            // to avoid false "cannot find type name" diagnostics during the
+            // initial per-module pass; the project-level pass re-resolves
+            // with the full imported-types table.
+            return .{ .resolved = .{
+                .type_id = context.type_store.builtins.unknown,
+                .symbol_id = symbol.id,
+                .declaration = types.SemanticDeclId.init(context.current_module, symbol.declaration),
+            } };
+        }
         const type_id = try ensureSymbolType(context, symbol.id) orelse return .{ .unresolved = .{
             .name = name,
             .reason = .unavailable_declaration,

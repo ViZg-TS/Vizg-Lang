@@ -192,12 +192,13 @@ const Binder = struct {
             },
             .ImportDeclaration => |import_decl| {
                 for (import_decl.specifiers) |specifier| {
-                    _ = try self.declareInNamespace(scope, specifier.local_name, .import, if (import_decl.type_only) .type else .value, node_id, specifier.local_span);
+                    const type_only = import_decl.type_only or specifier.type_only;
+                    _ = try self.declareInNamespace(scope, specifier.local_name, .import, if (type_only) .type else .value, node_id, specifier.local_span);
                     try self.imports.append(self.allocator, .{
                         .local_name = specifier.local_name,
                         .source = import_decl.source,
                         .kind = specifier.kind,
-                        .type_only = import_decl.type_only,
+                        .type_only = type_only,
                     });
                 }
             },

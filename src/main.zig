@@ -915,8 +915,8 @@ fn printImportSpecifiers(writer: *Io.Writer, values: []const ast_mod.ImportSpeci
     for (values, 0..) |value, i| {
         if (i > 0) try writer.print(", ", .{});
         try writer.print(
-            "{{kind={s}, imported=\"{s}\", local=\"{s}\"}}",
-            .{ @tagName(value.kind), value.imported_name, value.local_name },
+            "{{kind={s}, type_only={}, imported=\"{s}\", local=\"{s}\"}}",
+            .{ @tagName(value.kind), value.type_only, value.imported_name, value.local_name },
         );
     }
 }
@@ -1002,8 +1002,8 @@ test "printAst shows import declaration and specifier metadata" {
     try printAst(&writer, result.ast);
     const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "kind=mixed type_only=true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "{kind=default, imported=\"default\", local=\"main\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "{kind=named, imported=\"value\", local=\"localValue\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "{kind=default, type_only=false, imported=\"default\", local=\"main\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "{kind=named, type_only=false, imported=\"value\", local=\"localValue\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "kind=side_effect type_only=false") != null);
 }
 

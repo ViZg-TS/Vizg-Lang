@@ -302,6 +302,7 @@ pub fn analyzeSourceWithLimits(
         &type_store,
         true,
         &.{},
+        &.{},
         true,
         try remainingDiagnostics(limits.max_diagnostics, fe.diagnostics.len),
     );
@@ -418,7 +419,7 @@ fn analyzeModuleGraphData(
         try project_modules.append(allocator, .{
             .id = module.id,
             .path = module.display_path,
-            .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false, &.{}, false, limits.max_diagnostics),
+            .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false, &.{}, &.{}, false, limits.max_diagnostics),
         });
     }
 
@@ -466,6 +467,7 @@ fn analyzeModuleGraphData(
             &type_store,
             false,
             imported_types,
+            import_list.items,
             false,
             limits.max_diagnostics,
         );
@@ -1154,6 +1156,19 @@ fn importedTypeBindings(
     return bindings.toOwnedSlice(allocator);
 }
 
+fn importedValueType(
+    imports: []const SemanticImport,
+    module_id: ModuleId,
+    symbol_id: binder.SymbolId,
+) ?types.TypeId {
+    for (imports) |item| {
+        if (item.module_id != module_id or item.import_symbol != symbol_id or item.type_only) continue;
+        const target = item.target orelse continue;
+        return target.type_id;
+    }
+    return null;
+}
+
 fn buildTypeInfo(
     allocator: std.mem.Allocator,
     module_id: modules_mod.ModuleId,
@@ -1161,6 +1176,7 @@ fn buildTypeInfo(
     type_store: *types.TypeStore,
     run_checker: bool,
     imported_types: []const type_collector.ImportedTypeBinding,
+    imported_values: []const SemanticImport,
     complete_nominals: bool,
     max_diagnostics: usize,
 ) !TypeInfo {
@@ -1232,7 +1248,10 @@ fn buildTypeInfo(
             .type_alias, .type_parameter => if (entry.declared_type == null) {
                 entry.inferred_type = builtins.unknown;
             },
-            .import => entry.inferred_type = builtins.unknown,
+            .import => {
+                entry.inferred_type = importedValueType(imported_values, module_id, symbol.id) orelse builtins.unknown;
+                if (entry.inferred_type != builtins.unknown) entry.state = .resolved;
+            },
             .enum_member => entry.inferred_type = owningEnumType(
                 result,
                 symbol_types.items,

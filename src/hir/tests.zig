@@ -1361,6 +1361,58 @@ test "HIR pattern lowering preserves structure deferred defaults and assignment 
     try std.testing.expectEqualStrings("seed", initialization.bindings[captured_binding.index().?].name);
 }
 
+test "HIR pattern default initializer preserves mutable live capture storage" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(226),
+        .logical_name = "pattern-live-capture.ts",
+        .bytes =
+        \\export function answer(): number {
+        \\  let calls = 0;
+        \\  const [value = (calls += 1)] = [,];
+        \\  return calls;
+        \\}
+        ,
+    });
+    while (switch (try project.step()) {
+        .complete => false,
+        .request => return error.UnexpectedModuleRequest,
+    }) {}
+    const semantic = try project.finish();
+    if (semantic.has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    var saw_mutable_capture = false;
+    var saw_capture_store = false;
+    for (result.project.functions) |function| {
+        for (function.captures) |capture| switch (capture.source) {
+            .binding => {
+                const local = for (function.bindings) |binding| {
+                    if (binding.id.eql(capture.local)) break binding;
+                } else return error.InvalidCaptureBinding;
+                if (!local.mutable) continue;
+                saw_mutable_capture = true;
+                for (function.blocks) |block| for (block.instructions) |instruction| switch (instruction.operation) {
+                    .store_binding => |store| if (store.binding.eql(capture.local)) {
+                        saw_capture_store = true;
+                    },
+                    else => {},
+                };
+            },
+            else => {},
+        };
+    }
+    try std.testing.expect(saw_mutable_capture);
+    try std.testing.expect(saw_capture_store);
+}
+
 test "ANF builder owns all semantic place forms and rejects unknown places" {
     var project = try completedProject();
     defer project.deinit();
