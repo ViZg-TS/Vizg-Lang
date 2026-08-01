@@ -50,6 +50,21 @@ pub const ExternalSymbolId = enum(u64) {
     }
 };
 
+/// Optional stable host identity for a compiler-owned semantic operation.
+/// ViZG preserves this opaque value but does not assign names, ABI rules, or
+/// target legalization policy to it.
+pub const IntrinsicId = enum(u64) {
+    _,
+
+    pub fn init(value_: u64) IntrinsicId {
+        return @enumFromInt(value_);
+    }
+
+    pub fn value(self: IntrinsicId) u64 {
+        return @intFromEnum(self);
+    }
+};
+
 /// Stable host-assigned identity for one named type in a source-less module.
 /// This identity is distinct from external symbols and from ViZG-local TypeIds.
 pub const ExternalTypeId = enum(u64) {
@@ -229,6 +244,7 @@ pub const ExternalExportDescriptor = struct {
     type_metadata: ?ExternalType = null,
     type_reference: ?ExternalTypeReference = null,
     symbol_id: ?ExternalSymbolId = null,
+    intrinsic_id: ?IntrinsicId = null,
     declaration_kind: ?ExternalDeclarationKind = null,
     function: ?ExternalFunctionDescriptor = null,
     effects: ?ExternalEffectSet = null,
@@ -290,6 +306,7 @@ comptime {
     if (@sizeOf(ModuleId) != @sizeOf(u64)) @compileError("ModuleId must remain C-representable as u64");
     if (@sizeOf(ExternalModuleId) != @sizeOf(u64)) @compileError("ExternalModuleId must remain C-representable as u64");
     if (@sizeOf(ExternalSymbolId) != @sizeOf(u64)) @compileError("ExternalSymbolId must remain C-representable as u64");
+    if (@sizeOf(IntrinsicId) != @sizeOf(u64)) @compileError("IntrinsicId must remain C-representable as u64");
     if (@sizeOf(RequestId) != @sizeOf(u64)) @compileError("RequestId must remain C-representable as u64");
     if (@sizeOf(SourceKind) != @sizeOf(u32)) @compileError("SourceKind must remain C-representable as u32");
     if (@sizeOf(RequestOperation) != @sizeOf(u32)) @compileError("RequestOperation must remain C-representable as u32");

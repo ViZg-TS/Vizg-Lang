@@ -8,6 +8,9 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Added an optional host-assigned `IntrinsicId` to the Zig external-module
+  contract. Semantic imports and HIR external declarations preserve it without
+  source-name recognition or target/ABI policy.
 - `undefined` now resolves and lowers as an intrinsic source value without a
   library declaration, and array `.length` infers as `number` without a global
   `Array` interface. Optional and defaulted parameters accept an explicit

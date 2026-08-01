@@ -22,6 +22,7 @@ pub const ModuleId = project.ModuleId;
 pub const RequestId = project.RequestId;
 pub const ExternalModuleId = project.ExternalModuleId;
 pub const ExternalSymbolId = project.ExternalSymbolId;
+pub const IntrinsicId = project.IntrinsicId;
 pub const ExternalTypeId = project.ExternalTypeId;
 pub const ModuleSource = project.ModuleSource;
 pub const ModuleRequest = project.ModuleRequest;

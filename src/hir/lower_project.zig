@@ -124,6 +124,7 @@ fn lowerExternalDeclarations(builder: *builder_mod.Builder, project: *const proj
             try declarations.append(builder.allocator, .{
                 .module_id = external_module,
                 .symbol_id = symbol_id,
+                .intrinsic_id = exported.intrinsic_id,
                 .exported_name = try builder.copyString(exported.name),
                 .kind = exported.declaration_kind orelse return error.IncompleteExternalDeclaration,
                 .type_id = binding.target.type_id,

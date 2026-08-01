@@ -1208,6 +1208,7 @@ pub const Project = struct {
                 .namespace = if (item.type_only) .type else .value,
                 .external_module_id = external_id.value(),
                 .external_symbol_id = if (exported.?.symbol_id) |id| id.value() else null,
+                .intrinsic_id = if (exported.?.intrinsic_id) |id| id.value() else null,
                 .external_declaration_kind = exported.?.declaration_kind,
                 .external_effects = exported.?.effects,
             };
@@ -1658,6 +1659,7 @@ fn enrichExternalIdentity(
     var enriched = identity;
     enriched.type_id = try externalDeclarationTypeId(allocator, store, module, descriptor, identity.type_id);
     enriched.external_symbol_id = if (descriptor.symbol_id) |id| id.value() else null;
+    enriched.intrinsic_id = if (descriptor.intrinsic_id) |id| id.value() else null;
     enriched.external_declaration_kind = descriptor.declaration_kind;
     enriched.external_effects = descriptor.effects;
     return enriched;

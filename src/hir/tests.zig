@@ -865,6 +865,7 @@ test "HIR eligibility accepts typed external bindings without source bodies" {
                     .name = "platform",
                     .type_metadata = .string,
                     .symbol_id = .init(71),
+                    .intrinsic_id = .init(7001),
                     .declaration_kind = .constant,
                     .effects = .{ .unknown = false },
                 },
@@ -890,12 +891,14 @@ test "HIR eligibility accepts typed external bindings without source bodies" {
     try std.testing.expectEqual(@as(usize, 0), result.project.entities.len);
     try std.testing.expectEqual(@as(usize, 1), result.project.functions.len);
     try std.testing.expectEqual(@as(u64, 71), result.project.external_declarations[0].symbol_id.value());
+    try std.testing.expectEqual(@as(u64, 7001), result.project.external_declarations[0].intrinsic_id.?.value());
     try std.testing.expectEqualStrings("platform", result.project.external_declarations[0].exported_name);
     try std.testing.expectEqual(@as(u64, 72), result.project.external_declarations[1].symbol_id.value());
     try std.testing.expectEqualStrings("version", result.project.external_declarations[1].exported_name);
     try std.testing.expectEqual(@as(u64, 9001), result.project.modules[0].imports[0].source.external.value());
     try std.testing.expectEqual(@as(u64, 9001), result.project.modules[0].imports[0].target.external_module_id.?.value());
     try std.testing.expectEqual(@as(u64, 71), result.project.modules[0].imports[0].target.external_symbol_id.?.value());
+    try std.testing.expectEqual(@as(u64, 7001), result.project.modules[0].imports[0].target.intrinsic_id.?.value());
 }
 
 test "HIR eligibility rejects external bindings without explicit publication metadata" {

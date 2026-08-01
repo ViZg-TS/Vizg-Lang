@@ -60,6 +60,12 @@ the extension through `vizg_external_module_api_version()` and answer with
 available unchanged; neither form accepts filesystem, header, library, linker,
 or other origin policy.
 
+The Zig host contract may additionally attach an opaque, stable `IntrinsicId`
+to an external declaration. ViZG preserves that identity through semantic links
+and HIR without interpreting source names, target availability, ABI lowering,
+or runtime policy. The intrinsic catalog and legalization contract remain
+consumer-owned; versioned C exposure is additive and negotiated separately.
+
 External-module API v3 adds a module-local type graph. A host assigns stable
 `external_type_id` values to named closed structural types, publishes their
 members in declaration order, and refers to those types from exports and

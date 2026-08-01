@@ -34,6 +34,7 @@ pub const SemanticIdentity = struct {
     /// source ModuleId without creating equal semantic provenance.
     external_module_id: ?u64 = null,
     external_symbol_id: ?u64 = null,
+    intrinsic_id: ?u64 = null,
     external_declaration_kind: ?@import("../project/contracts.zig").ExternalDeclarationKind = null,
     external_effects: ?@import("../project/contracts.zig").ExternalEffectSet = null,
     /// Host-assigned identity for ambient globals or explicitly registered

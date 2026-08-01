@@ -31,6 +31,7 @@ pub const HirProject = struct {
 pub const HirExternalDeclaration = struct {
     module_id: ExternalModuleId,
     symbol_id: ExternalSymbolId,
+    intrinsic_id: ?project.IntrinsicId = null,
     exported_name: []const u8,
     kind: project.ExternalDeclarationKind,
     type_id: TypeId,
@@ -69,6 +70,7 @@ pub const HirSemanticIdentity = struct {
     namespace: HirSemanticNamespace,
     external_module_id: ?ExternalModuleId = null,
     external_symbol_id: ?ExternalSymbolId = null,
+    intrinsic_id: ?project.IntrinsicId = null,
     /// Host-assigned identity for ambient globals or registered source values;
     /// `null` for ordinary source-derived symbols.
     host_binding_id: ?u64 = null,
