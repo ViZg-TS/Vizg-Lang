@@ -1400,8 +1400,12 @@ test "HIR pattern default initializer preserves mutable live capture storage" {
                 if (!local.mutable) continue;
                 saw_mutable_capture = true;
                 for (function.blocks) |block| for (block.instructions) |instruction| switch (instruction.operation) {
-                    .store_binding => |store| if (store.binding.eql(capture.local)) {
-                        saw_capture_store = true;
+                    .store_place => |store| {
+                        const place = for (function.places) |place| {
+                            if (place.id.eql(store.place)) break place;
+                        } else return error.InvalidCapturePlace;
+                        if (place.kind == .binding and place.kind.binding.eql(capture.local))
+                            saw_capture_store = true;
                     },
                     else => {},
                 };
