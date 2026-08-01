@@ -848,7 +848,7 @@ test "external-module API v2 publishes stable function declarations to HIR" {
     );
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
-        c.vizg_hir_external_declaration_detail_at(result, 4, 0, &external_detail),
+        c.vizg_hir_external_declaration_detail_at(result, 5, 0, &external_detail),
     );
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
@@ -999,6 +999,15 @@ test "external-module API v3 publishes ordered structural record types and signa
         var member_count: usize = 0;
         try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_type_member_count(result, c.VIZG_HIR_DETAIL_API_VERSION, detail.id, &member_count));
         if (member_count != members.len) continue;
+        var identity: c.Vizg_HirExternalTypeIdentity = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_external_type_identity(result, c.VIZG_HIR_DETAIL_API_VERSION, detail.id, &identity),
+        );
+        try std.testing.expectEqual(detail.id, identity.type_id);
+        try std.testing.expectEqual(@as(u32, c.VIZG_HIR_EXTERNAL_TYPE_HAS_IDENTITY), identity.flags);
+        try std.testing.expectEqual(@as(u64, 81), identity.external_module_id);
+        try std.testing.expectEqual(@as(u64, 0xC010), identity.external_type_id);
         const expected_names = [_][]const u8{ "r", "g", "b", "a" };
         for (expected_names, 0..) |expected, member_index| {
             var member: c.Vizg_HirTypeMember = undefined;

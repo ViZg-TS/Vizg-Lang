@@ -19,5 +19,5 @@ test "public header versions match the declaration companion" {
     try std.testing.expectEqual(@as(u32, 2), VIZG_EXTERNAL_MODULE_API_VERSION);
     try std.testing.expectEqual(@as(u32, 2), VIZG_HIR_API_VERSION);
     try std.testing.expectEqual(@as(u32, 1), VIZG_HIR_PAYLOAD_API_VERSION);
-    try std.testing.expectEqual(@as(u32, 3), VIZG_HIR_DETAIL_API_VERSION);
+    try std.testing.expectEqual(@as(u32, 4), VIZG_HIR_DETAIL_API_VERSION);
 }

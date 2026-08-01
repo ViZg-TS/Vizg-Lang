@@ -38,6 +38,7 @@ pub const GenericParameter = model.GenericParameter;
 pub const GenericDeclaration = model.GenericDeclaration;
 pub const AppliedGenericType = model.AppliedGenericType;
 pub const FunctionSignature = model.FunctionSignature;
+pub const ExternalTypeIdentity = model.ExternalTypeIdentity;
 
 pub const Builtins = model.Builtins;
 pub const TypeStore = type_store.TypeStore;

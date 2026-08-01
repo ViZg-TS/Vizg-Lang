@@ -395,6 +395,7 @@ pub fn build(b: *std.Build) void {
         \\vizg_hir_block_parameter_at
         \\vizg_hir_detail_api_version
         \\vizg_hir_external_declaration_detail_at
+        \\vizg_hir_external_type_identity
         \\vizg_hir_function_capture_at
         \\vizg_hir_function_completion_type
         \\vizg_hir_function_detail_at

@@ -9,7 +9,7 @@
 #define VIZG_ABI_VERSION 1u
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
-#define VIZG_HIR_DETAIL_API_VERSION 3u
+#define VIZG_HIR_DETAIL_API_VERSION 4u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 3u
 #define VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN 0u
 #define VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED 1u
@@ -68,6 +68,7 @@
 #define VIZG_HIR_ORIGIN_HAS_TYPE (1u << 1)
 #define VIZG_HIR_ORIGIN_HAS_PARENT (1u << 2)
 #define VIZG_HIR_ORIGIN_HAS_SYNTHETIC_REASON (1u << 3)
+#define VIZG_HIR_EXTERNAL_TYPE_HAS_IDENTITY (1u << 0)
 #define VIZG_HIR_BINDING_KIND_VAR 0u
 #define VIZG_HIR_BINDING_KIND_LET 1u
 #define VIZG_HIR_BINDING_KIND_CONST 2u
@@ -919,6 +920,13 @@ typedef struct Vizg_HirTypeDetail {
     uint32_t reserved;
 } Vizg_HirTypeDetail;
 
+typedef struct Vizg_HirExternalTypeIdentity {
+    uint32_t type_id;
+    uint32_t flags;
+    uint64_t external_module_id;
+    uint64_t external_type_id;
+} Vizg_HirExternalTypeIdentity;
+
 typedef struct Vizg_HirTypeMember {
     const char *name_ptr;
     size_t name_len;
@@ -1198,6 +1206,9 @@ Vizg_ProjectStatus vizg_hir_external_declaration_detail_at(
 Vizg_ProjectStatus vizg_hir_type_detail_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     size_t index, Vizg_HirTypeDetail *out_detail);
+Vizg_ProjectStatus vizg_hir_external_type_identity(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint32_t type_id, Vizg_HirExternalTypeIdentity *out_identity);
 Vizg_ProjectStatus vizg_hir_type_member_count(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     uint32_t type_id, size_t *out_count);

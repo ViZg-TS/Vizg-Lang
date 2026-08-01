@@ -50,6 +50,7 @@ LAYOUT(Vizg_HirRecord)
 LAYOUT(Vizg_HirPayload)
 LAYOUT(Vizg_HirPayloadItem)
 LAYOUT(Vizg_HirTypeDetail)
+LAYOUT(Vizg_HirExternalTypeIdentity)
 LAYOUT(Vizg_HirTypeMember)
 LAYOUT(Vizg_HirFunctionSignature)
 LAYOUT(Vizg_HirSignatureParameter)
@@ -242,6 +243,12 @@ size_t vizg_c_fields_Vizg_HirPayloadItem(void) {
 size_t vizg_c_fields_Vizg_HirTypeDetail(void) {
     return F(Vizg_HirTypeDetail, id, 1) + F(Vizg_HirTypeDetail, kind, 2) +
         F(Vizg_HirTypeDetail, builtin_kind, 3) + F(Vizg_HirTypeDetail, reserved, 4);
+}
+size_t vizg_c_fields_Vizg_HirExternalTypeIdentity(void) {
+    return F(Vizg_HirExternalTypeIdentity, type_id, 1) +
+        F(Vizg_HirExternalTypeIdentity, flags, 2) +
+        F(Vizg_HirExternalTypeIdentity, external_module_id, 3) +
+        F(Vizg_HirExternalTypeIdentity, external_type_id, 4);
 }
 size_t vizg_c_fields_Vizg_HirFunctionSignature(void) {
     return F(Vizg_HirFunctionSignature, type_id, 1) + F(Vizg_HirFunctionSignature, return_type_id, 2) +

@@ -123,6 +123,7 @@ pub const Vizg_HirRecord = abi.Vizg_HirRecord;
 pub const Vizg_HirPayload = abi.Vizg_HirPayload;
 pub const Vizg_HirPayloadItem = abi.Vizg_HirPayloadItem;
 pub const Vizg_HirTypeDetail = abi.Vizg_HirTypeDetail;
+pub const Vizg_HirExternalTypeIdentity = abi.Vizg_HirExternalTypeIdentity;
 pub const Vizg_HirTypeMember = abi.Vizg_HirTypeMember;
 pub const Vizg_HirFunctionSignature = abi.Vizg_HirFunctionSignature;
 pub const Vizg_HirSignatureParameter = abi.Vizg_HirSignatureParameter;

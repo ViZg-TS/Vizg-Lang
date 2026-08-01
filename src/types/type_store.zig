@@ -19,6 +19,8 @@ pub const TypeStore = struct {
     class_types: std.AutoHashMap(model.SemanticDeclId, model.ClassSemanticType),
     interface_types: std.AutoHashMap(model.SemanticDeclId, model.InterfaceSemanticType),
     generic_declarations: std.AutoHashMap(model.SemanticDeclId, model.GenericDeclaration),
+    external_types: std.AutoHashMap(model.ExternalTypeIdentity, model.TypeId),
+    external_type_origins: std.AutoHashMap(model.TypeId, model.ExternalTypeIdentity),
 
     const StoredType = struct {
         id: model.TypeId,
@@ -39,6 +41,8 @@ pub const TypeStore = struct {
             .class_types = std.AutoHashMap(model.SemanticDeclId, model.ClassSemanticType).init(allocator),
             .interface_types = std.AutoHashMap(model.SemanticDeclId, model.InterfaceSemanticType).init(allocator),
             .generic_declarations = std.AutoHashMap(model.SemanticDeclId, model.GenericDeclaration).init(allocator),
+            .external_types = std.AutoHashMap(model.ExternalTypeIdentity, model.TypeId).init(allocator),
+            .external_type_origins = std.AutoHashMap(model.TypeId, model.ExternalTypeIdentity).init(allocator),
         };
     }
 
@@ -52,6 +56,8 @@ pub const TypeStore = struct {
             copy.class_types.deinit();
             copy.interface_types.deinit();
             copy.generic_declarations.deinit();
+            copy.external_types.deinit();
+            copy.external_type_origins.deinit();
         }
         for (self.records.items) |record| {
             try copy.records.append(allocator, .{
@@ -69,7 +75,29 @@ pub const TypeStore = struct {
                 .flags = signature.flags,
             });
         }
+        var external_types = self.external_types.iterator();
+        while (external_types.next()) |entry| {
+            try copy.external_types.put(entry.key_ptr.*, entry.value_ptr.*);
+            try copy.external_type_origins.put(entry.value_ptr.*, entry.key_ptr.*);
+        }
         return copy;
+    }
+
+    pub fn externalTypeIdentity(self: *const TypeStore, id: model.TypeId) ?model.ExternalTypeIdentity {
+        return self.external_type_origins.get(id);
+    }
+
+    pub fn lookupExternalType(self: *const TypeStore, identity: model.ExternalTypeIdentity) ?model.TypeId {
+        return self.external_types.get(identity);
+    }
+
+    pub fn reserveExternalType(self: *TypeStore, identity: model.ExternalTypeIdentity) !model.TypeId {
+        if (self.external_types.get(identity)) |id| return id;
+        const id = try self.reserve();
+        try self.external_types.put(identity, id);
+        errdefer _ = self.external_types.remove(identity);
+        try self.external_type_origins.put(id, identity);
+        return id;
     }
 
     pub fn registerGenericDeclaration(

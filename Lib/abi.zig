@@ -7,7 +7,7 @@ const vizg = @import("vizg-impl");
 pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
-pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 3;
+pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 4;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 3;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED: u32 = 1;
@@ -42,6 +42,7 @@ pub const VIZG_HIR_BUILTIN_BIGINT: u32 = 8;
 pub const VIZG_HIR_BUILTIN_STRING: u32 = 9;
 pub const VIZG_HIR_BUILTIN_SYMBOL: u32 = 10;
 pub const VIZG_HIR_BUILTIN_OBJECT: u32 = 11;
+pub const VIZG_HIR_EXTERNAL_TYPE_HAS_IDENTITY: u32 = 1 << 0;
 pub const VIZG_HIR_FUNCTION_FLAG_LEXICAL_THIS: u16 = 1 << 0;
 pub const VIZG_HIR_FUNCTION_FLAG_DYNAMIC_THIS: u16 = 1 << 1;
 pub const VIZG_HIR_FUNCTION_FLAG_CONSTRUCTOR: u16 = 1 << 2;
@@ -546,6 +547,13 @@ pub const Vizg_HirTypeDetail = extern struct {
     kind: u32,
     builtin_kind: u32,
     reserved: u32,
+};
+
+pub const Vizg_HirExternalTypeIdentity = extern struct {
+    type_id: u32,
+    flags: u32,
+    external_module_id: u64,
+    external_type_id: u64,
 };
 
 pub const Vizg_HirTypeMember = extern struct {
@@ -2520,6 +2528,29 @@ pub fn hirTypeDetailAt(
     return .OK;
 }
 
+pub fn hirExternalTypeIdentity(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    type_id: u32,
+    out_identity: ?*Vizg_HirExternalTypeIdentity,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version < 4) return .INVALID_STATE;
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_identity orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirExternalTypeIdentity, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirExternalTypeIdentity))) return .INVALID_ARGUMENT;
+    const store = &(owned.hir_result.?.type_store orelse return .INVALID_STATE);
+    if (store.lookup(type_id) == null) return .INVALID_ARGUMENT;
+    const identity = store.externalTypeIdentity(type_id);
+    output.* = .{
+        .type_id = type_id,
+        .flags = if (identity != null) VIZG_HIR_EXTERNAL_TYPE_HAS_IDENTITY else 0,
+        .external_module_id = if (identity) |value| value.module_id else 0,
+        .external_type_id = if (identity) |value| value.type_id else 0,
+    };
+    return .OK;
+}
+
 pub fn hirTypeMemberCount(
     result: ?*const Vizg_ProjectResult,
     requested_version: u32,
@@ -3506,6 +3537,7 @@ comptime {
     @export(&hirDetailApiVersion, .{ .name = "vizg_hir_detail_api_version" });
     @export(&hirExternalDeclarationDetailAt, .{ .name = "vizg_hir_external_declaration_detail_at" });
     @export(&hirTypeDetailAt, .{ .name = "vizg_hir_type_detail_at" });
+    @export(&hirExternalTypeIdentity, .{ .name = "vizg_hir_external_type_identity" });
     @export(&hirTypeMemberCount, .{ .name = "vizg_hir_type_member_count" });
     @export(&hirTypeMemberAt, .{ .name = "vizg_hir_type_member_at" });
     @export(&hirArrayElementType, .{ .name = "vizg_hir_array_element_type" });

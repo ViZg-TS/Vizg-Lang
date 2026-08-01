@@ -92,7 +92,7 @@ if (api.vizg_hir_api_version() !== 2) {
 if (api.vizg_hir_payload_api_version() !== 1) {
   throw new Error(`unexpected HIR payload ABI version: ${api.vizg_hir_payload_api_version()}`);
 }
-if (api.vizg_hir_detail_api_version() !== 3) {
+if (api.vizg_hir_detail_api_version() !== 4) {
   throw new Error(`unexpected HIR detail ABI version: ${api.vizg_hir_detail_api_version()}`);
 }
 const PAGE_BYTES = 64 * 1024;

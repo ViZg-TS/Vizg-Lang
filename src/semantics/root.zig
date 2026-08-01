@@ -648,12 +648,18 @@ fn graphExternalTypeId(
         .builtin => |metadata| externalBuiltinTypeId(&type_store.builtins, metadata),
         .declared => |external_id| blk: {
             for (ancestors) |ancestor| if (ancestor == external_id) return error.RecursiveExternalType;
+            const identity: types.ExternalTypeIdentity = .{
+                .module_id = module.id,
+                .type_id = external_id,
+            };
+            if (type_store.lookupExternalType(identity)) |existing| break :blk existing;
             const descriptor = for (module.types) |item| {
                 if (item.id == external_id) break item;
             } else return error.InvalidExternalType;
             const next_ancestors = try allocator.alloc(u64, ancestors.len + 1);
             @memcpy(next_ancestors[0..ancestors.len], ancestors);
             next_ancestors[ancestors.len] = external_id;
+            const type_id = try type_store.reserveExternalType(identity);
             const properties = try allocator.alloc(types.ObjectProperty, descriptor.members.len);
             for (descriptor.members, 0..) |member, index| properties[index] = .{
                 .name = member.name,
@@ -661,7 +667,8 @@ fn graphExternalTypeId(
                 .optional = member.optional,
                 .readonly = member.readonly,
             };
-            break :blk try type_store.intern(.{ .object = properties });
+            try type_store.defineReserved(type_id, .{ .object = properties });
+            break :blk type_id;
         },
     };
 }

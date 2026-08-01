@@ -1631,12 +1631,18 @@ fn externalTypeReferenceId(
         .builtin => |metadata| externalTypeId(&store.builtins, metadata),
         .declared => |external_id| blk: {
             for (ancestors) |ancestor| if (ancestor == external_id) return error.RecursiveExternalType;
+            const identity: types.ExternalTypeIdentity = .{
+                .module_id = module.id.value(),
+                .type_id = external_id.value(),
+            };
+            if (store.lookupExternalType(identity)) |existing| break :blk existing;
             const descriptor = for (module.types) |item| {
                 if (item.id == external_id) break item;
             } else return error.InvalidExternalType;
             const next_ancestors = try allocator.alloc(contracts.ExternalTypeId, ancestors.len + 1);
             @memcpy(next_ancestors[0..ancestors.len], ancestors);
             next_ancestors[ancestors.len] = external_id;
+            const type_id = try store.reserveExternalType(identity);
             const properties = try allocator.alloc(types.ObjectProperty, descriptor.members.len);
             for (descriptor.members, 0..) |member, index| properties[index] = .{
                 .name = member.name,
@@ -1644,7 +1650,8 @@ fn externalTypeReferenceId(
                 .optional = member.optional,
                 .readonly = member.readonly,
             };
-            break :blk try store.intern(.{ .object = properties });
+            try store.defineReserved(type_id, .{ .object = properties });
+            break :blk type_id;
         },
     };
 }

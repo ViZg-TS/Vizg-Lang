@@ -263,6 +263,10 @@ pub const FunctionSignature = struct {
 
 pub const PromiseType = struct { value_type: TypeId };
 pub const GeneratorType = struct { yield_type: TypeId, return_type: TypeId };
+pub const ExternalTypeIdentity = struct {
+    module_id: u64,
+    type_id: u64,
+};
 // ---------------------------------------------------------------------------
 // TypeKind — the discriminated union of every type in the model.
 // ---------------------------------------------------------------------------
