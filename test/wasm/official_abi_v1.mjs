@@ -20,6 +20,7 @@ const expectedExports = [
   "vizg_hir_block_detail_at",
   "vizg_hir_block_parameter_at",
   "vizg_hir_detail_api_version",
+  "vizg_hir_external_declaration_detail_at",
   "vizg_hir_function_capture_at",
   "vizg_hir_function_completion_type",
   "vizg_hir_function_detail_at",
@@ -91,7 +92,7 @@ if (api.vizg_hir_api_version() !== 2) {
 if (api.vizg_hir_payload_api_version() !== 1) {
   throw new Error(`unexpected HIR payload ABI version: ${api.vizg_hir_payload_api_version()}`);
 }
-if (api.vizg_hir_detail_api_version() !== 2) {
+if (api.vizg_hir_detail_api_version() !== 3) {
   throw new Error(`unexpected HIR detail ABI version: ${api.vizg_hir_detail_api_version()}`);
 }
 const PAGE_BYTES = 64 * 1024;

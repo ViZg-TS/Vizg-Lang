@@ -9,7 +9,7 @@
 #define VIZG_ABI_VERSION 1u
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
-#define VIZG_HIR_DETAIL_API_VERSION 2u
+#define VIZG_HIR_DETAIL_API_VERSION 3u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 3u
 #define VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN 0u
 #define VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED 1u
@@ -1003,6 +1003,22 @@ typedef struct Vizg_HirSemanticIdentity {
     uint64_t host_binding_id;
 } Vizg_HirSemanticIdentity;
 
+/* Added in HIR detail API v3. Strings are borrowed from the immutable project
+ * result and remain valid until vizg_project_result_destroy(). flags bit 0
+ * indicates that intrinsic_id is present. */
+typedef struct Vizg_HirExternalDeclarationDetail {
+    uint64_t module_id;
+    uint64_t symbol_id;
+    uint64_t intrinsic_id;
+    uint32_t type_id;
+    Vizg_ExternalDeclarationKind declaration_kind;
+    uint16_t effect_bits;
+    uint8_t flags;
+    uint8_t reserved[1];
+    const char *exported_name_ptr;
+    size_t exported_name_len;
+} Vizg_HirExternalDeclarationDetail;
+
 typedef struct Vizg_HirModuleDetail {
     uint64_t module_id;
     uint64_t initialization_function_id;
@@ -1176,6 +1192,9 @@ Vizg_ProjectStatus vizg_hir_record_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     Vizg_HirEntityKind kind, size_t index, Vizg_HirRecord *out_record);
 uint32_t vizg_hir_detail_api_version(void);
+Vizg_ProjectStatus vizg_hir_external_declaration_detail_at(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    size_t declaration_index, Vizg_HirExternalDeclarationDetail *out_detail);
 Vizg_ProjectStatus vizg_hir_type_detail_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     size_t index, Vizg_HirTypeDetail *out_detail);

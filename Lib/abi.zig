@@ -7,7 +7,7 @@ const vizg = @import("vizg-impl");
 pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
-pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 2;
+pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 3;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 3;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED: u32 = 1;
@@ -632,6 +632,19 @@ pub const Vizg_HirSemanticIdentity = extern struct {
     reserved: [6]u8,
     /// Host-assigned identity for ambient globals. Valid when the flag is set.
     host_binding_id: u64,
+};
+
+pub const Vizg_HirExternalDeclarationDetail = extern struct {
+    module_id: u64,
+    symbol_id: u64,
+    intrinsic_id: u64,
+    type_id: u32,
+    declaration_kind: Vizg_ExternalDeclarationKind,
+    effect_bits: u16,
+    flags: u8,
+    reserved: [1]u8,
+    exported_name_ptr: [*c]const u8,
+    exported_name_len: usize,
 };
 
 pub const Vizg_HirModuleDetail = extern struct {
@@ -2236,10 +2249,59 @@ pub fn hirDetailApiVersion() callconv(.c) u32 {
 }
 
 fn hirDetailOwned(result: ?*const Vizg_ProjectResult, requested_version: u32) ?*const OwnedProjectResult {
-    if (requested_version != VIZG_HIR_DETAIL_API_VERSION) return null;
+    if (requested_version < 2 or requested_version > VIZG_HIR_DETAIL_API_VERSION) return null;
     const owned = ownedResult(result) orelse return null;
     if (owned.hir_result == null) return null;
     return owned;
+}
+
+pub fn hirExternalDeclarationDetailAt(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    declaration_index: usize,
+    out_detail: ?*Vizg_HirExternalDeclarationDetail,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    if (requested_version < 3) return .INVALID_STATE;
+    const output = out_detail orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirExternalDeclarationDetail, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirExternalDeclarationDetail))) return .INVALID_ARGUMENT;
+    const declarations = owned.hir_result.?.project.external_declarations;
+    if (declaration_index >= declarations.len) return .INVALID_ARGUMENT;
+    output.* = hirExternalDeclarationDetail(declarations[declaration_index]);
+    return .OK;
+}
+
+fn hirExternalDeclarationDetail(item: vizg.hir.model.HirExternalDeclaration) Vizg_HirExternalDeclarationDetail {
+    return .{
+        .module_id = item.module_id.value(),
+        .symbol_id = item.symbol_id.value(),
+        .intrinsic_id = if (item.intrinsic_id) |id| id.value() else 0,
+        .type_id = item.type_id,
+        .declaration_kind = @intFromEnum(item.kind),
+        .effect_bits = @bitCast(item.effects),
+        .flags = @intFromBool(item.intrinsic_id != null),
+        .reserved = .{0},
+        .exported_name_ptr = if (item.exported_name.len == 0) null else item.exported_name.ptr,
+        .exported_name_len = item.exported_name.len,
+    };
+}
+
+test "HIR detail ABI v3 preserves optional intrinsic identity" {
+    const detail = hirExternalDeclarationDetail(.{
+        .module_id = .init(80),
+        .symbol_id = .init(0x7100),
+        .intrinsic_id = .init(0x9001),
+        .exported_name = "log",
+        .kind = .function,
+        .type_id = 42,
+        .effects = .{ .unknown = false, .allocates = true },
+    });
+    try std.testing.expectEqual(@as(u64, 80), detail.module_id);
+    try std.testing.expectEqual(@as(u64, 0x7100), detail.symbol_id);
+    try std.testing.expectEqual(@as(u64, 0x9001), detail.intrinsic_id);
+    try std.testing.expectEqual(@as(u8, 1), detail.flags);
+    try std.testing.expectEqualStrings("log", detail.exported_name_ptr[0..detail.exported_name_len]);
 }
 
 fn hirFunctionFlags(flags: vizg.hir.model.HirFunctionFlags) u16 {
@@ -3442,6 +3504,7 @@ comptime {
     @export(&hirSummary, .{ .name = "vizg_hir_summary" });
     @export(&hirRecordAt, .{ .name = "vizg_hir_record_at" });
     @export(&hirDetailApiVersion, .{ .name = "vizg_hir_detail_api_version" });
+    @export(&hirExternalDeclarationDetailAt, .{ .name = "vizg_hir_external_declaration_detail_at" });
     @export(&hirTypeDetailAt, .{ .name = "vizg_hir_type_detail_at" });
     @export(&hirTypeMemberCount, .{ .name = "vizg_hir_type_member_count" });
     @export(&hirTypeMemberAt, .{ .name = "vizg_hir_type_member_at" });

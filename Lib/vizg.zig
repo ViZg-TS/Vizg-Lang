@@ -132,6 +132,7 @@ pub const Vizg_HirBlockDetail = abi.Vizg_HirBlockDetail;
 pub const Vizg_HirBlockParameter = abi.Vizg_HirBlockParameter;
 pub const Vizg_HirOriginDetail = abi.Vizg_HirOriginDetail;
 pub const Vizg_HirSemanticIdentity = abi.Vizg_HirSemanticIdentity;
+pub const Vizg_HirExternalDeclarationDetail = abi.Vizg_HirExternalDeclarationDetail;
 pub const Vizg_HirModuleDetail = abi.Vizg_HirModuleDetail;
 pub const Vizg_HirModuleDependency = abi.Vizg_HirModuleDependency;
 pub const Vizg_HirModuleImport = abi.Vizg_HirModuleImport;

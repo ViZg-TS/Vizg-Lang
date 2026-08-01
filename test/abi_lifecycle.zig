@@ -832,10 +832,33 @@ test "external-module API v2 publishes stable function declarations to HIR" {
     );
     try std.testing.expectEqual(@as(u16, (1 << 3) | (1 << 4) | (1 << 5)), declaration.effect_bits);
 
+    var external_detail: c.Vizg_HirExternalDeclarationDetail = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_external_declaration_detail_at(result, 3, 0, &external_detail),
+    );
+    try std.testing.expectEqual(@as(u64, 80), external_detail.module_id);
+    try std.testing.expectEqual(@as(u64, 0x7100), external_detail.symbol_id);
+    try std.testing.expectEqual(@as(u64, 0), external_detail.intrinsic_id);
+    try std.testing.expectEqual(@as(u8, 0), external_detail.flags);
+    try std.testing.expectEqualStrings("log", external_detail.exported_name_ptr[0..external_detail.exported_name_len]);
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+        c.vizg_hir_external_declaration_detail_at(result, 2, 0, &external_detail),
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+        c.vizg_hir_external_declaration_detail_at(result, 4, 0, &external_detail),
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
+        c.vizg_hir_external_declaration_detail_at(result, 3, 1, &external_detail),
+    );
+
     var module_detail: c.Vizg_HirModuleDetail = undefined;
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_OK),
-        c.vizg_hir_module_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, 0, &module_detail),
+        c.vizg_hir_module_detail_at(result, 2, 0, &module_detail),
     );
     try std.testing.expect(module_detail.import_count > 0);
     var saw_external_live_import = false;

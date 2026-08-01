@@ -59,6 +59,7 @@ LAYOUT(Vizg_HirBlockDetail)
 LAYOUT(Vizg_HirBlockParameter)
 LAYOUT(Vizg_HirOriginDetail)
 LAYOUT(Vizg_HirSemanticIdentity)
+LAYOUT(Vizg_HirExternalDeclarationDetail)
 LAYOUT(Vizg_HirModuleDetail)
 LAYOUT(Vizg_HirModuleDependency)
 LAYOUT(Vizg_HirModuleImport)
@@ -290,6 +291,18 @@ size_t vizg_c_fields_Vizg_HirSemanticIdentity(void) {
         F(Vizg_HirSemanticIdentity, has_host_binding_id, 9) +
         F(Vizg_HirSemanticIdentity, reserved, 10) +
         F(Vizg_HirSemanticIdentity, host_binding_id, 11);
+}
+size_t vizg_c_fields_Vizg_HirExternalDeclarationDetail(void) {
+    return F(Vizg_HirExternalDeclarationDetail, module_id, 1) +
+        F(Vizg_HirExternalDeclarationDetail, symbol_id, 2) +
+        F(Vizg_HirExternalDeclarationDetail, intrinsic_id, 3) +
+        F(Vizg_HirExternalDeclarationDetail, type_id, 4) +
+        F(Vizg_HirExternalDeclarationDetail, declaration_kind, 5) +
+        F(Vizg_HirExternalDeclarationDetail, effect_bits, 6) +
+        F(Vizg_HirExternalDeclarationDetail, flags, 7) +
+        F(Vizg_HirExternalDeclarationDetail, reserved, 8) +
+        F(Vizg_HirExternalDeclarationDetail, exported_name_ptr, 9) +
+        F(Vizg_HirExternalDeclarationDetail, exported_name_len, 10);
 }
 size_t vizg_c_fields_Vizg_HirModuleDetail(void) {
     return F(Vizg_HirModuleDetail, module_id, 1) +
