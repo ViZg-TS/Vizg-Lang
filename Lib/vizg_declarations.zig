@@ -12,6 +12,7 @@ pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = c.VIZG_EXTERNAL_MODULE_API_VER
 pub const VIZG_HIR_API_VERSION: u32 = c.VIZG_HIR_API_VERSION;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = c.VIZG_HIR_PAYLOAD_API_VERSION;
 pub const VIZG_HIR_DETAIL_API_VERSION: u32 = c.VIZG_HIR_DETAIL_API_VERSION;
+pub const VIZG_INTRINSIC_CONTRACT_VERSION: u32 = c.VIZG_INTRINSIC_CONTRACT_VERSION;
 
 test "public header versions match the declaration companion" {
     const std = @import("std");
@@ -20,4 +21,5 @@ test "public header versions match the declaration companion" {
     try std.testing.expectEqual(@as(u32, 2), VIZG_HIR_API_VERSION);
     try std.testing.expectEqual(@as(u32, 1), VIZG_HIR_PAYLOAD_API_VERSION);
     try std.testing.expectEqual(@as(u32, 4), VIZG_HIR_DETAIL_API_VERSION);
+    try std.testing.expectEqual(@as(u32, 1), VIZG_INTRINSIC_CONTRACT_VERSION);
 }

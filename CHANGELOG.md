@@ -8,6 +8,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Published `intrinsic_contract_version` for exact host/ViZG catalog
+  compatibility checks while keeping intrinsic identities and policy opaque.
 - Added an optional host-assigned `IntrinsicId` to the Zig external-module
   contract. Semantic imports and HIR external declarations preserve it without
   source-name recognition or target/ABI policy.

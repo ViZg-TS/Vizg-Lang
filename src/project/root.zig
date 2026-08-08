@@ -10,6 +10,7 @@ pub const RequestId = contracts.RequestId;
 pub const ExternalModuleId = contracts.ExternalModuleId;
 pub const ExternalSymbolId = contracts.ExternalSymbolId;
 pub const IntrinsicId = contracts.IntrinsicId;
+pub const intrinsic_contract_version = contracts.intrinsic_contract_version;
 pub const ExternalTypeId = contracts.ExternalTypeId;
 pub const SourceKind = contracts.SourceKind;
 pub const ModuleSource = contracts.ModuleSource;

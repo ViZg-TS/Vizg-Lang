@@ -64,7 +64,10 @@ The Zig host contract may additionally attach an opaque, stable `IntrinsicId`
 to an external declaration. ViZG preserves that identity through semantic links
 and HIR without interpreting source names, target availability, ABI lowering,
 or runtime policy. The intrinsic catalog and legalization contract remain
-consumer-owned; versioned C exposure is additive and negotiated separately.
+consumer-owned. `intrinsic_contract_version` declares the exact catalog contract
+version accepted by this ViZG build so a consumer can reject incompatible
+catalogs before analysis; ViZG still does not interpret catalog entries.
+Versioned C exposure is additive and negotiated separately.
 
 External-module API v3 adds a module-local type graph. A host assigns stable
 `external_type_id` values to named closed structural types, publishes their
