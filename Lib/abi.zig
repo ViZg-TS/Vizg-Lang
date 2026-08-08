@@ -1858,7 +1858,9 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
     }
     var hir_result: ?vizg.hir.HirResult = null;
     if (!finished.has_failures) {
-        var lowered = vizg.hir.lowerProject(owned.fba.allocator(), &owned.project, .{}) catch |err|
+        // ABI consumers need source-local provenance for actionable diagnostics;
+        // transformation traces remain opt-in through the native Zig API.
+        var lowered = vizg.hir.lowerProjectWithDebug(owned.fba.allocator(), &owned.project, .{}, .minimal) catch |err|
             return statusFromError(owned, err);
         switch (lowered) {
             .result => |value| {
