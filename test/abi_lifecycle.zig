@@ -355,11 +355,13 @@ test "versioned C HIR consumer reads immutable result records" {
         try std.testing.expect(binding_detail.initial_state <= c.VIZG_HIR_BINDING_STATE_LIVE_IMPORT);
     }
     var saw_live_capture = false;
+    var saw_named_answer = false;
     for (0..summary.function_count) |index| {
         try std.testing.expectEqual(
             @as(u32, c.VIZG_PROJECT_STATUS_OK),
             c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_FUNCTION, index, &record),
         );
+        if (std.mem.eql(u8, record.name_ptr[0..record.name_len], "answer")) saw_named_answer = true;
         var detail: c.Vizg_HirFunctionDetail = undefined;
         try std.testing.expectEqual(
             @as(u32, c.VIZG_PROJECT_STATUS_OK),
@@ -394,6 +396,7 @@ test "versioned C HIR consumer reads immutable result records" {
             try std.testing.expect(parameter.argument_index < detail.parameter_count);
         }
     }
+    try std.testing.expect(saw_named_answer);
     try std.testing.expect(saw_live_capture);
     var legacy_record: c.Vizg_HirRecord = undefined;
     for (0..summary.origin_count) |index| {

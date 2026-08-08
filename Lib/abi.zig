@@ -2135,6 +2135,17 @@ fn hirOriginFlags(requested_version: u32, type_id: ?u32) u8 {
     return if (requested_version >= 2 and type_id != null) 1 else 0;
 }
 
+fn hirFunctionName(project: vizg.hir.HirProject, function: vizg.hir.HirFunction) []const u8 {
+    const symbol = function.symbol orelse return "";
+    for (project.functions) |owner| {
+        for (owner.bindings) |binding| {
+            if (binding.kind == .function and binding.declaration != null and binding.declaration.?.eql(symbol))
+                return binding.name;
+        }
+    }
+    return "";
+}
+
 pub fn hirRecordAt(
     result: ?*const Vizg_ProjectResult,
     requested_version: u32,
@@ -2180,6 +2191,9 @@ pub fn hirRecordAt(
             output.tag = @intFromEnum(item.kind);
             output.type_id = item.signature_type;
             output.origin_id = @intCast(idIndex(item.origin));
+            const name = hirFunctionName(project, item);
+            output.name_ptr = name.ptr;
+            output.name_len = name.len;
             output.child_count = item.blocks.len;
         },
         .BLOCK, .INSTRUCTION, .BINDING => {
