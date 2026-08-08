@@ -1,6 +1,7 @@
 //! Allocation and limit-checked insertion for raw HIR construction.
 
 const std = @import("std");
+const ast = @import("../frontend/ast.zig");
 const ids = @import("ids.zig");
 const limits_mod = @import("limits.zig");
 const model = @import("model.zig");
@@ -63,6 +64,26 @@ pub const Builder = struct {
         const id = try self.makeId(ids.OriginId, self.origins.items.len);
         try self.origins.append(self.allocator, record);
         return id;
+    }
+
+    pub fn sourceOrigin(
+        self: *Builder,
+        module_id: model.ModuleId,
+        tree: ast.Ast,
+        node_id: ast.NodeId,
+        type_id: ?model.TypeId,
+    ) !ids.OriginId {
+        if (self.debug_level == .none) return .invalid;
+        const node = tree.node(node_id);
+        const nodes = try self.allocator.dupe(ast.NodeId, &.{node_id});
+        return self.appendOrigin(.{
+            .module_id = module_id,
+            .primary_span = node.span,
+            .ast_nodes = nodes,
+            .original_syntax = std.meta.activeTag(node.data),
+            .type_id = type_id,
+            .lowering_rule = .expression,
+        });
     }
 
     /// Legacy synthetic sites are filled by the module provenance pass.

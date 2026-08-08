@@ -56,7 +56,9 @@ fn attachModule(builder: *builder_mod.Builder, module_id: model.ModuleId, value:
             for (block_parameters) |*parameter| parameter.origin = value;
             block.parameters = block_parameters;
             const instructions = try builder.allocator.dupe(model.HirInstruction, block.instructions);
-            for (instructions) |*instruction| instruction.origin = value;
+            for (instructions) |*instruction| {
+                if (instruction.origin.eql(.invalid)) instruction.origin = value;
+            }
             block.instructions = instructions;
         }
         function.blocks = blocks;

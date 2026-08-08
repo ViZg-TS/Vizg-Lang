@@ -16,6 +16,8 @@ fn requireSuspensionContext(kind: SuspensionKind, allows_await: bool, allows_yie
 }
 
 pub fn lower(context: anytype, node_id: ast.NodeId) anyerror!ids.ValueId {
+    const previous_origin = try context.enterExpressionOrigin(node_id);
+    defer context.leaveExpressionOrigin(previous_origin);
     const node = context.local.frontend.ast.node(node_id);
     return switch (node.data) {
         .Literal => |literal| context.emitValue(try context.lowerLiteral(literal.value), context.nodeType(node_id)),

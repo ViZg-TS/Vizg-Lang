@@ -62,22 +62,13 @@ pub fn copyCanBeEliminated(function: *const model.HirFunction, instruction: mode
     if (instruction.operation != .copy) return false;
     const source = instruction.operation.copy;
     const source_type = valueType(function, source) orelse return false;
-    const source_origin = valueOrigin(function, source) orelse return false;
-    return instruction.result_type.? == source_type and instruction.origin.eql(source_origin);
+    return instruction.result_type.? == source_type;
 }
 
 fn valueType(function: *const model.HirFunction, value: ids.ValueId) ?model.TypeId {
     for (function.blocks) |block| {
         for (block.parameters) |parameter| if (parameter.value.eql(value)) return parameter.type_id;
         for (block.instructions) |instruction| if (instruction.result) |result| if (result.eql(value)) return instruction.result_type;
-    }
-    return null;
-}
-
-fn valueOrigin(function: *const model.HirFunction, value: ids.ValueId) ?ids.OriginId {
-    for (function.blocks) |block| {
-        for (block.parameters) |parameter| if (parameter.value.eql(value)) return parameter.origin;
-        for (block.instructions) |instruction| if (instruction.result) |result| if (result.eql(value)) return instruction.origin;
     }
     return null;
 }

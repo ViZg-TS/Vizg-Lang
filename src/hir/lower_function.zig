@@ -861,6 +861,17 @@ const Context = struct {
     pub fn emitValue(self: *Context, operation: model.HirOperation, type_id: model.TypeId) !ids.ValueId {
         return self.anf.emitValue(operation, type_id);
     }
+    pub fn enterExpressionOrigin(self: *Context, node_id: ast.NodeId) !ids.OriginId {
+        return self.anf.enterOrigin(try self.builder.sourceOrigin(
+            self.inputs.module.id,
+            self.local.frontend.ast,
+            node_id,
+            self.local.lookupNodeType(node_id),
+        ));
+    }
+    pub fn leaveExpressionOrigin(self: *Context, previous: ids.OriginId) void {
+        self.anf.leaveOrigin(previous);
+    }
     pub fn emitSuspension(self: *Context, operation: model.HirOperation, type_id: model.TypeId) !ids.ValueId {
         return self.anf.emitValueAt(operation, type_id, try self.builder.nextOrigin());
     }

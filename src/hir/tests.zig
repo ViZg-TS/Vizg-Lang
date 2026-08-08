@@ -2827,6 +2827,23 @@ test "HIR provenance levels preserve executable shape and full trace records era
             try std.testing.expect(minimal.project.origins.lookup(instruction.origin) != null);
         }
     };
+    const source = (project.lookup(.init(227)) orelse return error.MissingModule).source orelse return error.MissingSource;
+    var saw_compound_assignment_origin = false;
+    for (minimal.project.functions) |function| for (function.blocks) |block| {
+        for (block.instructions) |instruction| switch (instruction.operation) {
+            .add => {
+                const record = minimal.project.origins.lookup(instruction.origin) orelse return error.MissingOrigin;
+                const span = record.primary_span;
+                try std.testing.expect(span.end <= source.bytes.len);
+                if (std.mem.eql(u8, source.bytes[span.start..span.end], "value += 1")) {
+                    try std.testing.expectEqual(.AssignmentExpression, record.original_syntax);
+                    saw_compound_assignment_origin = true;
+                }
+            },
+            else => {},
+        };
+    };
+    try std.testing.expect(saw_compound_assignment_origin);
 
     const expected = [_]hir.TraceEventKind{
         .interface_erased,

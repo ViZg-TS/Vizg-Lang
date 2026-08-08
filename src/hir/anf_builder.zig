@@ -20,6 +20,7 @@ pub const AnfBuilder = struct {
     defined_places: std.ArrayList(bool) = .empty,
     value_types: std.ArrayList(?model.TypeId) = .empty,
     current: usize = 0,
+    current_origin: ids.OriginId = .invalid,
     entry: ids.BlockId,
 
     pub fn init(builder: *builder_mod.Builder) !AnfBuilder {
@@ -56,7 +57,17 @@ pub const AnfBuilder = struct {
     }
 
     pub fn emitValue(self: *AnfBuilder, operation: model.HirOperation, type_id: model.TypeId) !ids.ValueId {
-        return self.emitValueAt(operation, type_id, .invalid);
+        return self.emitValueAt(operation, type_id, self.current_origin);
+    }
+
+    pub fn enterOrigin(self: *AnfBuilder, value: ids.OriginId) ids.OriginId {
+        const previous = self.current_origin;
+        self.current_origin = value;
+        return previous;
+    }
+
+    pub fn leaveOrigin(self: *AnfBuilder, previous: ids.OriginId) void {
+        self.current_origin = previous;
     }
 
     pub fn emitValueAt(self: *AnfBuilder, operation: model.HirOperation, type_id: model.TypeId, origin: ids.OriginId) !ids.ValueId {
@@ -83,7 +94,7 @@ pub const AnfBuilder = struct {
             null,
             null,
             operation,
-            .invalid,
+            self.current_origin,
         ));
     }
 
