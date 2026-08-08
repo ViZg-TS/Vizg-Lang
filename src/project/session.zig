@@ -1271,6 +1271,15 @@ pub const Project = struct {
             if (externalDescriptorsEqual(existing, descriptor)) return;
             return error.ExternalDescriptorConflict;
         }
+        for (descriptor.exports) |candidate| {
+            const intrinsic_id = candidate.intrinsic_id orelse continue;
+            for (self.external_modules.items) |module| for (module.descriptor.exports) |registered| {
+                if (registered.intrinsic_id != intrinsic_id) continue;
+                if (!intrinsicDeclarationsEqual(registered, candidate))
+                    return error.IntrinsicSignatureMismatch;
+                return error.DuplicateIntrinsicId;
+            };
+        }
         const owned = try self.copyExternalDescriptor(descriptor);
         errdefer self.freeExternalDescriptor(owned);
         try self.external_modules.append(self.allocator, .{ .descriptor = owned });
@@ -1492,7 +1501,14 @@ fn validateExternalDescriptor(descriptor: contracts.ExternalModuleDescriptor) !v
         for (descriptor.exports[0..index]) |previous| {
             if (std.mem.eql(u8, previous.name, item.name)) return error.DuplicateExternalExport;
             if (item.symbol_id != null and previous.symbol_id == item.symbol_id) return error.DuplicateExternalSymbol;
+            if (item.intrinsic_id != null and previous.intrinsic_id == item.intrinsic_id) {
+                if (!intrinsicDeclarationsEqual(previous, item)) return error.IntrinsicSignatureMismatch;
+                return error.DuplicateIntrinsicId;
+            }
         }
+        if (item.intrinsic_id != null and
+            (item.symbol_id == null or item.declaration_kind == null or item.effects == null))
+            return error.InvalidIntrinsicDeclaration;
         if (item.function != null and item.declaration_kind != .function) return error.InvalidExternalExport;
         if (item.declaration_kind == .function and item.function == null) return error.InvalidExternalExport;
         if (item.declaration_kind == .type and (!item.namespace.type or item.namespace.value)) return error.InvalidExternalExport;
@@ -1528,6 +1544,7 @@ fn externalDescriptorsEqual(left: contracts.ExternalModuleDescriptor, right: con
     for (left.exports, right.exports) |a, b| {
         if (!std.mem.eql(u8, a.name, b.name) or a.kind != b.kind or !std.meta.eql(a.namespace, b.namespace) or
             a.type_metadata != b.type_metadata or !std.meta.eql(a.type_reference, b.type_reference) or a.symbol_id != b.symbol_id or
+            a.intrinsic_id != b.intrinsic_id or
             a.declaration_kind != b.declaration_kind or a.effects != b.effects or
             !externalFunctionsEqual(a.function, b.function)) return false;
     }
@@ -1539,6 +1556,16 @@ fn externalDescriptorsEqual(left: contracts.ExternalModuleDescriptor, right: con
         }
     }
     return true;
+}
+
+fn intrinsicDeclarationsEqual(left: contracts.ExternalExportDescriptor, right: contracts.ExternalExportDescriptor) bool {
+    return left.kind == right.kind and
+        std.meta.eql(left.namespace, right.namespace) and
+        left.type_metadata == right.type_metadata and
+        std.meta.eql(left.type_reference, right.type_reference) and
+        left.declaration_kind == right.declaration_kind and
+        left.effects == right.effects and
+        externalFunctionsEqual(left.function, right.function);
 }
 
 fn findExternalExport(
@@ -2496,10 +2523,38 @@ test "external descriptor validation rejects malformed duplicate and conflicting
         .logical_name = "bad",
         .exports = &.{ .{ .name = "one" }, .{ .name = "one", .type_metadata = .number } },
     }));
+    try std.testing.expectError(error.InvalidIntrinsicDeclaration, project.respondExternalModule(first.id, .{
+        .id = .init(1),
+        .logical_name = "bad",
+        .exports = &.{.{ .name = "one", .intrinsic_id = .init(41) }},
+    }));
+    try std.testing.expectError(error.DuplicateIntrinsicId, project.respondExternalModule(first.id, .{
+        .id = .init(1),
+        .logical_name = "bad",
+        .exports = &.{
+            .{ .name = "one", .symbol_id = .init(1), .intrinsic_id = .init(41), .declaration_kind = .constant, .effects = .{ .unknown = false } },
+            .{ .name = "alias", .symbol_id = .init(2), .intrinsic_id = .init(41), .declaration_kind = .constant, .effects = .{ .unknown = false } },
+        },
+    }));
+    try std.testing.expectError(error.IntrinsicSignatureMismatch, project.respondExternalModule(first.id, .{
+        .id = .init(1),
+        .logical_name = "bad",
+        .exports = &.{
+            .{ .name = "one", .type_metadata = .number, .symbol_id = .init(1), .intrinsic_id = .init(41), .declaration_kind = .constant, .effects = .{ .unknown = false } },
+            .{ .name = "alias", .type_metadata = .string, .symbol_id = .init(2), .intrinsic_id = .init(41), .declaration_kind = .constant, .effects = .{ .unknown = false } },
+        },
+    }));
     const accepted: contracts.ExternalModuleDescriptor = .{
         .id = .init(1),
         .logical_name = "native:first",
-        .exports = &.{.{ .name = "one", .type_metadata = .number }},
+        .exports = &.{.{
+            .name = "one",
+            .type_metadata = .number,
+            .symbol_id = .init(1),
+            .intrinsic_id = .init(41),
+            .declaration_kind = .constant,
+            .effects = .{ .unknown = false },
+        }},
     };
     try project.respondExternalModule(first.id, accepted);
 
@@ -2511,6 +2566,18 @@ test "external descriptor validation rejects malformed duplicate and conflicting
         .id = accepted.id,
         .logical_name = accepted.logical_name,
         .exports = &.{.{ .name = "two", .type_metadata = .string }},
+    }));
+    try std.testing.expectError(error.IntrinsicSignatureMismatch, project.respondExternalModule(second.id, .{
+        .id = .init(2),
+        .logical_name = "native:second",
+        .exports = &.{.{
+            .name = "two",
+            .type_metadata = .string,
+            .symbol_id = .init(2),
+            .intrinsic_id = .init(41),
+            .declaration_kind = .constant,
+            .effects = .{ .unknown = false },
+        }},
     }));
     try project.respondExternalModule(second.id, .{
         .id = .init(2),

@@ -939,6 +939,32 @@ test "HIR eligibility rejects external bindings without explicit publication met
     }
 }
 
+test "source declarations cannot impersonate host intrinsic identities by name" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(14),
+        .logical_name = "user-intrinsic.ts",
+        .bytes = "export const intrinsic = 41; export function arrayLength(value: unknown): number { return 0; }",
+    });
+    while (switch (try project.step()) {
+        .complete => false,
+        .request => return error.UnexpectedModuleRequest,
+    }) {}
+    try std.testing.expect(!(try project.finish()).has_failures);
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    try std.testing.expectEqual(@as(usize, 0), result.project.external_declarations.len);
+    for (result.project.modules) |module| for (module.imports) |item| {
+        try std.testing.expect(item.target.intrinsic_id == null);
+    };
+}
+
 test "sealed HIR consumer survives project teardown with types intact" {
     var project = try completedProject();
     var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
