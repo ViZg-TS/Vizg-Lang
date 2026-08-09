@@ -60,7 +60,12 @@ pub fn lower(builder: *builder_mod.Builder, project: *const project_mod.Project,
         } else null;
         if (local_id) |binding_id| {
             const symbol_id = item.import_symbol orelse return error.MissingSemanticIdentity;
-            try imported_symbols.append(builder.allocator, .{ .symbol = symbol_id, .binding = binding_id });
+            try imported_symbols.append(builder.allocator, .{
+                .symbol = symbol_id,
+                .binding = binding_id,
+                .intrinsic_id = if (target.intrinsic_id) |id| .init(id) else null,
+                .intrinsic_effects = if (target.external_effects) |effects| intrinsicEffects(effects) else null,
+            });
         }
         imports[index] = .{
             .local = local_id,
@@ -152,6 +157,21 @@ fn semanticIdentity(identity: semantics.SemanticIdentity) model.HirSemanticIdent
         .external_symbol_id = if (identity.external_symbol_id) |id| .init(id) else null,
         .intrinsic_id = if (identity.intrinsic_id) |id| .init(id) else null,
         .host_binding_id = identity.host_binding_id,
+    };
+}
+
+fn intrinsicEffects(effect_set: project_mod.ExternalEffectSet) model.EffectSet {
+    if (effect_set.unknown) return model.EffectSet.call_effect;
+    const impure = effect_set.reads_memory or effect_set.writes_memory or effect_set.may_throw or
+        effect_set.may_suspend or effect_set.allocates or effect_set.calls_unknown;
+    return .{
+        .pure = !impure,
+        .may_throw = effect_set.may_throw,
+        .may_call_user_code = effect_set.calls_unknown,
+        .reads_state = effect_set.reads_memory,
+        .writes_state = effect_set.writes_memory,
+        .may_suspend = effect_set.may_suspend,
+        .creates_identity = effect_set.allocates,
     };
 }
 

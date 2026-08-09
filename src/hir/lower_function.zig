@@ -21,6 +21,8 @@ const types = @import("../types/root.zig");
 pub const SymbolBinding = struct {
     symbol: binder.SymbolId,
     binding: ids.BindingId,
+    intrinsic_id: ?project.IntrinsicId = null,
+    intrinsic_effects: ?model.EffectSet = null,
 };
 
 pub const Inputs = struct {
@@ -746,6 +748,19 @@ const Context = struct {
             return error.UnresolvedIdentifier;
         };
         return self.emitValue(.{ .load_binding = try self.bindingForReference(symbol) }, self.nodeType(node_id));
+    }
+
+    pub fn intrinsicForExpression(self: *const Context, node_id: ast.NodeId) ?model.IntrinsicReference {
+        if (self.inputs.local.frontend.ast.node(node_id).data != .Identifier) return null;
+        const symbol = self.referenceSymbol(node_id) orelse return null;
+        for (self.visible.items) |entry| {
+            if (entry.symbol != symbol) continue;
+            return .{
+                .intrinsic = entry.intrinsic_id orelse return null,
+                .effects = entry.intrinsic_effects orelse return null,
+            };
+        }
+        return null;
     }
 
     pub fn lowerIdentifierPlace(self: *Context, node_id: ast.NodeId) !ids.PlaceId {

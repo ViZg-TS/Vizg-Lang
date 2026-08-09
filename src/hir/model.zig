@@ -425,6 +425,15 @@ pub const Call = struct {
     callee: ids.ValueId,
     arguments: []const CallArgument = &.{},
 };
+pub const IntrinsicReference = struct {
+    intrinsic: project.IntrinsicId,
+    effects: EffectSet,
+};
+pub const IntrinsicCall = struct {
+    intrinsic: project.IntrinsicId,
+    arguments: []const CallArgument = &.{},
+    effects: EffectSet,
+};
 pub const MethodCall = struct {
     callee: ?ids.ValueId = null,
     receiver: ids.ValueId,
@@ -572,10 +581,12 @@ pub const HirOperation = union(enum) {
     yield_delegate: ids.ValueId,
     debugger_trap,
     apply_pattern: PatternPlan,
+    intrinsic_call: IntrinsicCall,
 
     pub fn checked(self: HirOperation) OperationError!HirOperation {
         switch (self) {
             .call, .construct => |payload| try checkArity(payload.arguments.len),
+            .intrinsic_call => |payload| try checkArity(payload.arguments.len),
             .call_method, .call_super_method => |payload| try checkArity(payload.arguments.len),
             .call_super_constructor => |arguments| try checkArity(arguments.len),
             .tagged_template_call => |payload| try checkArity(payload.substitutions.len),
@@ -637,6 +648,7 @@ pub const HirOperation = union(enum) {
             .tagged_template_call,
             .dynamic_import,
             => EffectSet.call_effect,
+            .intrinsic_call => |payload| payload.effects,
             .create_object,
             .create_array,
             .create_closure,

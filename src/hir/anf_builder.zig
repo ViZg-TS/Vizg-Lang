@@ -261,6 +261,7 @@ pub const AnfBuilder = struct {
                 try self.requireValue(item.callee);
                 for (item.arguments) |argument| try self.requireValue(argument.operand());
             },
+            .intrinsic_call => |item| for (item.arguments) |argument| try self.requireValue(argument.operand()),
             .call_method, .call_super_method => |item| {
                 if (item.callee) |callee| try self.requireValue(callee);
                 try self.requireValue(item.receiver);

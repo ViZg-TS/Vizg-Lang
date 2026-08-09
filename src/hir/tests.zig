@@ -901,6 +901,56 @@ test "HIR eligibility accepts typed external bindings without source bodies" {
     try std.testing.expectEqual(@as(u64, 7001), result.project.modules[0].imports[0].target.intrinsic_id.?.value());
 }
 
+test "semantic intrinsic calls lower as first-class HIR operations" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(120),
+        .logical_name = "intrinsic.ts",
+        .bytes = "import { intrinsicValue as renamed } from 'vzed:intrinsics'; export const value: number = renamed();",
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, .{
+            .id = .init(9100),
+            .logical_name = "vzed:intrinsics",
+            .exports = &.{.{
+                .name = "intrinsicValue",
+                .type_metadata = .object,
+                .symbol_id = .init(91),
+                .intrinsic_id = .init(0x0100),
+                .declaration_kind = .function,
+                .function = .{ .return_type = .number },
+                .effects = .{ .reads_memory = true, .unknown = false },
+            }},
+        }),
+    };
+    try std.testing.expect(!(try project.finish()).has_failures);
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    var intrinsic_count: usize = 0;
+    var ordinary_call_count: usize = 0;
+    for (result.project.functions) |function| for (function.blocks) |block| for (block.instructions) |instruction| switch (instruction.operation) {
+        .intrinsic_call => |call| {
+            intrinsic_count += 1;
+            try std.testing.expectEqual(@as(u64, 0x0100), call.intrinsic.value());
+            try std.testing.expectEqual(@as(usize, 0), call.arguments.len);
+            try std.testing.expect(call.effects.reads_state);
+            try std.testing.expect(!call.effects.may_call_user_code);
+            try std.testing.expectEqual(call.effects, instruction.effects);
+        },
+        .call => ordinary_call_count += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), intrinsic_count);
+    try std.testing.expectEqual(@as(usize, 0), ordinary_call_count);
+}
+
 test "HIR eligibility rejects external bindings without explicit publication metadata" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();

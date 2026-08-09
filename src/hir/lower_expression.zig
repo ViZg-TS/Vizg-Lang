@@ -59,6 +59,14 @@ pub fn lower(context: anytype, node_id: ast.NodeId) anyerror!ids.ValueId {
 }
 
 fn lowerCall(context: anytype, node_id: ast.NodeId, call: ast.CallExpression) anyerror!ids.ValueId {
+    if (context.intrinsicForExpression(call.callee)) |target| {
+        const arguments = try lowerArguments(context, call.arguments);
+        return context.emitValue(.{ .intrinsic_call = .{
+            .intrinsic = target.intrinsic,
+            .arguments = arguments,
+            .effects = target.effects,
+        } }, context.nodeType(node_id));
+    }
     const callee_node = context.local.frontend.ast.node(call.callee);
     if (callee_node.data == .MemberExpression and callee_node.data.MemberExpression.optional)
         return lowerOptionalMemberCall(context, node_id, callee_node.data.MemberExpression, call.arguments);

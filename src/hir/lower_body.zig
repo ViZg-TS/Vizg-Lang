@@ -494,6 +494,19 @@ const Lowerer = struct {
         return self.emitValue(.{ .load_binding = binding_id }, self.nodeType(node_id));
     }
 
+    pub fn intrinsicForExpression(self: *const Lowerer, node_id: ast.NodeId) ?model.IntrinsicReference {
+        if (self.local.frontend.ast.node(node_id).data != .Identifier) return null;
+        const symbol = self.referenceSymbol(node_id) orelse return null;
+        for (self.symbol_bindings.items) |entry| {
+            if (entry.symbol != symbol) continue;
+            return .{
+                .intrinsic = entry.intrinsic_id orelse return null,
+                .effects = entry.intrinsic_effects orelse return null,
+            };
+        }
+        return null;
+    }
+
     pub fn lowerIdentifierPlace(self: *Lowerer, node_id: ast.NodeId) !ids.PlaceId {
         const symbol_id = self.referenceSymbol(node_id) orelse return error.UnresolvedIdentifier;
         const binding_id = self.bindingForSymbol(symbol_id) orelse return error.MissingHirBinding;

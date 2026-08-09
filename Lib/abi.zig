@@ -3212,6 +3212,10 @@ fn operationPayload(operation: vizg.hir.HirOperation) Vizg_HirPayload {
             output.operand0 = idIndex(value.callee);
             output.item_count = value.arguments.len;
         },
+        .intrinsic_call => |value| {
+            output.operand0 = value.intrinsic.value();
+            output.item_count = value.arguments.len;
+        },
         .call_method, .call_super_method => |value| {
             output.flags = @intFromBool(value.callee != null);
             output.operand0 = optionalId(value.callee);
@@ -3313,6 +3317,10 @@ fn operationPayloadItem(operation: vizg.hir.HirOperation, index: usize) ?Vizg_Hi
     var output = std.mem.zeroes(Vizg_HirPayloadItem);
     switch (operation) {
         .call, .construct => |value| {
+            if (index >= value.arguments.len) return null;
+            return callArgumentItem(value.arguments[index]);
+        },
+        .intrinsic_call => |value| {
             if (index >= value.arguments.len) return null;
             return callArgumentItem(value.arguments[index]);
         },

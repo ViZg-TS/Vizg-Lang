@@ -89,6 +89,7 @@ pub fn operation(allocator: std.mem.Allocator, replacements: []const ValueReplac
         .binary => |x| .{ .binary = .{ .operator = x.operator, .left = value(replacements, x.left), .right = value(replacements, x.right), .mode = x.mode } },
         .add => |x| .{ .add = .{ .left = value(replacements, x.left), .right = value(replacements, x.right), .mode = x.mode } },
         .call => |x| .{ .call = .{ .callee = value(replacements, x.callee), .arguments = try arguments(allocator, replacements, x.arguments) } },
+        .intrinsic_call => |x| .{ .intrinsic_call = .{ .intrinsic = x.intrinsic, .arguments = try arguments(allocator, replacements, x.arguments), .effects = x.effects } },
         .construct => |x| .{ .construct = .{ .callee = value(replacements, x.callee), .arguments = try arguments(allocator, replacements, x.arguments) } },
         .call_method => |x| .{ .call_method = .{ .callee = if (x.callee) |v| value(replacements, v) else null, .receiver = value(replacements, x.receiver), .key = key(replacements, x.key), .arguments = try arguments(allocator, replacements, x.arguments) } },
         .call_super_method => |x| .{ .call_super_method = .{ .callee = if (x.callee) |v| value(replacements, v) else null, .receiver = value(replacements, x.receiver), .key = key(replacements, x.key), .arguments = try arguments(allocator, replacements, x.arguments) } },
