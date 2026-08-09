@@ -131,6 +131,86 @@ test "official ABI v1 exposes version and a project-owned terminal result" {
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), c.vizg_project_result_summary(first, &summary));
 }
 
+test "external module V4 preserves intrinsic identity under import renaming" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(
+        1,
+        "root.ts",
+        "import { missing as renamed } from 'core'; export const value = renamed();",
+        true,
+    );
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(project, &step));
+    try std.testing.expectEqualStrings("core", stepSpecifier(&step));
+
+    const undefined_ref: c.Vizg_ExternalTypeReferenceV3 = .{
+        .kind = c.VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN,
+        .builtin_type = c.VIZG_EXTERNAL_TYPE_UNDEFINED,
+        .external_type_id = 0,
+    };
+    var export_desc: c.Vizg_ExternalExportV4 = .{
+        .name_ptr = "missing".ptr,
+        .name_len = "missing".len,
+        .kind = c.VIZG_EXTERNAL_EXPORT_NAMED,
+        .namespace_flags = c.VIZG_EXTERNAL_NAMESPACE_VALUE,
+        .has_type_reference = 0,
+        .has_function = 1,
+        .has_intrinsic_id = 1,
+        .reserved = 0,
+        .type_reference = undefined_ref,
+        .declaration_kind = c.VIZG_EXTERNAL_DECLARATION_FUNCTION,
+        .effect_flags = 0,
+        .reserved2 = 0,
+        .external_symbol_id = 0x1001,
+        .intrinsic_id = 0x0001,
+        .function = .{
+            .parameters_ptr = null,
+            .parameter_count = 0,
+            .return_type = undefined_ref,
+            .type_parameter_count = 0,
+            .is_async = 0,
+            .is_generator = 0,
+            .is_constructor = 0,
+            .reserved = 0,
+        },
+    };
+    var external: c.Vizg_ExternalModuleV4 = .{
+        .external_module_id = 2,
+        .logical_name_ptr = "core".ptr,
+        .logical_name_len = "core".len,
+        .exports_ptr = @ptrCast(&export_desc),
+        .export_count = 1,
+        .types_ptr = null,
+        .type_count = 0,
+    };
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_respond_external_v4(project, step.request_id, &external),
+    );
+
+    const result = try finishProject(project);
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary));
+    var found = false;
+    for (0..summary.instruction_count) |index| {
+        var payload: c.Vizg_HirPayload = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_operation_at(result, c.VIZG_HIR_PAYLOAD_API_VERSION, index, &payload),
+        );
+        if (payload.tag != c.VIZG_HIR_OPERATION_INTRINSIC_CALL) continue;
+        try std.testing.expectEqual(@as(u64, 0x0001), payload.operand0);
+        try std.testing.expectEqual(@as(usize, 0), payload.item_count);
+        found = true;
+    }
+    try std.testing.expect(found);
+}
+
 test "ambient-global API v2 preserves recursive host identity" {
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();

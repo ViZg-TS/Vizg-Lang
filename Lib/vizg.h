@@ -10,7 +10,7 @@
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
 #define VIZG_HIR_DETAIL_API_VERSION 4u
-#define VIZG_EXTERNAL_MODULE_API_VERSION 3u
+#define VIZG_EXTERNAL_MODULE_API_VERSION 4u
 #define VIZG_INTRINSIC_CONTRACT_VERSION 1u
 #define VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN 0u
 #define VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED 1u
@@ -494,6 +494,34 @@ typedef struct Vizg_ExternalModuleV3 {
     const Vizg_ExternalTypeV3 *types_ptr;
     size_t type_count;
 } Vizg_ExternalModuleV3;
+
+typedef struct Vizg_ExternalExportV4 {
+    const char *name_ptr;
+    size_t name_len;
+    Vizg_ExternalExportKind kind;
+    Vizg_ExternalNamespaceFlags namespace_flags;
+    uint8_t has_type_reference;
+    uint8_t has_function;
+    uint8_t has_intrinsic_id;
+    uint8_t reserved;
+    Vizg_ExternalTypeReferenceV3 type_reference;
+    Vizg_ExternalDeclarationKind declaration_kind;
+    Vizg_ExternalEffectFlags effect_flags;
+    uint16_t reserved2;
+    uint64_t external_symbol_id;
+    uint64_t intrinsic_id;
+    Vizg_ExternalFunctionV3 function;
+} Vizg_ExternalExportV4;
+
+typedef struct Vizg_ExternalModuleV4 {
+    uint64_t external_module_id;
+    const char *logical_name_ptr;
+    size_t logical_name_len;
+    const Vizg_ExternalExportV4 *exports_ptr;
+    size_t export_count;
+    const Vizg_ExternalTypeV3 *types_ptr;
+    size_t type_count;
+} Vizg_ExternalModuleV4;
 
 typedef struct Vizg_AmbientGlobal {
     const char *name_ptr;
@@ -1166,6 +1194,10 @@ Vizg_ProjectStatus vizg_project_respond_external_v2(
 Vizg_ProjectStatus vizg_project_respond_external_v3(
     Vizg_Project *project, uint64_t request_id,
     const Vizg_ExternalModuleV3 *external_module);
+/* V4 adds stable intrinsic identity to exports while preserving V3 unchanged. */
+Vizg_ProjectStatus vizg_project_respond_external_v4(
+    Vizg_Project *project, uint64_t request_id,
+    const Vizg_ExternalModuleV4 *external_module);
 Vizg_ProjectStatus vizg_project_respond_failure(
     Vizg_Project *project, uint64_t request_id,
     Vizg_ProjectFailureKind failure_kind);

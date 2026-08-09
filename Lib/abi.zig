@@ -8,7 +8,7 @@ pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
 pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 4;
-pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 3;
+pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED: u32 = 1;
 pub const VIZG_HIR_ID_NONE: u64 = std.math.maxInt(u64);
@@ -319,6 +319,34 @@ pub const Vizg_ExternalModuleV3 = extern struct {
     logical_name_ptr: [*c]const u8,
     logical_name_len: usize,
     exports_ptr: [*c]const Vizg_ExternalExportV3,
+    export_count: usize,
+    types_ptr: [*c]const Vizg_ExternalTypeV3,
+    type_count: usize,
+};
+
+pub const Vizg_ExternalExportV4 = extern struct {
+    name_ptr: [*c]const u8,
+    name_len: usize,
+    kind: u32,
+    namespace_flags: Vizg_ExternalNamespaceFlags,
+    has_type_reference: u8,
+    has_function: u8,
+    has_intrinsic_id: u8,
+    reserved: u8,
+    type_reference: Vizg_ExternalTypeReferenceV3,
+    declaration_kind: u32,
+    effect_flags: u16,
+    reserved2: u16,
+    external_symbol_id: u64,
+    intrinsic_id: u64,
+    function: Vizg_ExternalFunctionV3,
+};
+
+pub const Vizg_ExternalModuleV4 = extern struct {
+    external_module_id: u64,
+    logical_name_ptr: [*c]const u8,
+    logical_name_len: usize,
+    exports_ptr: [*c]const Vizg_ExternalExportV4,
     export_count: usize,
     types_ptr: [*c]const Vizg_ExternalTypeV3,
     type_count: usize,
@@ -1700,6 +1728,22 @@ fn validExternalExportV3(owned: *const OwnedProject, item: *const Vizg_ExternalE
     return item.declaration_kind == 0 and validExternalFunctionV3(owned, &item.function);
 }
 
+fn validExternalExportV4(owned: *const OwnedProject, item: *const Vizg_ExternalExportV4) bool {
+    if (!validAlignedHostArray(u8, item.name_ptr, item.name_len) or
+        !inputOutsideWorkspace(owned, item.name_ptr, item.name_len) or
+        item.namespace_flags == 0 or
+        item.namespace_flags & ~@as(Vizg_ExternalNamespaceFlags, VIZG_EXTERNAL_NAMESPACE_BOTH) != 0 or
+        item.has_type_reference > 1 or item.has_function > 1 or item.has_intrinsic_id > 1 or
+        item.reserved != 0 or item.reserved2 != 0 or
+        exportKind(item.kind) == null or externalDeclarationKind(item.declaration_kind) == null or
+        externalEffects(item.effect_flags) == null) return false;
+    if (item.has_intrinsic_id == 0 and item.intrinsic_id != 0) return false;
+    if (item.has_type_reference == 1 and externalTypeReferenceV3(item.type_reference) == null) return false;
+    if (item.has_function == 0) return zeroExternalFunctionV3(item.function) and
+        item.declaration_kind != 0 and item.has_intrinsic_id == 0;
+    return item.declaration_kind == 0 and validExternalFunctionV3(owned, &item.function);
+}
+
 fn carveScratch(comptime T: type, cursor: *usize, lower_bound: usize, count: usize) ?[]T {
     const byte_len = checkedByteLen(T, count) orelse return null;
     const unaligned = std.math.sub(usize, cursor.*, byte_len) catch return null;
@@ -1800,6 +1844,127 @@ pub fn projectRespondExternalV3(project: ?*Vizg_Project, request_id: u64, input:
             .declaration_kind = externalDeclarationKind(item.declaration_kind).?,
             .function = function,
             .effects = externalEffects(item.effect_flags).?,
+        };
+    }
+    var next_member: usize = 0;
+    for (external_types, 0..) |*output, index| {
+        const item = args.types_ptr[index];
+        const start = next_member;
+        if (item.member_count != 0) for (item.members_ptr[0..item.member_count]) |member| {
+            members[next_member] = .{
+                .name = bytes(member.name_ptr, member.name_len),
+                .type_reference = externalTypeReferenceV3(member.type_reference).?,
+                .optional = member.optional == 1,
+                .readonly = member.readonly == 1,
+            };
+            next_member += 1;
+        };
+        output.* = .{
+            .id = .init(item.external_type_id),
+            .name = bytes(item.name_ptr, item.name_len),
+            .members = members[start..next_member],
+        };
+    }
+    owned.project.respondExternalModule(.init(request_id), .{
+        .id = .init(args.external_module_id),
+        .logical_name = bytes(args.logical_name_ptr, args.logical_name_len),
+        .exports = descriptors,
+        .types = external_types,
+    }) catch |err| return statusFromError(owned, err);
+    return .OK;
+}
+
+pub fn projectRespondExternalV4(project: ?*Vizg_Project, request_id: u64, input: ?*const Vizg_ExternalModuleV4) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
+    beginProjectCall(owned);
+    const args = input orelse return .INVALID_ARGUMENT;
+    if (!validAlignedHostObject(Vizg_ExternalModuleV4, args) or
+        !inputOutsideWorkspace(owned, args, @sizeOf(Vizg_ExternalModuleV4)) or
+        !validAlignedHostArray(u8, args.logical_name_ptr, args.logical_name_len) or
+        !validAlignedHostArray(Vizg_ExternalExportV4, args.exports_ptr, args.export_count) or
+        !validAlignedHostArray(Vizg_ExternalTypeV3, args.types_ptr, args.type_count)) return .INVALID_ARGUMENT;
+    const export_bytes = checkedByteLen(Vizg_ExternalExportV4, args.export_count) orelse return .INVALID_ARGUMENT;
+    const type_bytes = checkedByteLen(Vizg_ExternalTypeV3, args.type_count) orelse return .INVALID_ARGUMENT;
+    if (!inputOutsideWorkspace(owned, args.logical_name_ptr, args.logical_name_len) or
+        !inputOutsideWorkspace(owned, args.exports_ptr, export_bytes) or
+        !inputOutsideWorkspace(owned, args.types_ptr, type_bytes)) return .INVALID_ARGUMENT;
+
+    var parameter_count: usize = 0;
+    if (args.export_count != 0) {
+        for (args.exports_ptr[0..args.export_count]) |*item| {
+            if (!validExternalExportV4(owned, item)) return .INVALID_ARGUMENT;
+            parameter_count = std.math.add(usize, parameter_count, item.function.parameter_count) catch return .INVALID_ARGUMENT;
+        }
+    }
+    var member_count: usize = 0;
+    if (args.type_count != 0) {
+        for (args.types_ptr[0..args.type_count]) |*item| {
+            if (!validAlignedHostArray(u8, item.name_ptr, item.name_len) or item.name_len == 0 or
+                !inputOutsideWorkspace(owned, item.name_ptr, item.name_len) or
+                !validAlignedHostArray(Vizg_ExternalTypeMemberV3, item.members_ptr, item.member_count)) return .INVALID_ARGUMENT;
+            const member_bytes = checkedByteLen(Vizg_ExternalTypeMemberV3, item.member_count) orelse return .INVALID_ARGUMENT;
+            if (!inputOutsideWorkspace(owned, item.members_ptr, member_bytes)) return .INVALID_ARGUMENT;
+            member_count = std.math.add(usize, member_count, item.member_count) catch return .INVALID_ARGUMENT;
+            if (item.member_count != 0) for (item.members_ptr[0..item.member_count]) |*member| {
+                if (!validAlignedHostArray(u8, member.name_ptr, member.name_len) or member.name_len == 0 or
+                    !inputOutsideWorkspace(owned, member.name_ptr, member.name_len) or
+                    externalTypeReferenceV3(member.type_reference) == null or member.optional > 1 or member.readonly > 1 or
+                    !std.mem.allEqual(u8, &member.reserved, 0)) return .INVALID_ARGUMENT;
+            };
+        }
+    }
+
+    const buffer = owned.fba.buffer;
+    const buffer_start = @intFromPtr(buffer.ptr);
+    const buffer_end = std.math.add(usize, buffer_start, buffer.len) catch return .OUT_OF_MEMORY;
+    const used_end = std.math.add(usize, buffer_start, owned.fba.end_index) catch return .OUT_OF_MEMORY;
+    var cursor = buffer_end;
+    const descriptors = carveScratch(vizg.ExternalExportDescriptor, &cursor, used_end, args.export_count) orelse return .OUT_OF_MEMORY;
+    const parameters = carveScratch(vizg.ExternalParameterDescriptor, &cursor, used_end, parameter_count) orelse return .OUT_OF_MEMORY;
+    const external_types = carveScratch(vizg.ExternalTypeDescriptor, &cursor, used_end, args.type_count) orelse return .OUT_OF_MEMORY;
+    const members = carveScratch(vizg.ExternalTypeMemberDescriptor, &cursor, used_end, member_count) orelse return .OUT_OF_MEMORY;
+    owned.fba.buffer = buffer[0 .. cursor - buffer_start];
+    defer owned.fba.buffer = buffer;
+
+    var next_parameter: usize = 0;
+    for (descriptors, 0..) |*output, index| {
+        const item = args.exports_ptr[index];
+        var function: ?vizg.ExternalFunctionDescriptor = null;
+        if (item.has_function == 1) {
+            const start = next_parameter;
+            if (item.function.parameter_count != 0) for (item.function.parameters_ptr[0..item.function.parameter_count]) |parameter| {
+                parameters[next_parameter] = .{
+                    .name = bytes(parameter.name_ptr, parameter.name_len),
+                    .type_reference = externalTypeReferenceV3(parameter.type_reference).?,
+                    .optional = parameter.optional == 1,
+                    .has_default = parameter.has_default == 1,
+                    .rest = parameter.rest == 1,
+                };
+                next_parameter += 1;
+            };
+            function = .{
+                .parameters = parameters[start..next_parameter],
+                .return_type_reference = externalTypeReferenceV3(item.function.return_type).?,
+                .type_parameter_count = item.function.type_parameter_count,
+                .is_async = item.function.is_async == 1,
+                .is_generator = item.function.is_generator == 1,
+                .is_constructor = item.function.is_constructor == 1,
+            };
+        }
+        output.* = .{
+            .name = bytes(item.name_ptr, item.name_len),
+            .kind = exportKind(item.kind).?,
+            .namespace = .{
+                .value = item.namespace_flags & VIZG_EXTERNAL_NAMESPACE_VALUE != 0,
+                .type = item.namespace_flags & VIZG_EXTERNAL_NAMESPACE_TYPE != 0,
+            },
+            .type_reference = if (item.has_type_reference == 1) externalTypeReferenceV3(item.type_reference).? else null,
+            .symbol_id = .init(item.external_symbol_id),
+            .declaration_kind = externalDeclarationKind(item.declaration_kind).?,
+            .function = function,
+            .effects = externalEffects(item.effect_flags).?,
+            .intrinsic_id = if (item.has_intrinsic_id == 1) .init(item.intrinsic_id) else null,
         };
     }
     var next_member: usize = 0;
@@ -3545,6 +3710,7 @@ comptime {
     @export(&externalModuleApiVersion, .{ .name = "vizg_external_module_api_version" });
     @export(&projectRespondExternalV2, .{ .name = "vizg_project_respond_external_v2" });
     @export(&projectRespondExternalV3, .{ .name = "vizg_project_respond_external_v3" });
+    @export(&projectRespondExternalV4, .{ .name = "vizg_project_respond_external_v4" });
     @export(&projectRespondFailure, .{ .name = "vizg_project_respond_failure" });
     @export(&projectFinish, .{ .name = "vizg_project_finish" });
     @export(&projectResultSummary, .{ .name = "vizg_project_result_summary" });

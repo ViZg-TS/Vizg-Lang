@@ -434,6 +434,7 @@ pub fn build(b: *std.Build) void {
         \\vizg_project_respond_external
         \\vizg_project_respond_external_v2
         \\vizg_project_respond_external_v3
+        \\vizg_project_respond_external_v4
         \\vizg_project_respond_failure
         \\vizg_project_respond_source
         \\vizg_project_result_destroy
