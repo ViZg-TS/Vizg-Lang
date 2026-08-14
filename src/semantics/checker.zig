@@ -40,7 +40,7 @@ pub fn checkFileWithLimit(
         const node_id: ast_mod.NodeId = @intCast(raw_id);
         switch (node.data) {
             .VariableDeclarator => |declaration| try checkInitializer(allocator, result, type_info, store, node_id, declaration, &out),
-            .AssignmentExpression => |assignment| try checkAssignment(allocator, tree, type_info, store, node_id, assignment, &out),
+            .AssignmentExpression => |assignment| try checkAssignment(allocator, result, type_info, store, node_id, assignment, &out),
             .CallExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, false, &out),
             .NewExpression => |call| try checkCall(allocator, tree, type_info, store, node_id, call.callee, call.arguments, true, &out),
             .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassMethod => try checkFunctionReturns(allocator, result, type_info, store, node_id, &out),
@@ -103,13 +103,32 @@ fn compatibilityMessage(allocator: std.mem.Allocator, result: type_compat.Compat
 
 fn checkAssignment(
     allocator: std.mem.Allocator,
-    tree: *const ast_mod.Ast,
+    result: frontend.FrontendResult,
     type_info: type_info_mod.TypeInfo,
     store: *types.TypeStore,
     assignment_id: ast_mod.NodeId,
     assignment: ast_mod.AssignmentExpression,
     out: *diagnostics.LimitedList,
 ) !void {
+    const tree = &result.ast;
+    // Assignment to an immutable (const) binding is a semantic error before
+    // any type check. Resolve the write reference to its symbol and report
+    // the const target with a stable code instead of failing HIR lowering.
+    if (assignmentTargetSymbol(result, assignment.left)) |symbol| {
+        if (!symbol.mutable) {
+            try appendDiagnostic(
+                allocator,
+                out,
+                .const_assignment,
+                "cannot assign to a constant",
+                "constant assignment",
+                tree.node(assignment.left).span,
+                tree.node(symbol.declaration).span,
+                "constant is declared here",
+            );
+            return;
+        }
+    }
     const expected = resolvedNode(type_info, assignment.left, store) orelse return;
     const actual_node = if (assignment.operator == .Equal) assignment.right else assignment_id;
     const actual = resolvedNode(type_info, actual_node, store) orelse return;
@@ -119,6 +138,21 @@ fn checkAssignment(
     else
         "compound assignment result is not assignable to the target type";
     try appendDiagnostic(allocator, out, .type_mismatch, message, "incompatible assignment", tree.node(actual_node).span, tree.node(assignment.left).span, "assignment target is here");
+}
+
+/// Resolve the symbol written by an assignment target. Returns null when the
+/// target is not a plain identifier reference (e.g. a member or element write).
+fn assignmentTargetSymbol(result: frontend.FrontendResult, node_id: ast_mod.NodeId) ?binder.Symbol {
+    for (result.resolve.references) |reference| {
+        if (reference.node == node_id and reference.kind == .write) {
+            const symbol_id = reference.symbol orelse return null;
+            for (result.bind.symbols) |symbol| {
+                if (symbol.id == symbol_id) return symbol;
+            }
+            return null;
+        }
+    }
+    return null;
 }
 
 fn checkCall(

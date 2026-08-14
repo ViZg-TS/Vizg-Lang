@@ -959,6 +959,7 @@ fn diagnosticCode(value: vizg.diagnostics.DiagnosticCode) u32 {
         .invalid_index => 6007,
         .invalid_argument_count => 6008,
         .invalid_argument_type => 6009,
+        .const_assignment => 6010,
         .global_ambient_collision => 8001,
     };
 }

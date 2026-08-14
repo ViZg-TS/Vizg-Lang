@@ -1977,6 +1977,37 @@ test "Goal 133 semantic root repeated create query destroy" {
     }
 }
 
+test "const assignment is rejected with a stable diagnostic" {
+    var result = try analyzeSource(
+        std.testing.allocator,
+        .{ .path = "test.ts", .text = "const stable = 1;\nstable = 2;" },
+        .{},
+    );
+    defer result.deinit();
+
+    var found = false;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .const_assignment) {
+            found = true;
+            try std.testing.expect(diagnostic.related.len != 0);
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "let and var assignment do not report const_assignment" {
+    var result = try analyzeSource(
+        std.testing.allocator,
+        .{ .path = "test.ts", .text = "let a = 1;\na = 2;\nvar b = 3;\nb = 4;" },
+        .{},
+    );
+    defer result.deinit();
+
+    for (result.semantic_diagnostics) |diagnostic|
+        try std.testing.expect(diagnostic.code != .const_assignment);
+}
+
 test "SemanticResult includes semantic checker diagnostics" {
     var result = try analyzeSource(
         std.testing.allocator,
