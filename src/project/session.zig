@@ -3313,3 +3313,45 @@ test "global source module: ambient collision reports a diagnostic and preserves
     }
     try std.testing.expect(found);
 }
+
+test "named source re-export refreshes downstream expression typing without recovery" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(9201),
+        .logical_name = "main.ts",
+        .bytes =
+        \\import { value } from "./facade";
+        \\export function read(): number { return value; }
+        ,
+    });
+    const facade: contracts.ModuleSource = .{
+        .id = .init(9202),
+        .logical_name = "facade.ts",
+        .bytes = "export { value } from \"./state\";",
+    };
+    const state: contracts.ModuleSource = .{
+        .id = .init(9203),
+        .logical_name = "state.ts",
+        .bytes = "export let value: number = 41;",
+    };
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| if (std.mem.eql(u8, request.raw_specifier, "./facade"))
+            try project.respondSource(request.id, facade)
+        else if (std.mem.eql(u8, request.raw_specifier, "./state"))
+            try project.respondSource(request.id, state)
+        else
+            try project.respondFailed(request.id),
+    };
+    const summary = try project.finish();
+    try std.testing.expect(!summary.has_failures);
+
+    const semantic = project.semanticResult().?;
+    const root = semantic.lookupModule(9201).?;
+    try std.testing.expectEqual(@as(usize, 0), root.type_info.diagnostics.len);
+    for (root.type_info.symbols) |symbol| {
+        if (symbol.effective()) |type_id|
+            try std.testing.expect(type_id != semantic.type_store.builtins.unknown);
+    }
+}

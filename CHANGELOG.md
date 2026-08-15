@@ -8,6 +8,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Source-module re-export chains now refresh downstream expression types after
+  semantic linking instead of retaining a stale `VZG2004` unknown-recovery warning.
 - `await` now accepts `Promise<T>` operands and recursively resolves their
   semantic result to `T`; awaiting non-promise values preserves their type.
 - Published `intrinsic_contract_version` for exact host/ViZG catalog

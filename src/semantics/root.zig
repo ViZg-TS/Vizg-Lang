@@ -1133,9 +1133,30 @@ fn finishProjectTypes(allocator: std.mem.Allocator, result: frontend.FrontendRes
     const narrowed = try narrowing.analyze(allocator, result, type_store, info.symbols, &nodes);
     info.nodes = try nodes.toOwnedSlice(allocator);
     info.flow_types = narrowed.flow_types;
+    var retained_diags: std.ArrayList(diagnostics.Diagnostic) = .empty;
+    for (info.diagnostics) |diagnostic| {
+        if (resolvedCoverageRecovery(diagnostic, result.ast, info.nodes, &type_store.builtins)) continue;
+        try retained_diags.append(allocator, diagnostic);
+    }
     const checker_info: TypeInfo = .{ .symbols = info.symbols, .nodes = info.nodes, .flow_types = info.flow_types, .diagnostics = &.{} };
     const checker_diags = try checker.checkFile(allocator, result, checker_info, type_store);
-    info.diagnostics = try combineDiagnostics(allocator, &.{ info.diagnostics, checker_diags }, result.source.path);
+    info.diagnostics = try combineDiagnostics(allocator, &.{ retained_diags.items, checker_diags }, result.source.path);
+}
+
+fn resolvedCoverageRecovery(
+    diagnostic: diagnostics.Diagnostic,
+    tree: ast.Ast,
+    nodes: []const NodeTypeInfo,
+    builtins: *const types.Builtins,
+) bool {
+    if (diagnostic.code != .unsupported_syntax or
+        !std.mem.eql(u8, diagnostic.message, "expression semantic typing deferred; recovered as unknown")) return false;
+    for (tree.nodes, 0..) |node, raw_id| {
+        if (!isExecutableExpression(node.data) or !std.meta.eql(node.span, diagnostic.span)) continue;
+        const type_id = nodeType(nodes, @intCast(raw_id)) orelse return false;
+        return type_id != builtins.unknown;
+    }
+    return false;
 }
 
 fn hasUnresolvedLinks(imports: []const SemanticImport) bool {
