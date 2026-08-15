@@ -3350,6 +3350,8 @@ test "named source re-export refreshes downstream expression typing without reco
     const semantic = project.semanticResult().?;
     const root = semantic.lookupModule(9201).?;
     try std.testing.expectEqual(@as(usize, 0), root.type_info.diagnostics.len);
+    for (semantic.modules) |module|
+        try std.testing.expectEqual(@as(usize, 0), module.type_info.diagnostics.len);
     for (root.type_info.symbols) |symbol| {
         if (symbol.effective()) |type_id|
             try std.testing.expect(type_id != semantic.type_store.builtins.unknown);

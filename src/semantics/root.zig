@@ -1528,6 +1528,7 @@ fn completeExpressionCoverage(
     for (tree.nodes, 0..) |node, raw_id| {
         if (!isExecutableExpression(node.data)) continue;
         const node_id: ast.NodeId = @intCast(raw_id);
+        if (isExportSpecifierIdentifier(tree, node_id)) continue;
         if (nodeType(entries.items, node_id) != null) continue;
         try putNodeType(allocator, entries, .{ .node_id = node_id, .type_id = builtins.unknown, .state = .resolved });
         try recovery.append(allocator, .{
@@ -1540,6 +1541,16 @@ fn completeExpressionCoverage(
         });
     }
     return recovery.toOwnedSlice(allocator);
+}
+
+fn isExportSpecifierIdentifier(tree: ast.Ast, node_id: ast.NodeId) bool {
+    for (tree.nodes) |node| switch (node.data) {
+        .ExportDeclaration => |exported| for (exported.specifiers) |specifier| {
+            if (specifier.local == node_id or specifier.exported == node_id) return true;
+        },
+        else => {},
+    };
+    return false;
 }
 
 fn isExecutableExpression(data: ast.NodeData) bool {

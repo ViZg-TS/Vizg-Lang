@@ -1629,13 +1629,14 @@ test "official ABI v1 reports distinct canonical host and project diagnostics on
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_finish(project, &result));
     var summary: c.Vizg_ProjectResultSummary = undefined;
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
-    try std.testing.expectEqual(@as(usize, 8), summary.diagnostic_count);
+    try std.testing.expectEqual(@as(usize, 4), summary.diagnostic_count);
     try std.testing.expectEqual(@as(u8, 1), summary.has_project_errors);
     try std.testing.expectEqual(@as(u8, 1), summary.has_module_failures);
     try std.testing.expectEqual(@as(u8, 1), summary.is_partial);
 
     var host_codes = [_]u32{ 0, 0, 0 };
     var project_count: usize = 0;
+    var unsupported_count: usize = 0;
     for (0..summary.diagnostic_count) |index| {
         var item: c.Vizg_ProjectDiagnostic = undefined;
         try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_diagnostic(result, index, &item));
@@ -1647,10 +1648,13 @@ test "official ABI v1 reports distinct canonical host and project diagnostics on
             if (item.code == c.VIZG_DIAGNOSTIC_MODULE_HOST_FAILED) host_codes[2] += 1;
         } else if (item.phase == c.VIZG_DIAGNOSTIC_PHASE_PROJECT and item.code == c.VIZG_DIAGNOSTIC_MISSING_EXPORT) {
             project_count += 1;
+        } else if (item.code == c.VIZG_DIAGNOSTIC_UNSUPPORTED_SYNTAX) {
+            unsupported_count += 1;
         }
     }
     try std.testing.expectEqualSlices(u32, &.{ 1, 1, 1 }, &host_codes);
     try std.testing.expectEqual(@as(usize, 1), project_count);
+    try std.testing.expectEqual(@as(usize, 0), unsupported_count);
 }
 
 test "official ABI v1 rejects malformed arguments and workspace aliases" {
