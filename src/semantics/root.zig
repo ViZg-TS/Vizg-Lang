@@ -495,7 +495,7 @@ fn analyzeModuleGraphData(
 
     for (project_modules.items) |*module| {
         const graph_module = graphModule(graph, module.id) orelse continue;
-        try finishProjectTypes(allocator, graph_module.result, &module.type_info, &type_store);
+        try finishProjectTypes(allocator, module.id, graph_module.result, &module.type_info, &type_store);
     }
 
     var all_diags = diagnostics.LimitedList.init(limits.max_diagnostics);
@@ -1128,9 +1128,35 @@ fn refreshDirectExportTypes(modules: []ProjectSemanticModule, type_store: *const
     return changed;
 }
 
-fn finishProjectTypes(allocator: std.mem.Allocator, result: frontend.FrontendResult, info: *TypeInfo, type_store: *types.TypeStore) !void {
+fn finishProjectTypes(
+    allocator: std.mem.Allocator,
+    module_id: ModuleId,
+    result: frontend.FrontendResult,
+    info: *TypeInfo,
+    type_store: *types.TypeStore,
+) !void {
     var nodes: std.ArrayList(NodeTypeInfo) = .{ .items = @constCast(info.nodes), .capacity = info.nodes.len };
     const narrowed = try narrowing.analyze(allocator, result, type_store, info.symbols, &nodes);
+    // Retype dependent parent expressions from the narrowed reference map and
+    // refresh inferred signatures so the checker validates the narrowed body
+    // instead of stale pre-narrowing operands (BUG-0074).
+    _ = try type_inference.inferPrimitiveExpressionsWithCfgs(
+        allocator,
+        result.ast,
+        &nodes,
+        type_store,
+        info.resolved_type_nodes,
+        result.cfgs,
+    );
+    _ = try refreshFunctionReturns(
+        allocator,
+        module_id,
+        result,
+        @constCast(info.symbols),
+        nodes.items,
+        info.resolved_type_nodes,
+        type_store,
+    );
     info.nodes = try nodes.toOwnedSlice(allocator);
     info.flow_types = narrowed.flow_types;
     var retained_diags: std.ArrayList(diagnostics.Diagnostic) = .empty;
@@ -1405,6 +1431,25 @@ fn buildTypeInfo(
     );
 
     const narrowed = try narrowing.analyze(allocator, result, type_store, symbol_types.items, &node_types);
+    // Retype dependent parent expressions from the narrowed reference map and
+    // refresh inferred signatures before the checker validates (BUG-0074).
+    _ = try type_inference.inferPrimitiveExpressionsWithCfgs(
+        allocator,
+        result.ast,
+        &node_types,
+        type_store,
+        collected.resolved_type_nodes,
+        result.cfgs,
+    );
+    _ = try refreshFunctionReturns(
+        allocator,
+        module_id,
+        result,
+        symbol_types.items,
+        node_types.items,
+        collected.resolved_type_nodes,
+        type_store,
+    );
     const checker_info: TypeInfo = .{
         .symbols = symbol_types.items,
         .nodes = node_types.items,
@@ -3071,6 +3116,53 @@ test "Goal 146 typeof and instanceof narrow to the supported value types" {
     try std.testing.expect(admin.kind == .class);
     try std.testing.expectEqualStrings("User", user.kind.class.name);
     try std.testing.expectEqualStrings("Admin", admin.kind.class.name);
+}
+
+test "BUG-0074 narrowing retypes parent expressions and inferred returns" {
+    const source =
+        \\export function narrow(value: string | number): number {
+        \\    if (typeof value === "number") return value + 1;
+        \\    return 0;
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+
+    var error_count: usize = 0;
+    for (result.diagnostics) |diagnostic| {
+        if (diagnostic.label != null and std.mem.eql(u8, diagnostic.label.?, "invalid operator operands")) error_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), error_count);
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+
+    // The guarded reference stays narrowed to number.
+    const value_offset = (std.mem.indexOf(u8, source, "value + 1") orelse unreachable);
+    try std.testing.expectEqual(result.type_store.builtins.number, testReferenceTypeAt(&result, value_offset).?);
+
+    // The enclosing addition is retyped number, not stale pre-narrowing error.
+    const addition_offset: u32 = @intCast(value_offset);
+    var found_addition = false;
+    for (result.frontend.ast.nodes, 0..) |node, raw_id| {
+        if (node.data != .BinaryExpression) continue;
+        if (node.span.start != addition_offset) continue;
+        found_addition = true;
+        try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(@intCast(raw_id)).?);
+        const info = result.lookupNodeTypeInfo(@intCast(raw_id)).?;
+        try std.testing.expectEqual(TypeResolutionState.resolved, info.state);
+    }
+    try std.testing.expect(found_addition);
+
+    // The inferred function signature returns number after refresh.
+    var found_signature = false;
+    for (result.frontend.bind.symbols) |entry| {
+        if (entry.kind != .function or !std.mem.eql(u8, entry.name, "narrow")) continue;
+        const symbol_type = result.type_info.lookupSymbol(entry.id) orelse continue;
+        const type_id = symbol_type.effective() orelse continue;
+        const signature = result.type_store.lookupFunction(type_id) orelse continue;
+        try std.testing.expectEqual(result.type_store.builtins.number, signature.return_type);
+        found_signature = true;
+    }
+    try std.testing.expect(found_signature);
 }
 
 test "Goal 146 in narrows object and interface unions" {
