@@ -8,6 +8,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- `await` now accepts `Promise<T>` operands and recursively resolves their
+  semantic result to `T`; awaiting non-promise values preserves their type.
 - Published `intrinsic_contract_version` for exact host/ViZG catalog
   compatibility checks while keeping intrinsic identities and policy opaque.
 - Added an optional host-assigned `IntrinsicId` to the Zig external-module

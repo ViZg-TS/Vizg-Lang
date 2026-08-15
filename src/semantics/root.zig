@@ -2150,9 +2150,12 @@ test "method calls preserve receiver and async functions wrap return type" {
         \\const service = { read(value: number) { return value; } };
         \\const answer = service.read(1);
         \\async function load(): number { return 1; }
+        \\async function consume() { return await load(); }
         \\const pending = load();
+        \\const chained = consume();
     );
     defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
 
     const answer = testVariableInitializer(&result, "answer").?;
     try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(answer).?);
@@ -2162,6 +2165,11 @@ test "method calls preserve receiver and async functions wrap return type" {
     const pending_type = result.lookupType(result.lookupNodeType(pending).?).?;
     try std.testing.expect(pending_type.kind == .promise);
     try std.testing.expectEqual(result.type_store.builtins.number, pending_type.kind.promise.value_type);
+
+    const chained = testVariableInitializer(&result, "chained").?;
+    const chained_type = result.lookupType(result.lookupNodeType(chained).?).?;
+    try std.testing.expect(chained_type.kind == .promise);
+    try std.testing.expectEqual(result.type_store.builtins.number, chained_type.kind.promise.value_type);
 }
 
 test "recursive function calls use the stable signature and overloads remain deferred" {

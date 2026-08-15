@@ -99,11 +99,20 @@ pub fn inferBinaryOperator(
 pub fn inferUnaryOperator(
     operator: tokens.TokenType,
     operand: types.TypeId,
-    builtins: *const types.Builtins,
+    store: *const types.TypeStore,
 ) OperatorResult {
+    const builtins = &store.builtins;
     if (operand == builtins.any) return .{ .type_id = builtins.any };
     if (operand == builtins.unknown) return .{ .type_id = builtins.unknown };
     return switch (operator) {
+        .Keyword_await => blk: {
+            var awaited = operand;
+            while (store.lookup(awaited)) |item| {
+                if (item.kind != .promise or item.kind.promise.value_type == awaited) break;
+                awaited = item.kind.promise.value_type;
+            }
+            break :blk .{ .type_id = awaited };
+        },
         .Exclamation => .{ .type_id = builtins.boolean },
         .Keyword_typeof => .{ .type_id = builtins.string },
         .Keyword_void => .{ .type_id = builtins.undefined },
@@ -221,7 +230,7 @@ fn inferNode(
         else
             null,
         .UnaryExpression => |expression| if (findType(entries, expression.argument)) |ty|
-            inferUnaryOperator(expression.operator, ty, b)
+            inferUnaryOperator(expression.operator, ty, store)
         else
             null,
         .BinaryExpression => |expression| if (findType(entries, expression.left)) |left|
