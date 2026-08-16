@@ -223,7 +223,7 @@ fn defaultClassConstructorSignature(inputs: Inputs, owner: ast.NodeId) model.Typ
         class.instance_type
     else
         borrowed.type_store.builtins.unknown;
-    return type_store.addFunctionDetailed(&.{}, instance_type, 0, .{}) catch
+    return type_store.addFunctionDetailed(&.{}, instance_type, 0, .{ .is_constructor = true }) catch
         borrowed.type_store.builtins.unknown;
 }
 
