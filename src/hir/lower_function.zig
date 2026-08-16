@@ -200,13 +200,31 @@ pub fn createDefaultClassConstructor(inputs: Inputs, owner: ast.NodeId, derived:
         .symbol = declarationId(inputs.module.id, owner),
         .kind = .constructor,
         .flags = .{ .dynamic_this = true, .constructor = true, .uses_super = derived },
-        .signature_type = inputs.builder.result.semanticResult().type_store.builtins.unknown,
+        .signature_type = defaultClassConstructorSignature(inputs, owner),
         .places = try anf.finishPlaces(),
         .blocks = try anf.finish(),
         .entry = anf.entry,
         .origin = .invalid,
     });
     return function_id;
+}
+
+/// Synthesize the zero-parameter `() => instance_type` signature for a class
+/// without an explicit constructor. The class foundation owns the instance
+/// TypeId, so the signature is derived from the stable declaration identity
+/// rather than from source spelling or the `unknown` placeholder. Consumers
+/// (VZed HIR projection) can then accept the class carrier without a
+/// special-cased unknown signature.
+fn defaultClassConstructorSignature(inputs: Inputs, owner: ast.NodeId) model.TypeId {
+    const borrowed = inputs.builder.result.semanticResult();
+    const type_store: *types.TypeStore = @constCast(&borrowed.type_store);
+    const identity = types.SemanticDeclId.init(inputs.module.id.value(), owner);
+    const instance_type = if (type_store.lookupClassSemanticType(identity)) |class|
+        class.instance_type
+    else
+        borrowed.type_store.builtins.unknown;
+    return type_store.addFunctionDetailed(&.{}, instance_type, 0, .{}) catch
+        borrowed.type_store.builtins.unknown;
 }
 
 pub fn createFieldInitializer(

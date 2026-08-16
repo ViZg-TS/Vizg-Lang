@@ -2065,6 +2065,16 @@ test "HIR class enum and module initialization lowering preserves ordered semant
                     operation_index += 1;
                 };
                 try std.testing.expect((super_index orelse return error.MissingSuperCall) < (property_index orelse return error.MissingParameterProperty));
+            } else if (class.methods.len == 0 and class.instance_initializer == null) {
+                // BUG-0076: a class without an explicit constructor carries a
+                // synthesized zero-parameter () => instance_type signature
+                // instead of the unknown placeholder, so VZed projection can
+                // accept the class carrier.
+                const constructor = result.project.functions[class.constructor.index().?];
+                const signature = result.lookupFunctionSignature(constructor.signature_type) orelse return error.MissingFunctionSignature;
+                try std.testing.expectEqual(@as(usize, 0), signature.parameters.len);
+                const return_type = result.lookupType(signature.return_type) orelse return error.MissingConstructorReturnType;
+                try std.testing.expect(return_type.kind == .class);
             } else if (class.instance_initializer != null) {
                 const initializer = result.project.functions[class.instance_initializer.?.index().?];
                 for (initializer.blocks) |block| for (block.instructions) |instruction| switch (instruction.operation) {
