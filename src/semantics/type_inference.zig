@@ -504,6 +504,7 @@ fn lookupAccessSingle(
     return switch (object.kind) {
         .object => |properties| try lookupObjectProperty(properties, key, tree, store),
         .class, .class_constructor, .interface => try lookupDeclaredMember(object_type, key, tree, store),
+        .enum_type => |enum_type| try lookupEnumMember(enum_type, key, tree, store),
         .applied_generic => blk: {
             const target = try store.resolveAppliedTarget(object_type);
             const resolved = store.lookup(target) orelse break :blk invalidAccess(key, b.unknown);
@@ -546,6 +547,42 @@ fn lookupDeclaredMember(
         else
             member.type_id,
     };
+}
+
+/// Fixed TypeScript enum member access. A known member name resolves to its
+/// literal value type; a numeric literal index resolves to the reverse-mapped
+/// member name (string literal) when the enum is purely numeric. Unknown keys
+/// keep the deterministic unknown_property/invalid_index diagnostics.
+fn lookupEnumMember(
+    enum_type: types.NominalType,
+    key: AccessKey,
+    tree: ast_mod.Ast,
+    store: *types.TypeStore,
+) !OperatorResult {
+    const b = &store.builtins;
+    const semantic = store.lookupEnumSemanticType(enum_type.identity) orelse
+        return .{ .type_id = b.unknown, .valid = false, .issue = issueForKey(key) };
+    switch (key) {
+        .property => |name| {
+            for (semantic.members.members) |member| {
+                if (!std.mem.eql(u8, member.name, name)) continue;
+                return .{ .type_id = member.type_id };
+            }
+            return .{ .type_id = b.unknown, .valid = false, .issue = .unknown_property };
+        },
+        .index => {
+            const index = literalIndex(key, tree) orelse
+                return .{ .type_id = b.unknown, .valid = false, .issue = .invalid_index };
+            if (semantic.string_members) return .{ .type_id = b.unknown, .valid = false, .issue = .invalid_index };
+            for (semantic.members.members) |member| {
+                const member_type = store.lookup(member.type_id) orelse continue;
+                if (member_type.kind != .literal or member_type.kind.literal != .number) continue;
+                if (member_type.kind.literal.number == @as(f64, @floatFromInt(index)))
+                    return .{ .type_id = try store.intern(.{ .literal = .{ .string = member.name } }) };
+            }
+            return .{ .type_id = b.unknown, .valid = false, .issue = .invalid_index };
+        },
+    }
 }
 
 /// Own members win. Class bases are searched one-at-a-time; interface bases

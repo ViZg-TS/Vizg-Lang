@@ -214,11 +214,11 @@ pub fn collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
                 try putDeclared(&declared, allocator, symbol.id, interface_type.type_id);
             },
             .enum_ => {
-                const type_id = try type_store.intern(.{ .enum_type = .{ .identity = identity, .name = symbol.name } });
-                try putDeclared(&declared, allocator, symbol.id, type_id);
+                const enum_type = try type_store.createEnumSemanticType(identity, symbol.name);
+                try putDeclared(&declared, allocator, symbol.id, enum_type.type_id);
                 for (bind.symbols) |peer| {
                     if (peer.declaration == symbol.declaration and peer.kind == symbol.kind)
-                        try putDeclared(&declared, allocator, peer.id, type_id);
+                        try putDeclared(&declared, allocator, peer.id, enum_type.type_id);
                 }
             },
             else => {},
@@ -307,6 +307,7 @@ pub fn collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
             switch (symbol.kind) {
                 .class => try collectClassMembers(&context, symbol, &signatures),
                 .interface => try collectInterfaceMembers(&context, symbol),
+                .enum_ => try collectEnumMembers(&context, symbol),
                 else => {},
             }
         }
@@ -689,6 +690,77 @@ fn collectInterfaceMembers(context: *TypeResolutionContext, symbol: binder.Symbo
         .{ .members = members.items },
         .{ .extends = heritage.items },
     );
+}
+
+/// Collect fixed TypeScript enum members as properties of the enum nominal
+/// type. Member values follow the TypeScript fixed-enum rules: an explicit
+/// numeric initializer advances the implicit counter, a string initializer
+/// makes the member a string literal and disables the numeric reverse mapping
+/// for the whole enum, and members without an initializer receive the current
+/// counter. The member table is completed once so indexed/keyof consumers see
+/// an immutable canonical shape.
+fn collectEnumMembers(context: *TypeResolutionContext, symbol: binder.Symbol) !void {
+    const declaration = switch (context.tree.node(symbol.declaration).data) {
+        .EnumDeclaration => |value| value,
+        else => return,
+    };
+    var members: std.ArrayList(types.SemanticMember) = .empty;
+    defer members.deinit(context.allocator);
+    var next_numeric: f64 = 0;
+    var string_members = false;
+    for (declaration.members) |member_id| {
+        const member = context.tree.node(member_id).data.EnumMember;
+        if (member.name.len == 0) continue;
+        const member_type = if (member.initializer) |initializer| blk: {
+            const node = context.tree.node(initializer);
+            switch (node.data) {
+                .Literal => |literal| {
+                    const spelling = literal.value;
+                    if (spelling.len >= 2 and (spelling[0] == '\'' or spelling[0] == '"')) {
+                        string_members = true;
+                        break :blk try context.type_store.intern(.{ .literal = .{ .string = spelling } });
+                    }
+                    if (parseEnumNumber(context.allocator, spelling)) |number| {
+                        next_numeric = number + 1;
+                        break :blk try context.type_store.intern(.{ .literal = .{ .number = number } });
+                    }
+                    break :blk context.type_store.builtins.number;
+                },
+                else => break :blk context.type_store.builtins.number,
+            }
+        } else blk: {
+            const number = next_numeric;
+            next_numeric += 1;
+            break :blk try context.type_store.intern(.{ .literal = .{ .number = number } });
+        };
+        try members.append(context.allocator, .{
+            .name = member.name,
+            .type_id = member_type,
+            .readonly = true,
+        });
+    }
+    try context.type_store.completeEnumSemanticType(
+        types.SemanticDeclId.init(context.current_module, symbol.declaration),
+        .{ .members = members.items },
+        string_members,
+    );
+}
+
+fn parseEnumNumber(allocator: std.mem.Allocator, spelling: []const u8) ?f64 {
+    var cleaned: std.ArrayList(u8) = .empty;
+    defer cleaned.deinit(allocator);
+    for (spelling) |byte| if (byte != '_') cleaned.append(allocator, byte) catch return null;
+    const value = cleaned.items;
+    if (value.len > 2 and value[0] == '0') {
+        const base: ?u8 = switch (value[1]) {
+            'x', 'X' => 16,
+            'b', 'B' => 2,
+            'o', 'O' => 8,
+            else => null,
+        };
+        if (base) |radix| return @floatFromInt(std.fmt.parseInt(u64, value[2..], radix) catch return null);
+    }
+    return std.fmt.parseFloat(f64, value) catch null;
 }
 
 fn collectMethodSignature(

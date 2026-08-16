@@ -104,6 +104,7 @@ pub const NominalType = struct {
 
     // Semantic members stored separately in TypeStore for classes/interfaces
     // This is populated during class/interface analysis and used by member access lookup
+    members: MemberTable = .{},
 };
 
 pub const Visibility = enum {
@@ -206,6 +207,20 @@ pub const InterfaceSemanticType = struct {
     type_id: TypeId,
     members: MemberTable = .{},
     inheritance: InterfaceInheritance = .{},
+    completed: bool = false,
+};
+
+/// Authoritative fixed TypeScript enum foundation. Member collection fills the
+/// table later; the nominal TypeId stays stable across the value/type
+/// namespaces. `string_members` records whether any member has a string
+/// initializer (heterogeneous enums), which disables the numeric reverse
+/// mapping for those members.
+pub const EnumSemanticType = struct {
+    identity: SemanticDeclId,
+    name: []const u8,
+    type_id: TypeId,
+    members: MemberTable = .{},
+    string_members: bool = false,
     completed: bool = false,
 };
 /// Immutable function shape owned by TypeStore.

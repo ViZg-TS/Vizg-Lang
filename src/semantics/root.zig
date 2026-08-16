@@ -4059,3 +4059,38 @@ test "Goal 158 independent analyses run in parallel" {
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, goal158ThreadWorker, .{});
     for (threads) |thread| thread.join();
 }
+
+test "BUG-0075 fixed TypeScript enum members resolve semantically with reverse mapping" {
+    var result = try analyze(std.testing.allocator,
+        \\enum Direction { Up, Down = 4, Left }
+        \\const up: number = Direction.Up;
+        \\const down: number = Direction.Down;
+        \\const left: number = Direction.Left;
+        \\const name: string = Direction[4];
+        \\const missing: number = Direction.Nope;
+    );
+    defer result.deinit();
+    // Member access and the numeric reverse mapping are valid; only the
+    // unknown member is rejected with the stable unknown_property code.
+    var saw_unknown = false;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .unknown_property) saw_unknown = true;
+    }
+    try std.testing.expect(saw_unknown);
+    try std.testing.expectEqual(@as(usize, 1), result.semantic_diagnostics.len);
+}
+
+test "BUG-0075 string enum members are string literals and disable numeric reverse mapping" {
+    var result = try analyze(std.testing.allocator,
+        \\enum Color { Red = "red", Green = "green" }
+        \\const red: string = Color.Red;
+        \\const reverse: string = Color[0];
+    );
+    defer result.deinit();
+    var saw_invalid_index = false;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .invalid_index) saw_invalid_index = true;
+    }
+    try std.testing.expect(saw_invalid_index);
+    try std.testing.expectEqual(@as(usize, 1), result.semantic_diagnostics.len);
+}

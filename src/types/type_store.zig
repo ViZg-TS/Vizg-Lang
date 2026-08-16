@@ -18,6 +18,7 @@ pub const TypeStore = struct {
     /// colliding. Classes and interfaces have different semantic contracts.
     class_types: std.AutoHashMap(model.SemanticDeclId, model.ClassSemanticType),
     interface_types: std.AutoHashMap(model.SemanticDeclId, model.InterfaceSemanticType),
+    enum_types: std.AutoHashMap(model.SemanticDeclId, model.EnumSemanticType),
     generic_declarations: std.AutoHashMap(model.SemanticDeclId, model.GenericDeclaration),
     external_types: std.AutoHashMap(model.ExternalTypeIdentity, model.TypeId),
     external_type_origins: std.AutoHashMap(model.TypeId, model.ExternalTypeIdentity),
@@ -40,6 +41,7 @@ pub const TypeStore = struct {
             .signatures = .empty,
             .class_types = std.AutoHashMap(model.SemanticDeclId, model.ClassSemanticType).init(allocator),
             .interface_types = std.AutoHashMap(model.SemanticDeclId, model.InterfaceSemanticType).init(allocator),
+            .enum_types = std.AutoHashMap(model.SemanticDeclId, model.EnumSemanticType).init(allocator),
             .generic_declarations = std.AutoHashMap(model.SemanticDeclId, model.GenericDeclaration).init(allocator),
             .external_types = std.AutoHashMap(model.ExternalTypeIdentity, model.TypeId).init(allocator),
             .external_type_origins = std.AutoHashMap(model.TypeId, model.ExternalTypeIdentity).init(allocator),
@@ -55,6 +57,7 @@ pub const TypeStore = struct {
             copy.signatures.deinit(allocator);
             copy.class_types.deinit();
             copy.interface_types.deinit();
+            copy.enum_types.deinit();
             copy.generic_declarations.deinit();
             copy.external_types.deinit();
             copy.external_type_origins.deinit();
@@ -415,6 +418,49 @@ pub const TypeStore = struct {
         } else return error.InvalidInterfaceType;
         semantic.members = owned_members;
         semantic.inheritance = .{ .extends = try self.allocator.dupe(model.TypeId, inheritance.extends) };
+        semantic.completed = true;
+    }
+
+    /// Predeclare a fixed TypeScript enum foundation. The nominal TypeId is
+    /// shared by the value and type namespaces; member collection completes it
+    /// later without changing identity.
+    pub fn createEnumSemanticType(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        name: []const u8,
+    ) !model.EnumSemanticType {
+        if (self.enum_types.get(identity)) |existing| return existing;
+        const type_id = try self.intern(.{ .enum_type = .{ .identity = identity, .name = name } });
+        const result: model.EnumSemanticType = .{
+            .identity = identity,
+            .name = name,
+            .type_id = type_id,
+        };
+        try self.enum_types.put(identity, result);
+        return result;
+    }
+
+    pub fn lookupEnumSemanticType(self: *const TypeStore, identity: model.SemanticDeclId) ?model.EnumSemanticType {
+        return self.enum_types.get(identity);
+    }
+
+    /// Complete a predeclared enum while preserving its stable TypeId.
+    pub fn completeEnumSemanticType(
+        self: *TypeStore,
+        identity: model.SemanticDeclId,
+        members: model.MemberTable,
+        string_members: bool,
+    ) !void {
+        const semantic = self.enum_types.getPtr(identity) orelse return error.UnknownEnumIdentity;
+        if (semantic.completed) return error.SemanticTypeAlreadyCompleted;
+        const owned_members = try self.cloneMemberTable(members);
+        const record = self.storedMut(semantic.type_id) orelse return error.InvalidTypeId;
+        if (record.kind) |*kind| switch (kind.*) {
+            .enum_type => |*enum_type| enum_type.members = owned_members,
+            else => return error.InvalidEnumType,
+        } else return error.InvalidEnumType;
+        semantic.members = owned_members;
+        semantic.string_members = string_members;
         semantic.completed = true;
     }
 
