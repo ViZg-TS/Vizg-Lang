@@ -1,6 +1,7 @@
 const std = @import("std");
 const hir = @import("root.zig");
 const project_mod = @import("../project/root.zig");
+const types = @import("../types/root.zig");
 
 fn completedProject() !project_mod.Project {
     var project = project_mod.Project.init(std.testing.allocator);
@@ -2077,6 +2078,13 @@ test "HIR class enum and module initialization lowering preserves ordered semant
                 try std.testing.expect(return_type.kind == .class);
             } else if (class.instance_initializer != null) {
                 const initializer = result.project.functions[class.instance_initializer.?.index().?];
+                // BUG-0076 follow-up: the hidden field-initializer helper must
+                // carry a resolvable `(this) => void` signature instead of the
+                // unknown placeholder, so HIR projection can describe it.
+                const signature = result.lookupFunctionSignature(initializer.signature_type) orelse return error.MissingFunctionSignature;
+                try std.testing.expectEqual(@as(usize, 0), signature.parameters.len);
+                const return_type = result.lookupType(signature.return_type) orelse return error.MissingInitializerReturnType;
+                try std.testing.expect(return_type.matchesPrimitive(types.BuiltinKind.void));
                 for (initializer.blocks) |block| for (block.instructions) |instruction| switch (instruction.operation) {
                     .define_property => |define| switch (define.key) {
                         .static => |name| if (std.mem.eql(u8, name, "field")) {

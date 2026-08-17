@@ -209,6 +209,18 @@ pub fn createDefaultClassConstructor(inputs: Inputs, owner: ast.NodeId, derived:
     return function_id;
 }
 
+/// Synthesize the `(this) => void` signature for the hidden field-initializer
+/// helper. The helper loads `this` and defines declared fields; it is never
+/// callable from source, so a plain void-returning method shape suffices. A
+/// stable signature keeps the HIR projection able to describe every function,
+/// including classes that declare fields (BUG-0076 follow-up).
+fn fieldInitializerSignature(inputs: Inputs) model.TypeId {
+    const borrowed = inputs.builder.result.semanticResult();
+    const type_store: *types.TypeStore = @constCast(&borrowed.type_store);
+    return type_store.addFunctionDetailed(&.{}, borrowed.type_store.builtins.void, 0, .{}) catch
+        borrowed.type_store.builtins.unknown;
+}
+
 /// Synthesize the zero-parameter `() => instance_type` signature for a class
 /// without an explicit constructor. The class foundation owns the instance
 /// TypeId, so the signature is derived from the stable declaration identity
@@ -281,7 +293,7 @@ pub fn createFieldInitializer(
         .symbol = declarationId(inputs.module.id, owner),
         .kind = .method,
         .flags = .{ .dynamic_this = true },
-        .signature_type = inputs.builder.result.semanticResult().type_store.builtins.unknown,
+        .signature_type = fieldInitializerSignature(inputs),
         .bindings = try context.bindings.toOwnedSlice(inputs.builder.allocator),
         .captures = try context.captures.toOwnedSlice(inputs.builder.allocator),
         .places = try anf.finishPlaces(),
