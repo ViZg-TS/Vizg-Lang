@@ -8,6 +8,9 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Advanced the opaque intrinsic compatibility contract to v3 for consumers
+  migrating to target-neutral I/O handles; ViZG still assigns no intrinsic
+  names, signatures, effects, capabilities, ABI or legalization policy.
 - Source-module re-export chains now refresh downstream expression types after
   semantic linking instead of retaining a stale `VZG2004` unknown-recovery warning.
 - `await` now accepts `Promise<T>` operands and recursively resolves their

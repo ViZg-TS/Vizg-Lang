@@ -53,7 +53,7 @@ pub const ExternalSymbolId = enum(u64) {
 /// Optional stable host identity for a compiler-owned semantic operation.
 /// ViZG preserves this opaque value but does not assign names, ABI rules, or
 /// target legalization policy to it.
-pub const intrinsic_contract_version: u32 = 1;
+pub const intrinsic_contract_version: u32 = 3;
 
 pub const IntrinsicId = enum(u64) {
     _,

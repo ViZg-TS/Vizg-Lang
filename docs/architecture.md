@@ -68,6 +68,9 @@ consumer-owned. `intrinsic_contract_version` declares the exact catalog contract
 version accepted by this ViZG build so a consumer can reject incompatible
 catalogs before analysis; ViZG still does not interpret catalog entries.
 Versioned C exposure is additive and negotiated separately.
+The current value is 3; it accompanies VZed's target-neutral I/O-handle
+catalog migration while all intrinsic names, signatures and legalization
+policy remain consumer-owned.
 
 External-module API v3 adds a module-local type graph. A host assigns stable
 `external_type_id` values to named closed structural types, publishes their
