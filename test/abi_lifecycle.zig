@@ -322,6 +322,67 @@ test "source host binding C API preserves source declaration identity" {
     try std.testing.expect(saw_host_binding);
 }
 
+test "source language item C API resolves versioned deterministic HIR identities" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    const name = "MovedSequence";
+    var items = [_]c.Vizg_SourceLanguageItem{
+        .{ .language_item_id = 2, .module_id = 52, .exported_name_ptr = name.ptr, .exported_name_len = name.len, .namespace_kind = c.VIZG_LANGUAGE_ITEM_NAMESPACE_TYPE, .reserved = .{ 0, 0, 0, 0 } },
+        .{ .language_item_id = 1, .module_id = 52, .exported_name_ptr = name.ptr, .exported_name_len = name.len, .namespace_kind = c.VIZG_LANGUAGE_ITEM_NAMESPACE_VALUE, .reserved = .{ 0, 0, 0, 0 } },
+    };
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_register_source_language_items(project, &items, items.len));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), c.vizg_project_register_source_language_items(project, &items[1], 1));
+
+    var root = projectSource(52, "moved/std.ts", "export class MovedSequence<T> {}", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+    const result = try finishProject(project);
+
+    var count: usize = 0;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_hir_language_item_count(result, 4, &count));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_language_item_count(result, c.VIZG_HIR_DETAIL_API_VERSION, &count));
+    try std.testing.expectEqual(@as(usize, 2), count);
+    for (0..count) |index| {
+        var item: c.Vizg_HirLanguageItem = undefined;
+        try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_language_item_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &item));
+        try std.testing.expectEqual(@as(u64, index + 1), item.language_item_id);
+        try std.testing.expectEqual(@as(u64, 52), item.target.declaration_module_id);
+        try std.testing.expectEqualStrings(name, item.exported_name_ptr[0..item.exported_name_len]);
+    }
+}
+
+test "missing source language item fails closed with a stable project diagnostic" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    const name = "Missing";
+    var item: c.Vizg_SourceLanguageItem = .{
+        .language_item_id = 1,
+        .module_id = 53,
+        .exported_name_ptr = name.ptr,
+        .exported_name_len = name.len,
+        .namespace_kind = c.VIZG_LANGUAGE_ITEM_NAMESPACE_VALUE,
+        .reserved = .{ 0, 0, 0, 0 },
+    };
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_register_source_language_items(project, &item, 1));
+    var root = projectSource(53, "invalid-std.ts", "export const Other = 1;", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+    const result = try finishProject(project);
+
+    var summary: c.Vizg_ProjectResultSummary = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_summary(result, &summary));
+    try std.testing.expectEqual(@as(u8, 1), summary.has_project_errors);
+    var diagnostic: c.Vizg_ProjectDiagnostic = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_result_diagnostic(result, 0, &diagnostic));
+    try std.testing.expectEqual(@as(u32, 8002), diagnostic.code);
+    var count: usize = 0;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_hir_language_item_count(result, c.VIZG_HIR_DETAIL_API_VERSION, &count));
+}
+
 test "versioned C HIR consumer reads immutable result records" {
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();
@@ -931,7 +992,7 @@ test "external-module API v2 publishes stable function declarations to HIR" {
     );
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
-        c.vizg_hir_external_declaration_detail_at(result, 5, 0, &external_detail),
+        c.vizg_hir_external_declaration_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION + 1, 0, &external_detail),
     );
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),

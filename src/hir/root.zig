@@ -42,6 +42,7 @@ pub const HirResult = result.HirResult;
 pub const HirProject = model.HirProject;
 pub const HirModule = model.HirModule;
 pub const HirExternalDeclaration = model.HirExternalDeclaration;
+pub const HirLanguageItem = model.HirLanguageItem;
 pub const HirEntity = model.HirEntity;
 pub const HirFunction = model.HirFunction;
 pub const HirBinding = model.HirBinding;

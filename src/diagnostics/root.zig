@@ -39,6 +39,9 @@ pub const DiagnosticCode = enum {
     const_assignment,
     parse_recursion_limit_reached,
     global_ambient_collision,
+    missing_language_item,
+    language_item_namespace_mismatch,
+    duplicate_language_item_target,
 };
 
 pub const DiagnosticPhase = enum {
@@ -185,6 +188,9 @@ pub fn diagnosticCodeId(code: DiagnosticCode) []const u8 {
         .const_assignment => "VZG6010",
         .parse_recursion_limit_reached => "VZG2003",
         .global_ambient_collision => "VZG8001",
+        .missing_language_item => "VZG8002",
+        .language_item_namespace_mismatch => "VZG8003",
+        .duplicate_language_item_target => "VZG8004",
     };
 }
 
@@ -220,5 +226,8 @@ pub fn diagnosticCodeName(code: DiagnosticCode) []const u8 {
         .const_assignment => "const_assignment",
         .parse_recursion_limit_reached => "parse_recursion_limit_reached",
         .global_ambient_collision => "global_ambient_collision",
+        .missing_language_item => "missing_language_item",
+        .language_item_namespace_mismatch => "language_item_namespace_mismatch",
+        .duplicate_language_item_target => "duplicate_language_item_target",
     };
 }

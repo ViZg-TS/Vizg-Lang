@@ -67,6 +67,27 @@ pub const IntrinsicId = enum(u64) {
     }
 };
 
+/// Stable host-assigned identity for a semantic role published by source.
+/// This domain is deliberately distinct from intrinsics and declarations.
+pub const language_item_contract_version: u32 = 1;
+
+pub const LanguageItemId = enum(u64) {
+    _,
+
+    pub fn init(value_: u64) LanguageItemId {
+        return @enumFromInt(value_);
+    }
+
+    pub fn value(self: LanguageItemId) u64 {
+        return @intFromEnum(self);
+    }
+};
+
+pub const LanguageItemNamespace = enum(u32) {
+    value,
+    type,
+};
+
 /// Stable host-assigned identity for one named type in a source-less module.
 /// This identity is distinct from external symbols and from ViZG-local TypeIds.
 pub const ExternalTypeId = enum(u64) {
@@ -304,11 +325,23 @@ pub const SourceHostBinding = struct {
     host_binding_id: u64,
 };
 
+/// Borrowed locator for one host-authorized semantic role implemented by a
+/// source-module export. The host owns authorization; ViZG only resolves and
+/// preserves the assigned identity. Retaining APIs copy `exported_name`.
+pub const SourceLanguageItem = struct {
+    id: LanguageItemId,
+    module_id: ModuleId,
+    exported_name: []const u8,
+    namespace: LanguageItemNamespace,
+};
+
 comptime {
     if (@sizeOf(ModuleId) != @sizeOf(u64)) @compileError("ModuleId must remain C-representable as u64");
     if (@sizeOf(ExternalModuleId) != @sizeOf(u64)) @compileError("ExternalModuleId must remain C-representable as u64");
     if (@sizeOf(ExternalSymbolId) != @sizeOf(u64)) @compileError("ExternalSymbolId must remain C-representable as u64");
     if (@sizeOf(IntrinsicId) != @sizeOf(u64)) @compileError("IntrinsicId must remain C-representable as u64");
+    if (@sizeOf(LanguageItemId) != @sizeOf(u64)) @compileError("LanguageItemId must remain C-representable as u64");
+    if (@sizeOf(LanguageItemNamespace) != @sizeOf(u32)) @compileError("LanguageItemNamespace must remain C-representable as u32");
     if (@sizeOf(RequestId) != @sizeOf(u64)) @compileError("RequestId must remain C-representable as u64");
     if (@sizeOf(SourceKind) != @sizeOf(u32)) @compileError("SourceKind must remain C-representable as u32");
     if (@sizeOf(RequestOperation) != @sizeOf(u32)) @compileError("RequestOperation must remain C-representable as u32");

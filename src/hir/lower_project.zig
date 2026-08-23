@@ -65,6 +65,7 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
         };
     }
     try lowerExternalDeclarations(&builder, project);
+    try lowerLanguageItems(&builder, project);
     provenance.attach(&builder, project) catch |err| switch (err) {
         error.ResourceLimit => {
             const failure = try limitReport(allocator, builder.violation.?);
@@ -99,6 +100,30 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
     try builder.finish();
     try result.seal();
     return .{ .result = result };
+}
+
+fn lowerLanguageItems(builder: *builder_mod.Builder, project: *const project_mod.Project) !void {
+    var descriptors: std.ArrayList(project_mod.SourceLanguageItem) = .empty;
+    defer descriptors.deinit(builder.allocator);
+    try descriptors.appendSlice(builder.allocator, project.sourceLanguageItems());
+    std.mem.sort(project_mod.SourceLanguageItem, descriptors.items, {}, lessLanguageItem);
+    for (descriptors.items) |descriptor| {
+        const identity = switch (project_mod.session.resolveLanguageItem(builder.result.semanticResult(), descriptor)) {
+            .resolved => |value| value,
+            .missing => return error.MissingLanguageItem,
+            .namespace_mismatch => return error.LanguageItemNamespaceMismatch,
+            .duplicate => return error.DuplicateLanguageItemTarget,
+        };
+        try builder.appendLanguageItem(.{
+            .id = descriptor.id,
+            .exported_name = try builder.copyString(descriptor.exported_name),
+            .target = lower_module.semanticIdentity(identity),
+        });
+    }
+}
+
+fn lessLanguageItem(_: void, left: project_mod.SourceLanguageItem, right: project_mod.SourceLanguageItem) bool {
+    return left.id.value() < right.id.value();
 }
 
 fn lowerExternalDeclarations(builder: *builder_mod.Builder, project: *const project_mod.Project) !void {

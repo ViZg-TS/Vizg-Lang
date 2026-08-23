@@ -38,6 +38,7 @@ LAYOUT(Vizg_ExternalModuleV3)
 LAYOUT(Vizg_ExternalExportV4)
 LAYOUT(Vizg_ExternalModuleV4)
 LAYOUT(Vizg_SourceHostBinding)
+LAYOUT(Vizg_SourceLanguageItem)
 LAYOUT(Vizg_AmbientGlobal)
 LAYOUT(Vizg_AmbientMember)
 LAYOUT(Vizg_AmbientGlobalV2)
@@ -62,6 +63,7 @@ LAYOUT(Vizg_HirBlockDetail)
 LAYOUT(Vizg_HirBlockParameter)
 LAYOUT(Vizg_HirOriginDetail)
 LAYOUT(Vizg_HirSemanticIdentity)
+LAYOUT(Vizg_HirLanguageItem)
 LAYOUT(Vizg_HirExternalDeclarationDetail)
 LAYOUT(Vizg_HirModuleDetail)
 LAYOUT(Vizg_HirModuleDependency)
@@ -144,6 +146,11 @@ size_t vizg_c_fields_Vizg_ExternalModuleV2(void) {
 size_t vizg_c_fields_Vizg_SourceHostBinding(void) {
     return F(Vizg_SourceHostBinding, name_ptr, 1) + F(Vizg_SourceHostBinding, name_len, 2) +
         F(Vizg_SourceHostBinding, host_binding_id, 3) + F(Vizg_SourceHostBinding, reserved, 4);
+}
+size_t vizg_c_fields_Vizg_SourceLanguageItem(void) {
+    return F(Vizg_SourceLanguageItem, language_item_id, 1) + F(Vizg_SourceLanguageItem, module_id, 2) +
+        F(Vizg_SourceLanguageItem, exported_name_ptr, 3) + F(Vizg_SourceLanguageItem, exported_name_len, 4) +
+        F(Vizg_SourceLanguageItem, namespace_kind, 5) + F(Vizg_SourceLanguageItem, reserved, 6);
 }
 size_t vizg_c_fields_Vizg_AmbientGlobal(void) {
     return F(Vizg_AmbientGlobal, name_ptr, 1) + F(Vizg_AmbientGlobal, name_len, 2) +
@@ -300,6 +307,12 @@ size_t vizg_c_fields_Vizg_HirSemanticIdentity(void) {
         F(Vizg_HirSemanticIdentity, has_host_binding_id, 9) +
         F(Vizg_HirSemanticIdentity, reserved, 10) +
         F(Vizg_HirSemanticIdentity, host_binding_id, 11);
+}
+size_t vizg_c_fields_Vizg_HirLanguageItem(void) {
+    return F(Vizg_HirLanguageItem, language_item_id, 1) +
+        F(Vizg_HirLanguageItem, exported_name_ptr, 2) +
+        F(Vizg_HirLanguageItem, exported_name_len, 3) +
+        F(Vizg_HirLanguageItem, target, 4);
 }
 size_t vizg_c_fields_Vizg_HirExternalDeclarationDetail(void) {
     return F(Vizg_HirExternalDeclarationDetail, module_id, 1) +

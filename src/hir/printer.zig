@@ -1,4 +1,4 @@
-//! Deterministic debug and snapshot rendering for HIR v1.
+//! Deterministic debug and snapshot rendering for versioned HIR.
 //! This text is intentionally not a serialization or public ABI.
 
 const std = @import("std");
@@ -67,6 +67,17 @@ pub fn write(
         project.regions.len,
     });
     if (options.brief) return;
+
+    for (project.language_items) |item| {
+        try writer.print("language-item 0x{x} name=", .{item.id.value()});
+        try writeQuoted(writer, item.exported_name);
+        try writer.print(" declaration={}:{} type={} namespace={s}\n", .{
+            item.target.declaration.module_id,
+            item.target.declaration.declaration_id,
+            item.target.type_id,
+            @tagName(item.target.namespace),
+        });
+    }
 
     for (project.modules) |module| {
         try writer.print("module {} name=", .{@intFromEnum(module.module_id)});

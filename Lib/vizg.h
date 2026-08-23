@@ -9,9 +9,10 @@
 #define VIZG_ABI_VERSION 1u
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
-#define VIZG_HIR_DETAIL_API_VERSION 4u
+#define VIZG_HIR_DETAIL_API_VERSION 5u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
 #define VIZG_INTRINSIC_CONTRACT_VERSION 3u
+#define VIZG_LANGUAGE_ITEM_CONTRACT_VERSION 1u
 #define VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN 0u
 #define VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED 1u
 #define VIZG_HIR_ID_NONE UINT64_MAX
@@ -86,6 +87,8 @@
 #define VIZG_HIR_SEMANTIC_NAMESPACE_VALUE 0u
 #define VIZG_HIR_SEMANTIC_NAMESPACE_TYPE 1u
 #define VIZG_HIR_SEMANTIC_NAMESPACE_NAMESPACE 2u
+#define VIZG_LANGUAGE_ITEM_NAMESPACE_VALUE 0u
+#define VIZG_LANGUAGE_ITEM_NAMESPACE_TYPE 1u
 #define VIZG_HIR_BINDING_STATE_HOISTED_UNDEFINED 0u
 #define VIZG_HIR_BINDING_STATE_HOISTED_FUNCTION 1u
 #define VIZG_HIR_BINDING_STATE_TEMPORAL_DEAD_ZONE 2u
@@ -562,6 +565,16 @@ typedef struct Vizg_SourceHostBinding {
     uint64_t host_binding_id;
     uint8_t reserved[8];
 } Vizg_SourceHostBinding;
+
+/* Module-qualified locator for a host-authorized source language item. */
+typedef struct Vizg_SourceLanguageItem {
+    uint64_t language_item_id;
+    uint64_t module_id;
+    const char *exported_name_ptr;
+    size_t exported_name_len;
+    uint32_t namespace_kind;
+    uint8_t reserved[4];
+} Vizg_SourceLanguageItem;
 
 typedef struct Vizg_ProjectResultSummary {
     size_t module_count;
@@ -1041,6 +1054,13 @@ typedef struct Vizg_HirSemanticIdentity {
     uint64_t host_binding_id;
 } Vizg_HirSemanticIdentity;
 
+typedef struct Vizg_HirLanguageItem {
+    uint64_t language_item_id;
+    const char *exported_name_ptr;
+    size_t exported_name_len;
+    Vizg_HirSemanticIdentity target;
+} Vizg_HirLanguageItem;
+
 /* Added in HIR detail API v3. Strings are borrowed from the immutable project
  * result and remain valid until vizg_project_result_destroy(). flags bit 0
  * indicates that intrinsic_id is present. */
@@ -1176,6 +1196,8 @@ Vizg_ProjectStatus vizg_project_register_ambient_globals_v2(
     Vizg_Project *project, const Vizg_AmbientGlobalV2 *globals, size_t count);
 Vizg_ProjectStatus vizg_project_register_source_host_bindings(
     Vizg_Project *project, const Vizg_SourceHostBinding *bindings, size_t count);
+Vizg_ProjectStatus vizg_project_register_source_language_items(
+    Vizg_Project *project, const Vizg_SourceLanguageItem *items, size_t count);
 Vizg_ProjectStatus vizg_project_step(
     Vizg_Project *project, Vizg_ProjectStep *out_step);
 Vizg_ProjectStatus vizg_project_respond_source(
@@ -1297,6 +1319,13 @@ Vizg_ProjectStatus vizg_hir_module_export_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     size_t module_index, size_t export_index,
     Vizg_HirModuleExport *out_export);
+/* HIR detail API v5 exposes resolved source language-item identities. */
+Vizg_ProjectStatus vizg_hir_language_item_count(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    size_t *out_count);
+Vizg_ProjectStatus vizg_hir_language_item_at(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    size_t index, Vizg_HirLanguageItem *out_item);
 Vizg_ProjectStatus vizg_hir_binding_detail_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     size_t binding_index, Vizg_HirBindingDetail *out_detail);

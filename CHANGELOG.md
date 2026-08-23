@@ -8,6 +8,13 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Added the source language-item contract v1 and HIR schema v2. Hosts register
+  stable role IDs against a module-qualified export and value/type namespace;
+  ViZG resolves those locators to exact semantic identities without assigning
+  built-in policy or matching canonical source names. Missing and namespace-
+  incompatible roles report `VZG8002`/`VZG8003`; duplicate registrations fail
+  deterministically. Official ABI v1 gains additive registration plus HIR
+  detail API v5 enumeration while preserving `Vizg_SourceHostBinding`.
 - Advanced the opaque intrinsic compatibility contract to v3 for consumers
   migrating to target-neutral I/O handles; ViZG still assigns no intrinsic
   names, signatures, effects, capabilities, ABI or legalization policy.

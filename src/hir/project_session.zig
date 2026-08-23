@@ -101,3 +101,33 @@ test "finished project retains owned HIR and borrowed semantics" {
     try std.testing.expect(project.hirResult() != null);
     try std.testing.expect(project.semanticResult() != null);
 }
+
+test "resolved source language items are deterministic immutable HIR identities" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{
+        .{ .id = .init(2), .module_id = .init(240), .exported_name = "MovedSequence", .namespace = .type },
+        .{ .id = .init(1), .module_id = .init(240), .exported_name = "MovedSequence", .namespace = .value },
+    });
+    try project.addRoot(.{
+        .id = .init(240),
+        .logical_name = "moved/replacement-std.ts",
+        .bytes = "export class MovedSequence<T> {}",
+        .kind = .module,
+    });
+    while (try project.step() != .complete) {}
+
+    var outcome = try derive(&project, .{});
+    defer outcome.deinit();
+    const result = outcome.result;
+    try std.testing.expectEqual(@as(usize, 2), result.project.language_items.len);
+    try std.testing.expectEqual(@as(u64, 1), result.project.language_items[0].id.value());
+    try std.testing.expectEqual(@as(u64, 2), result.project.language_items[1].id.value());
+    try std.testing.expectEqualStrings("MovedSequence", result.project.language_items[0].exported_name);
+    try std.testing.expectEqual(@import("model.zig").HirSemanticNamespace.value, result.project.language_items[0].target.namespace);
+    try std.testing.expectEqual(@import("model.zig").HirSemanticNamespace.type, result.project.language_items[1].target.namespace);
+
+    const view = try @import("consumer.zig").View.open(result, @import("consumer.zig").api_version);
+    try std.testing.expectEqual(@as(usize, 2), view.languageItems().len);
+    try std.testing.expectEqual(result.project.language_items[1].target.declaration, (try view.languageItem(.init(2))).target.declaration);
+}

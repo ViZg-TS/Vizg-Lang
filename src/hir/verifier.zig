@@ -1,4 +1,4 @@
-//! Deterministic structural, semantic, and canonical HIR v1 verification.
+//! Deterministic structural, semantic, and canonical HIR verification.
 
 const std = @import("std");
 const builder_mod = @import("builder.zig");
@@ -33,6 +33,14 @@ pub fn verifyBuilder(allocator: std.mem.Allocator, builder: *const builder_mod.B
     if (builder.result.project.version != model.schema_version) return .internal_invariant;
     if (builder.modules.items.len > builder.result.semanticResult().modules.len) return .invalid_semantic_reference;
     if (!validMetadata(builder)) return .invalid_semantic_reference;
+
+    for (builder.language_items.items, 0..) |item, index| {
+        if (item.id.value() == 0 or item.exported_name.len == 0 or
+            item.target.declaration.external or item.target.external_module_id != null or
+            item.target.external_symbol_id != null or !hasModule(builder, .init(item.target.declaration.module_id)) or
+            !validType(builder, item.target.type_id)) return .invalid_semantic_reference;
+        for (builder.language_items.items[0..index]) |previous| if (previous.id == item.id) return .internal_invariant;
+    }
 
     for (builder.modules.items, 0..) |module, module_index| {
         if (builder.result.semanticResult().lookupModule(module.module_id.value()) == null) return .invalid_semantic_reference;

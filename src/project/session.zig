@@ -111,6 +111,7 @@ pub const Project = struct {
     global_exports_derived: bool = false,
     global_derivation_diagnostics: std.ArrayList(ProjectDiagnostic) = .empty,
     source_host_bindings: std.ArrayList(contracts.SourceHostBinding) = .empty,
+    source_language_items: std.ArrayList(contracts.SourceLanguageItem) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Project {
         return initWithLimits(allocator, .{});
@@ -154,6 +155,8 @@ pub const Project = struct {
         self.global_derivation_diagnostics.deinit(self.allocator);
         for (self.source_host_bindings.items) |binding| self.allocator.free(binding.name);
         self.source_host_bindings.deinit(self.allocator);
+        for (self.source_language_items.items) |item| self.allocator.free(item.exported_name);
+        self.source_language_items.deinit(self.allocator);
         self.graph.deinit();
         self.requests.deinit();
         self.* = undefined;
@@ -276,6 +279,52 @@ pub const Project = struct {
                 .host_binding_id = binding.host_binding_id,
             });
         }
+    }
+
+    /// Register host-authorized source language-item locators before any
+    /// source is submitted. Role and target identities are unique, names are
+    /// copied, and semantic resolution occurs only after the project graph is
+    /// complete.
+    pub fn registerSourceLanguageItems(self: *Project, items: []const contracts.SourceLanguageItem) !void {
+        try self.ensureOpen();
+        if (self.modules.items.len > 0) return error.LanguageItemsLateRegistration;
+        for (items, 0..) |item, index| {
+            if (item.id.value() == 0 or item.exported_name.len == 0) return error.InvalidLanguageItem;
+            for (self.source_language_items.items) |existing| {
+                if (existing.id == item.id) return error.DuplicateLanguageItemId;
+                if (existing.module_id == item.module_id and
+                    existing.namespace == item.namespace and
+                    std.mem.eql(u8, existing.exported_name, item.exported_name))
+                    return error.DuplicateLanguageItemTarget;
+            }
+            for (items[0..index]) |existing| {
+                if (existing.id == item.id) return error.DuplicateLanguageItemId;
+                if (existing.module_id == item.module_id and
+                    existing.namespace == item.namespace and
+                    std.mem.eql(u8, existing.exported_name, item.exported_name))
+                    return error.DuplicateLanguageItemTarget;
+            }
+        }
+
+        var staged: std.ArrayList(contracts.SourceLanguageItem) = .empty;
+        defer staged.deinit(self.allocator);
+        errdefer for (staged.items) |item| self.allocator.free(item.exported_name);
+        try staged.ensureTotalCapacity(self.allocator, items.len);
+        for (items) |item| {
+            const name_copy = try self.allocator.dupe(u8, item.exported_name);
+            errdefer self.allocator.free(name_copy);
+            staged.appendAssumeCapacity(.{
+                .id = item.id,
+                .module_id = item.module_id,
+                .exported_name = name_copy,
+                .namespace = item.namespace,
+            });
+        }
+        try self.source_language_items.appendSlice(self.allocator, staged.items);
+    }
+
+    pub fn sourceLanguageItems(self: *const Project) []const contracts.SourceLanguageItem {
+        return self.source_language_items.items;
     }
 
     pub fn supplySource(self: *Project, source: contracts.ModuleSource) !void {
@@ -1156,6 +1205,35 @@ pub const Project = struct {
             .logical_name = item.logical_name,
             .span = item.span,
         });
+
+        try self.appendLanguageItemDiagnostics(result);
+    }
+
+    fn appendLanguageItemDiagnostics(self: *Project, result: *const semantics.BorrowedProjectSemanticResult) !void {
+        var items: std.ArrayList(contracts.SourceLanguageItem) = .empty;
+        defer items.deinit(self.allocator);
+        try items.appendSlice(self.allocator, self.source_language_items.items);
+        std.mem.sort(contracts.SourceLanguageItem, items.items, {}, lessLanguageItemId);
+        for (items.items) |item| {
+            const resolution = resolveLanguageItem(result, item);
+            const code: @import("../diagnostics/root.zig").DiagnosticCode, const message: []const u8 = switch (resolution) {
+                .resolved => continue,
+                .missing => .{ .missing_language_item, "required language item export is missing" },
+                .namespace_mismatch => .{ .language_item_namespace_mismatch, "language item export does not provide the required namespace" },
+                .duplicate => .{ .duplicate_language_item_target, "language item locator resolves to multiple semantic exports" },
+            };
+            const module = self.find(item.module_id);
+            const logical_name = if (module) |value| if (value.source) |source| source.logical_name else "" else "";
+            try self.appendProjectDiagnostic(.{
+                .module_id = item.module_id,
+                .phase = .project,
+                .severity = .@"error",
+                .code = code,
+                .message = message,
+                .logical_name = logical_name,
+                .span = .{ .start = 0, .end = 0, .line = 0, .column = 0 },
+            });
+        }
     }
 
     fn appendProjectDiagnostic(self: *Project, candidate: ProjectDiagnostic) !void {
@@ -1427,12 +1505,54 @@ pub const Project = struct {
         for (self.external_modules.items) |module| {
             for (module.descriptor.exports) |item| std.debug.assert(item.name.len != 0 and item.namespace.isValid());
         }
+        for (self.source_language_items.items, 0..) |item, index| {
+            std.debug.assert(item.id.value() != 0 and item.exported_name.len != 0);
+            for (self.source_language_items.items[0..index]) |previous| {
+                std.debug.assert(previous.id != item.id);
+                std.debug.assert(previous.module_id != item.module_id or previous.namespace != item.namespace or
+                    !std.mem.eql(u8, previous.exported_name, item.exported_name));
+            }
+        }
         if (self.project_semantics != null) {
             for (self.modules.items) |module| std.debug.assert(module.state == .complete or module.state == .failed);
         }
         std.debug.assert((self.finish_result != null) == self.finished);
     }
 };
+
+pub const LanguageItemResolution = union(enum) {
+    resolved: semantics.SemanticIdentity,
+    missing,
+    namespace_mismatch,
+    duplicate,
+};
+
+fn lessLanguageItemId(_: void, left: contracts.SourceLanguageItem, right: contracts.SourceLanguageItem) bool {
+    return left.id.value() < right.id.value();
+}
+
+pub fn resolveLanguageItem(
+    result: *const semantics.BorrowedProjectSemanticResult,
+    descriptor: contracts.SourceLanguageItem,
+) LanguageItemResolution {
+    var resolved: ?semantics.SemanticIdentity = null;
+    var name_exists = false;
+    for (result.exports) |item| {
+        if (item.module_id != descriptor.module_id.value() or
+            !std.mem.eql(u8, item.name, descriptor.exported_name)) continue;
+        name_exists = true;
+        const candidate: ?semantics.SemanticIdentity = switch (descriptor.namespace) {
+            .value => if (!item.type_only and item.identity.namespace == .value) item.identity else null,
+            .type => item.type_identity orelse if (item.identity.namespace == .type) item.identity else null,
+        };
+        if (candidate) |identity| {
+            if (resolved != null) return .duplicate;
+            resolved = identity;
+        }
+    }
+    if (resolved) |identity| return .{ .resolved = identity };
+    return if (name_exists) .namespace_mismatch else .missing;
+}
 
 fn canonicalPhase(item: diagnostics.Diagnostic) ProjectDiagnosticPhase {
     return switch (item.phase) {
@@ -2884,6 +3004,95 @@ test "source host binding registration rejects invalid duplicate and late descri
         error.SourceHostBindingsLateRegistration,
         project.registerSourceHostBindings(&.{.{ .name = "late", .host_binding_id = 3 }}),
     );
+}
+
+test "source language item registration owns locators and rejects invalid duplicate and late descriptors" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+
+    try std.testing.expectError(error.DuplicateLanguageItemId, project.registerSourceLanguageItems(&.{
+        .{ .id = .init(1), .module_id = .init(20), .exported_name = "First", .namespace = .value },
+        .{ .id = .init(1), .module_id = .init(20), .exported_name = "Second", .namespace = .value },
+    }));
+    try std.testing.expectEqual(@as(usize, 0), project.sourceLanguageItems().len);
+
+    var exported_name = [_]u8{ 'R', 'e', 'n', 'a', 'm', 'e', 'd' };
+    try project.registerSourceLanguageItems(&.{.{
+        .id = .init(1),
+        .module_id = .init(20),
+        .exported_name = &exported_name,
+        .namespace = .value,
+    }});
+    exported_name[0] = 'X';
+    try std.testing.expectEqualStrings("Renamed", project.sourceLanguageItems()[0].exported_name);
+    try std.testing.expectError(error.InvalidLanguageItem, project.registerSourceLanguageItems(&.{.{
+        .id = .init(0),
+        .module_id = .init(20),
+        .exported_name = "invalid",
+        .namespace = .value,
+    }}));
+    try std.testing.expectError(error.DuplicateLanguageItemId, project.registerSourceLanguageItems(&.{.{
+        .id = .init(1),
+        .module_id = .init(21),
+        .exported_name = "Other",
+        .namespace = .value,
+    }}));
+    try std.testing.expectError(error.DuplicateLanguageItemTarget, project.registerSourceLanguageItems(&.{.{
+        .id = .init(2),
+        .module_id = .init(20),
+        .exported_name = "Renamed",
+        .namespace = .value,
+    }}));
+
+    try project.addRoot(.{ .id = .init(20), .logical_name = "renamed.ts", .bytes = "export class Renamed {}" });
+    try std.testing.expectError(error.LanguageItemsLateRegistration, project.registerSourceLanguageItems(&.{.{
+        .id = .init(3),
+        .module_id = .init(20),
+        .exported_name = "Late",
+        .namespace = .value,
+    }}));
+}
+
+test "source language items resolve by module export and namespace without canonical spelling" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{
+        .{ .id = .init(1), .module_id = .init(30), .exported_name = "RenamedSequence", .namespace = .value },
+        .{ .id = .init(2), .module_id = .init(30), .exported_name = "RenamedSequence", .namespace = .type },
+    });
+    try project.addRoot(.{
+        .id = .init(30),
+        .logical_name = "replacement-std.ts",
+        .bytes = "export class RenamedSequence<T> {}",
+    });
+    while (try project.step() != .complete) {}
+    const finished = try project.finish();
+    try std.testing.expect(!finished.has_failures);
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+    const semantic = project.semanticResult().?;
+    try std.testing.expect(resolveLanguageItem(semantic, project.sourceLanguageItems()[0]) == .resolved);
+    try std.testing.expect(resolveLanguageItem(semantic, project.sourceLanguageItems()[1]) == .resolved);
+}
+
+test "missing and namespace-incompatible source language items produce stable project diagnostics" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{
+        .{ .id = .init(2), .module_id = .init(40), .exported_name = "TypeSurface", .namespace = .value },
+        .{ .id = .init(1), .module_id = .init(40), .exported_name = "Missing", .namespace = .value },
+    });
+    try project.addRoot(.{
+        .id = .init(40),
+        .logical_name = "invalid-std.ts",
+        .bytes = "export interface TypeSurface {}",
+    });
+    while (try project.step() != .complete) {}
+    _ = try project.finish();
+    try std.testing.expectEqual(@as(usize, 2), project.diagnostics().len);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.missing_language_item, project.diagnostics()[0].code);
+    try std.testing.expectEqual(diagnostics.DiagnosticCode.language_item_namespace_mismatch, project.diagnostics()[1].code);
+    try std.testing.expectEqualStrings("VZG8002", diagnostics.diagnosticCodeId(project.diagnostics()[0].code));
+    try std.testing.expectEqualStrings("VZG8003", diagnostics.diagnosticCodeId(project.diagnostics()[1].code));
 }
 
 test "ambient registration owns recursive member descriptors and rejects mutable self references" {

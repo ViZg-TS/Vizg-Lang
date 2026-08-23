@@ -3106,7 +3106,7 @@ fn expectStableSnapshot(factory: anytype) !void {
     const second = try hir.printAlloc(std.testing.allocator, &lowered.project, lowered.identity_domain, .canonical);
     defer std.testing.allocator.free(second);
     try std.testing.expectEqualStrings(first, second);
-    try std.testing.expect(std.mem.startsWith(u8, first, "hir-v1 "));
+    try std.testing.expect(std.mem.startsWith(u8, first, "hir-v2 "));
 }
 
 fn restLoweringProject() !project_mod.Project {

@@ -144,7 +144,7 @@ fn bindingForSymbol(items: []const lower_body.SymbolBinding, symbol: @import("..
     return null;
 }
 
-fn semanticIdentity(identity: semantics.SemanticIdentity) model.HirSemanticIdentity {
+pub fn semanticIdentity(identity: semantics.SemanticIdentity) model.HirSemanticIdentity {
     return .{
         .symbol_id = identity.symbol_id,
         .declaration = identity.declaration,

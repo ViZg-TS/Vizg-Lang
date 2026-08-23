@@ -12,14 +12,19 @@ accessor. Records and strings are borrowed from the immutable
 | HIR payload | 1 | Operation and terminator payload projections. |
 | HIR detail | 2 | Type, signature, module, binding, storage, capture, region and origin projections. |
 | HIR detail | 3 | All detail-v2 projections plus `Vizg_HirExternalDeclarationDetail`, including stable module/symbol identity and optional opaque intrinsic identity. |
+| HIR detail | 4 | External structural type identity/member projection. |
+| HIR detail | 5 | Resolved source language-item count and immutable identity records. |
 | External module producer | 3 | Ordered structural types and signature references supplied by the host. |
+| External module producer | 4 | Stable opaque intrinsic identity on source-less exports. |
 
-Unchanged detail accessors accept requested versions 2 and 3. The external
-declaration detail accessor requires version 3. Unsupported older or future
+Unchanged detail accessors accept requested versions 2 through 5. The external
+declaration detail accessor requires version 3, external type identity requires
+version 4, and language-item accessors require version 5. Unsupported older or future
 versions return `VIZG_PROJECT_STATUS_INVALID_STATE`; null, misaligned,
 workspace-overlapping and out-of-bounds outputs return
 `VIZG_PROJECT_STATUS_INVALID_ARGUMENT`.
 
-Version 3 is additive: it does not change the layout of any version-2 record.
+Every detail version is additive: it does not change an earlier record layout.
+In version 3,
 `flags & 1` states whether `intrinsic_id` is present. When absent,
 `intrinsic_id` is zero and must not be interpreted as an identity.

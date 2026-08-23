@@ -1,4 +1,4 @@
-//! Target-independent HIR v1 records and legal operation set.
+//! Target-independent HIR v2 records and legal operation set.
 
 const std = @import("std");
 const ids = @import("ids.zig");
@@ -7,7 +7,7 @@ const project = @import("../project/contracts.zig");
 const trace = @import("trace.zig");
 const types = @import("../types/root.zig");
 
-pub const schema_version: u32 = 1;
+pub const schema_version: u32 = 2;
 pub const ModuleId = project.ModuleId;
 pub const ExternalModuleId = project.ExternalModuleId;
 pub const ExternalSymbolId = project.ExternalSymbolId;
@@ -18,12 +18,21 @@ pub const HirProject = struct {
     version: u32 = schema_version,
     modules: []const HirModule = &.{},
     external_declarations: []const HirExternalDeclaration = &.{},
+    language_items: []const HirLanguageItem = &.{},
     entities: []const HirEntity = &.{},
     functions: []const HirFunction = &.{},
     constants: []const HirConstant = &.{},
     regions: []const HirRegion = &.{},
     origins: origin_mod.OriginTable = .{},
     lowering_trace: ?trace.LoweringTrace = null,
+};
+
+/// Host-assigned semantic role resolved to an exact source declaration. The
+/// exported name is retained for diagnostics only; consumers dispatch by id.
+pub const HirLanguageItem = struct {
+    id: project.LanguageItemId,
+    exported_name: []const u8,
+    target: HirSemanticIdentity,
 };
 
 /// Body-less declaration supplied by the host. Identity is the pair

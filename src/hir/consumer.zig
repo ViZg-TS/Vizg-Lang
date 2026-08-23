@@ -1,4 +1,4 @@
-//! Frozen read-only HIR v1 consumer surface.
+//! Versioned read-only HIR consumer surface.
 
 const model = @import("model.zig");
 const ids = @import("ids.zig");
@@ -7,7 +7,7 @@ const project_mod = @import("../project/root.zig");
 const result_mod = @import("result.zig");
 const types = @import("../types/root.zig");
 
-pub const api_version: u32 = 1;
+pub const api_version: u32 = 2;
 pub const minimum_api_version: u32 = 1;
 
 pub const Error = error{
@@ -45,6 +45,15 @@ pub const View = struct {
 
     pub fn externalDeclarations(self: View) []const model.HirExternalDeclaration {
         return self.result.project.external_declarations;
+    }
+
+    pub fn languageItems(self: View) []const model.HirLanguageItem {
+        return self.result.project.language_items;
+    }
+
+    pub fn languageItem(self: View, id: project_mod.LanguageItemId) Error!*const model.HirLanguageItem {
+        for (self.languageItems()) |*item| if (item.id == id) return item;
+        return error.InvalidId;
     }
 
     pub fn externalDeclaration(

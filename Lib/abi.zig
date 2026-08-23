@@ -7,8 +7,9 @@ const vizg = @import("vizg-impl");
 pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
-pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 4;
+pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 5;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
+pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION: u32 = vizg.language_item_contract_version;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_DECLARED: u32 = 1;
 pub const VIZG_HIR_ID_NONE: u64 = std.math.maxInt(u64);
@@ -80,6 +81,8 @@ pub const VIZG_HIR_MODULE_REFERENCE_EXTERNAL: u32 = 1;
 pub const VIZG_HIR_SEMANTIC_NAMESPACE_VALUE: u32 = 0;
 pub const VIZG_HIR_SEMANTIC_NAMESPACE_TYPE: u32 = 1;
 pub const VIZG_HIR_SEMANTIC_NAMESPACE_NAMESPACE: u32 = 2;
+pub const VIZG_LANGUAGE_ITEM_NAMESPACE_VALUE: u32 = 0;
+pub const VIZG_LANGUAGE_ITEM_NAMESPACE_TYPE: u32 = 1;
 pub const VIZG_HIR_BINDING_STATE_HOISTED_UNDEFINED: u32 = 0;
 pub const VIZG_HIR_BINDING_STATE_HOISTED_FUNCTION: u32 = 1;
 pub const VIZG_HIR_BINDING_STATE_TEMPORAL_DEAD_ZONE: u32 = 2;
@@ -399,6 +402,17 @@ pub const Vizg_SourceHostBinding = extern struct {
     reserved: [8]u8,
 };
 
+/// Borrowed, module-qualified source language-item locator. Authorization is
+/// owned by the host; ViZG copies and resolves this descriptor.
+pub const Vizg_SourceLanguageItem = extern struct {
+    language_item_id: u64,
+    module_id: u64,
+    exported_name_ptr: [*c]const u8,
+    exported_name_len: usize,
+    namespace_kind: u32,
+    reserved: [4]u8,
+};
+
 pub const Vizg_ProjectResultSummary = extern struct {
     module_count: usize,
     diagnostic_count: usize,
@@ -668,6 +682,13 @@ pub const Vizg_HirSemanticIdentity = extern struct {
     reserved: [6]u8,
     /// Host-assigned identity for ambient globals. Valid when the flag is set.
     host_binding_id: u64,
+};
+
+pub const Vizg_HirLanguageItem = extern struct {
+    language_item_id: u64,
+    exported_name_ptr: [*c]const u8,
+    exported_name_len: usize,
+    target: Vizg_HirSemanticIdentity,
 };
 
 pub const Vizg_HirExternalDeclarationDetail = extern struct {
@@ -961,6 +982,9 @@ fn diagnosticCode(value: vizg.diagnostics.DiagnosticCode) u32 {
         .invalid_argument_type => 6009,
         .const_assignment => 6010,
         .global_ambient_collision => 8001,
+        .missing_language_item => 8002,
+        .language_item_namespace_mismatch => 8003,
+        .duplicate_language_item_target => 8004,
     };
 }
 
@@ -1035,7 +1059,14 @@ fn statusFromError(owned: *OwnedProject, err: anyerror) Vizg_ProjectStatus {
         error.DuplicateSourceHostBinding,
         error.InvalidSourceHostBinding,
         error.SourceHostBindingsLateRegistration,
+        error.DuplicateLanguageItemId,
+        error.DuplicateLanguageItemTarget,
+        error.InvalidLanguageItem,
         => .INVALID_ARGUMENT,
+        error.LanguageItemsLateRegistration,
+        error.MissingLanguageItem,
+        error.LanguageItemNamespaceMismatch,
+        => .INVALID_STATE,
         else => .INTERNAL_ERROR,
     };
 }
@@ -1353,6 +1384,49 @@ pub fn projectRegisterSourceHostBindings(
         };
     }
     owned.project.registerSourceHostBindings(out_ptr[0..count]) catch |err| return statusFromError(owned, err);
+    return .OK;
+}
+
+pub fn projectRegisterSourceLanguageItems(
+    project: ?*Vizg_Project,
+    items_ptr: [*c]const Vizg_SourceLanguageItem,
+    count: usize,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
+    beginProjectCall(owned);
+    if (count == 0) return .OK;
+    if (!validAlignedHostArray(Vizg_SourceLanguageItem, items_ptr, count)) return .INVALID_ARGUMENT;
+    const items_bytes = checkedByteLen(Vizg_SourceLanguageItem, count) orelse return .INVALID_ARGUMENT;
+    if (!inputOutsideWorkspace(owned, items_ptr, items_bytes)) return .INVALID_ARGUMENT;
+
+    for (items_ptr[0..count]) |*item| {
+        if (!std.mem.eql(u8, &item.reserved, &[_]u8{0} ** 4)) return .INVALID_ARGUMENT;
+        if (item.language_item_id == 0 or item.exported_name_len == 0 or
+            item.namespace_kind > VIZG_LANGUAGE_ITEM_NAMESPACE_TYPE or
+            !validAlignedHostArray(u8, item.exported_name_ptr, item.exported_name_len)) return .INVALID_ARGUMENT;
+        if (!inputOutsideWorkspace(owned, item.exported_name_ptr, item.exported_name_len)) return .INVALID_ARGUMENT;
+    }
+
+    const descriptor_bytes = checkedByteLen(vizg.SourceLanguageItem, count) orelse return .OUT_OF_MEMORY;
+    const buffer = owned.fba.buffer;
+    const buffer_start = @intFromPtr(buffer.ptr);
+    const buffer_end = std.math.add(usize, buffer_start, buffer.len) catch return .OUT_OF_MEMORY;
+    const unaligned_start = std.math.sub(usize, buffer_end, descriptor_bytes) catch return .OUT_OF_MEMORY;
+    const scratch_start = std.mem.alignBackward(usize, unaligned_start, @alignOf(vizg.SourceLanguageItem));
+    const used_end = std.math.add(usize, buffer_start, owned.fba.end_index) catch return .OUT_OF_MEMORY;
+    if (scratch_start < used_end) return .OUT_OF_MEMORY;
+    owned.fba.buffer = buffer[0 .. scratch_start - buffer_start];
+    defer owned.fba.buffer = buffer;
+
+    const output: [*]vizg.SourceLanguageItem = @ptrFromInt(scratch_start);
+    for (output[0..count], items_ptr[0..count]) |*target, item| target.* = .{
+        .id = .init(item.language_item_id),
+        .module_id = .init(item.module_id),
+        .exported_name = bytes(item.exported_name_ptr, item.exported_name_len),
+        .namespace = @enumFromInt(item.namespace_kind),
+    };
+    owned.project.registerSourceLanguageItems(output[0..count]) catch |err| return statusFromError(owned, err);
     return .OK;
 }
 
@@ -3116,6 +3190,43 @@ pub fn hirModuleExportAt(
     return .OK;
 }
 
+pub fn hirLanguageItemCount(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    out_count: ?*usize,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version < 5) return .INVALID_STATE;
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_count orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(usize, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(usize))) return .INVALID_ARGUMENT;
+    output.* = owned.hir_result.?.project.language_items.len;
+    return .OK;
+}
+
+pub fn hirLanguageItemAt(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    index: usize,
+    out_item: ?*Vizg_HirLanguageItem,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version < 5) return .INVALID_STATE;
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_item orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirLanguageItem, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirLanguageItem))) return .INVALID_ARGUMENT;
+    const items = owned.hir_result.?.project.language_items;
+    if (index >= items.len) return .INVALID_ARGUMENT;
+    const item = items[index];
+    output.* = .{
+        .language_item_id = item.id.value(),
+        .exported_name_ptr = item.exported_name.ptr,
+        .exported_name_len = item.exported_name.len,
+        .target = hirSemanticIdentity(item.target),
+    };
+    return .OK;
+}
+
 pub fn hirBindingDetailAt(
     result: ?*const Vizg_ProjectResult,
     requested_version: u32,
@@ -3705,6 +3816,7 @@ comptime {
     @export(&projectRegisterAmbientGlobals, .{ .name = "vizg_project_register_ambient_globals" });
     @export(&projectRegisterAmbientGlobalsV2, .{ .name = "vizg_project_register_ambient_globals_v2" });
     @export(&projectRegisterSourceHostBindings, .{ .name = "vizg_project_register_source_host_bindings" });
+    @export(&projectRegisterSourceLanguageItems, .{ .name = "vizg_project_register_source_language_items" });
     @export(&projectStep, .{ .name = "vizg_project_step" });
     @export(&projectRespondSource, .{ .name = "vizg_project_respond_source" });
     @export(&projectRespondExternal, .{ .name = "vizg_project_respond_external" });
@@ -3744,6 +3856,8 @@ comptime {
     @export(&hirModuleDependencyAt, .{ .name = "vizg_hir_module_dependency_at" });
     @export(&hirModuleImportAt, .{ .name = "vizg_hir_module_import_at" });
     @export(&hirModuleExportAt, .{ .name = "vizg_hir_module_export_at" });
+    @export(&hirLanguageItemCount, .{ .name = "vizg_hir_language_item_count" });
+    @export(&hirLanguageItemAt, .{ .name = "vizg_hir_language_item_at" });
     @export(&hirBindingDetailAt, .{ .name = "vizg_hir_binding_detail_at" });
     @export(&hirFunctionStorageDetailAt, .{ .name = "vizg_hir_function_storage_detail_at" });
     @export(&hirFunctionCaptureAt, .{ .name = "vizg_hir_function_capture_at" });
@@ -3808,6 +3922,9 @@ test "public diagnostic ABI mappings are stable" {
     try std.testing.expectEqual(@as(u32, 5005), diagnosticCode(.module_host_failed));
     try std.testing.expectEqual(@as(u32, 6009), diagnosticCode(.invalid_argument_type));
     try std.testing.expectEqual(@as(u32, 8001), diagnosticCode(.global_ambient_collision));
+    try std.testing.expectEqual(@as(u32, 8002), diagnosticCode(.missing_language_item));
+    try std.testing.expectEqual(@as(u32, 8003), diagnosticCode(.language_item_namespace_mismatch));
+    try std.testing.expectEqual(@as(u32, 8004), diagnosticCode(.duplicate_language_item_target));
 }
 
 test "public limit ABI values and exact error mappings are stable" {

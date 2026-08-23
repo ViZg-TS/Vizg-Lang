@@ -80,10 +80,29 @@ pub fn check(
             .span = item.span,
         });
     }
+    for (project.diagnostics()) |item| {
+        if (item.severity != .@"error" or !isLanguageItemDiagnostic(item.code)) continue;
+        try appendUnique(&output, allocator, .{
+            .code = .not_eligible,
+            .module_id = if (item.module_id) |id| id.value() else null,
+            .path = item.logical_name,
+            .span = item.span,
+        });
+    }
     if (project_semantics.is_partial) try appendUnique(&output, allocator, .{ .code = .not_eligible });
 
     try validateProjectIdentities(&output, allocator, project, project_semantics);
     return .{ .allocator = allocator, .diagnostics = try output.toOwnedSlice(allocator) };
+}
+
+fn isLanguageItemDiagnostic(code: frontend_diagnostics.DiagnosticCode) bool {
+    return switch (code) {
+        .missing_language_item,
+        .language_item_namespace_mismatch,
+        .duplicate_language_item_target,
+        => true,
+        else => false,
+    };
 }
 
 fn validateLocalIdentities(

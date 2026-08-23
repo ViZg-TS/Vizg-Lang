@@ -402,6 +402,8 @@ pub fn build(b: *std.Build) void {
         \\vizg_hir_function_parameter_at
         \\vizg_hir_function_signature
         \\vizg_hir_function_storage_detail_at
+        \\vizg_hir_language_item_at
+        \\vizg_hir_language_item_count
         \\vizg_hir_module_dependency_at
         \\vizg_hir_module_detail_at
         \\vizg_hir_module_export_at
@@ -431,6 +433,7 @@ pub fn build(b: *std.Build) void {
         \\vizg_project_register_ambient_globals
         \\vizg_project_register_ambient_globals_v2
         \\vizg_project_register_source_host_bindings
+        \\vizg_project_register_source_language_items
         \\vizg_project_respond_external
         \\vizg_project_respond_external_v2
         \\vizg_project_respond_external_v3
