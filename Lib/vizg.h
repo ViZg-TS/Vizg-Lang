@@ -1186,8 +1186,8 @@ void vizg_project_destroy(Vizg_Project *project);
 Vizg_LimitKind vizg_project_limit_kind(Vizg_Project *project);
 Vizg_ProjectStatus vizg_project_add_source(
     Vizg_Project *project, const Vizg_ProjectSource *source);
-/* Adds the designated module whose named exports become source globals in
- * application roots. This module is analyzed before ordinary project roots. */
+/* Adds a designated module whose named exports become source globals in
+ * application roots. All such modules are analyzed before ordinary roots. */
 Vizg_ProjectStatus vizg_project_add_global_root(
     Vizg_Project *project, const Vizg_ProjectSource *source);
 Vizg_ProjectStatus vizg_project_register_ambient_globals(

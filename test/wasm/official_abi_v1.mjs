@@ -591,10 +591,10 @@ function expectNoTrap(operation, callback) {
   host.finish(project, 1, false);
 }
 
-// vizg_project_add_global_root designates one source module whose named
-// exports are visible as globals in application modules. The happy path must
+// vizg_project_add_global_root designates source modules whose named exports
+// are visible as globals in application modules. The happy path must
 // analyze both the global root and the application root, and the lifecycle
-// invariants (late registration, duplicate, post-finish) and host-input
+// invariants (late registration, duplicate identity, post-finish) and host-input
 // validation must mirror vizg_project_add_source.
 {
   const host = beginFlow();
@@ -663,9 +663,13 @@ function expectNoTrap(operation, callback) {
     project,
     host.writeSource(0, "std.ts", "export const console = {};", true),
   ), "global_root duplicate first");
-  const status = api.vizg_project_add_global_root(
+  check(api.vizg_project_add_global_root(
     project,
     host.writeSource(5, "other.ts", "export const other = 1;", true),
+  ), "global_root second distinct root");
+  const status = api.vizg_project_add_global_root(
+    project,
+    host.writeSource(5, "duplicate.ts", "export const duplicate = 2;", true),
   );
   if (status !== STATUS_INVALID_STATE) {
     throw new Error(`global_root duplicate returned ${status}, expected INVALID_STATE`);

@@ -2084,11 +2084,11 @@ test "official ABI v1 reports parse-depth limit exactly and clears stale kinds" 
 // ---------------------------------------------------------------------------
 // Goal 013 — ABI lifecycle coverage for vizg_project_add_global_root.
 //
-// The additive `vizg_project_add_global_root` entry point designates one
-// source module whose named exports are visible as globals in application
+// The additive `vizg_project_add_global_root` entry point designates source
+// modules whose named exports are visible as globals in application
 // modules. These tests exercise the happy path (global root + app root →
 // finish OK), the lifecycle ordering invariants (late registration after a
-// source, duplicate global root, and post-finish are rejected), and the
+// source, duplicate root identity, and post-finish are rejected), and the
 // host-input validation that must reject hostile pointers without state
 // mutation. They mirror the existing `vizg_project_add_source` coverage.
 // ---------------------------------------------------------------------------
@@ -2152,7 +2152,7 @@ test "official ABI v1 add_global_root: late registration after add_source is rej
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_project_add_global_root(project, &global_root));
 }
 
-test "official ABI v1 add_global_root: duplicate global root is rejected" {
+test "official ABI v1 add_global_root: multiple roots work and duplicate identity is rejected" {
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();
     const project = try createProject(workspace);
@@ -2162,6 +2162,8 @@ test "official ABI v1 add_global_root: duplicate global root is rejected" {
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_global_root(project, &global_root));
 
     var duplicate = projectSource(5, "other.ts", "export const other = 1;", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_global_root(project, &duplicate));
+    duplicate = projectSource(5, "duplicate.ts", "export const duplicate = 2;", true);
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_project_add_global_root(project, &duplicate));
 }
 

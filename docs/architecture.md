@@ -124,7 +124,8 @@ general property or runtime semantics.
 
 A source-backed global root is submitted before ordinary project roots and is
 analyzed as source rather than converted into host-owned ambient descriptors.
-Its source identity is retained in semantic and HIR dependency records. The
+Multiple roots may contribute disjoint global exports; each declaration's
+source identity is retained in semantic and HIR dependency records. The
 additive `vizg_project_add_global_root` entry point exposes the same operation
 through the C lifecycle; ViZG does not assign runtime or platform meaning to
 the declarations.

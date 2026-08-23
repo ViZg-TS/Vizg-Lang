@@ -107,7 +107,7 @@ pub const Project = struct {
     finish_result: ?FinishResult = null,
     ambient_globals: std.ArrayList(contracts.AmbientGlobal) = .empty,
     source_globals: std.ArrayList(binder.SourceGlobal) = .empty,
-    global_root: ?contracts.ModuleId = null,
+    global_roots: std.ArrayList(contracts.ModuleId) = .empty,
     global_exports_derived: bool = false,
     global_derivation_diagnostics: std.ArrayList(ProjectDiagnostic) = .empty,
     source_host_bindings: std.ArrayList(contracts.SourceHostBinding) = .empty,
@@ -148,6 +148,7 @@ pub const Project = struct {
             self.allocator.free(global.source_export_name);
         }
         self.source_globals.deinit(self.allocator);
+        self.global_roots.deinit(self.allocator);
         for (self.global_derivation_diagnostics.items) |item| {
             self.allocator.free(item.message);
             self.allocator.free(item.logical_name);
@@ -204,15 +205,17 @@ pub const Project = struct {
         try self.submit(source, true);
     }
 
-    /// Designate one source module whose named exports are visible as globals
-    /// in application modules. The exports remain ordinary live module imports.
+    /// Designate a source module whose named exports are visible as globals in
+    /// application modules. Multiple roots may be registered before any
+    /// application source; their exports remain ordinary live module imports.
     pub fn addGlobalRoot(self: *Project, source: contracts.ModuleSource) !void {
         defer self.debugAssertInvariants();
         try self.ensureOpen();
-        if (self.global_root != null) return error.DuplicateGlobalRoot;
-        if (self.modules.items.len != 0) return error.GlobalRootLateRegistration;
+        for (self.global_roots.items) |root| if (root == source.id) return error.DuplicateGlobalRoot;
+        if (self.modules.items.len != self.global_roots.items.len) return error.GlobalRootLateRegistration;
+        try self.global_roots.ensureUnusedCapacity(self.allocator, 1);
         try self.submit(source, true);
-        self.global_root = source.id;
+        self.global_roots.appendAssumeCapacity(source.id);
     }
 
     /// Register ambient globals (e.g. a host clock) before any
@@ -639,9 +642,12 @@ pub const Project = struct {
     /// Analyze every supplied or previously failed module. Completed modules
     /// remain available if a later module fails.
     fn analyze(self: *Project) !void {
-        if (self.global_root) |global_root| {
+        for (self.global_roots.items) |global_root| {
             _ = try self.analyzeModule(global_root);
-            if (!self.global_exports_derived) try self.deriveGlobalExports(global_root);
+        }
+        if (!self.global_exports_derived) {
+            for (self.global_roots.items) |global_root| try self.deriveGlobalExports(global_root);
+            self.global_exports_derived = true;
         }
         var index: usize = 0;
         while (index < self.modules.items.len) : (index += 1) {
@@ -711,7 +717,6 @@ pub const Project = struct {
                 .source_export_name = export_name,
             });
         }
-        self.global_exports_derived = true;
     }
 
     /// Append a project diagnostic produced while deriving global exports.
@@ -733,11 +738,11 @@ pub const Project = struct {
     }
 
     fn isStandardModule(self: *const Project, id: contracts.ModuleId) bool {
-        const global_root = self.global_root orelse return false;
-        if (id == global_root) return true;
+        if (self.global_roots.items.len == 0) return false;
+        for (self.global_roots.items) |global_root| if (id == global_root) return true;
         var pending: std.ArrayList(contracts.ModuleId) = .empty;
         defer pending.deinit(self.allocator);
-        pending.append(self.allocator, global_root) catch return false;
+        pending.appendSlice(self.allocator, self.global_roots.items) catch return false;
         var index: usize = 0;
         while (index < pending.items.len) : (index += 1) {
             const current = pending.items[index];
@@ -3328,7 +3333,7 @@ test "global source module: multiple application modules share one global root" 
     }
 }
 
-test "global source module: duplicate and late registration are rejected" {
+test "global source module: multiple roots are accepted while duplicate and late registration are rejected" {
     var first = Project.init(std.testing.allocator);
     defer first.deinit();
     try first.addGlobalRoot(.{
@@ -3336,14 +3341,26 @@ test "global source module: duplicate and late registration are rejected" {
         .logical_name = "global.ts",
         .bytes = "export const a = 1;",
     });
-    try std.testing.expectError(
-        error.DuplicateGlobalRoot,
-        first.addGlobalRoot(.{
-            .id = .init(5),
-            .logical_name = "other.ts",
-            .bytes = "export const b = 2;",
-        }),
-    );
+    try first.addGlobalRoot(.{
+        .id = .init(5),
+        .logical_name = "other.ts",
+        .bytes = "export const b = 2;",
+    });
+    try std.testing.expectError(error.DuplicateGlobalRoot, first.addGlobalRoot(.{
+        .id = .init(5),
+        .logical_name = "duplicate.ts",
+        .bytes = "export const c = 3;",
+    }));
+    try first.addRoot(.{
+        .id = .init(6),
+        .logical_name = "app.ts",
+        .bytes = "a + b;",
+    });
+    _ = try first.step();
+    _ = try first.finish();
+    for (first.diagnostics()) |diagnostic| {
+        if (diagnostic.code == .cannot_find_name) return error.UnexpectedCannotFindName;
+    }
 
     var second = Project.init(std.testing.allocator);
     defer second.deinit();

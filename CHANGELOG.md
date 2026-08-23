@@ -8,6 +8,9 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Global source registration now accepts multiple source modules before any
+  application root. Their disjoint named exports are published together while
+  preserving each declaration's source-module identity.
 - Added the source language-item contract v1 and HIR schema v2. Hosts register
   stable role IDs against a module-qualified export and value/type namespace;
   ViZG resolves those locators to exact semantic identities without assigning
