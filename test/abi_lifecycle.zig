@@ -660,6 +660,87 @@ test "versioned C HIR consumer reads immutable result records" {
     );
 }
 
+test "HIR detail v6 exposes ordered semantic class composition" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    var config = workspace.config();
+    var source = projectSource(
+        71,
+        "class-detail.ts",
+        \\export class Box {
+        \\  value: number = 1;
+        \\  static tag: number = 2;
+        \\  constructor(value: number) { this.value = value; }
+        \\  read(): number { return this.value; }
+        \\  static create(): number { return 1; }
+        \\  get current(): number { return this.value; }
+        \\}
+    ,
+        true,
+    );
+    var result: ?*c.Vizg_ProjectResult = null;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_analyze_source(&config, &source, &result),
+    );
+    defer c.vizg_project_result_destroy(result);
+
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
+    );
+    var entity_id: ?u64 = null;
+    for (0..summary.instruction_count) |instruction_index| {
+        var operation: c.Vizg_HirPayload = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_operation_at(result, c.VIZG_HIR_PAYLOAD_API_VERSION, instruction_index, &operation),
+        );
+        if (operation.tag == c.VIZG_HIR_OPERATION_CREATE_CLASS) entity_id = operation.operand0;
+    }
+    const class_entity = entity_id orelse return error.MissingClassEntity;
+
+    var detail: c.Vizg_HirClassDetail = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+        c.vizg_hir_class_detail(result, 5, class_entity, &detail),
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_class_detail(result, c.VIZG_HIR_DETAIL_API_VERSION, class_entity, &detail),
+    );
+    try std.testing.expectEqual(class_entity, detail.entity_id);
+    try std.testing.expectEqual(@as(u64, 71), detail.module_id);
+    try std.testing.expect(detail.constructor_function_id != c.VIZG_HIR_ID_NONE);
+    try std.testing.expect(detail.instance_initializer_function_id != c.VIZG_HIR_ID_NONE);
+    try std.testing.expect(detail.static_initializer_function_id != c.VIZG_HIR_ID_NONE);
+    try std.testing.expectEqual(@as(usize, 3), detail.method_count);
+
+    const expected_names = [_][]const u8{ "read", "create", "current" };
+    const expected_kinds = [_]u32{
+        c.VIZG_HIR_FUNCTION_METHOD,
+        c.VIZG_HIR_FUNCTION_METHOD,
+        c.VIZG_HIR_FUNCTION_GETTER,
+    };
+    for (expected_names, expected_kinds, 0..) |expected_name, expected_kind, method_index| {
+        var method: c.Vizg_HirClassMethod = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_class_method_at(result, c.VIZG_HIR_DETAIL_API_VERSION, class_entity, method_index, &method),
+        );
+        try std.testing.expectEqualStrings(expected_name, method.name_ptr[0..method.name_len]);
+        try std.testing.expectEqual(expected_kind, method.kind);
+        try std.testing.expect(method.function_id != c.VIZG_HIR_ID_NONE);
+        try std.testing.expectEqual(@as(u8, @intFromBool(method_index == 1)), method.flags & 1);
+    }
+    var method: c.Vizg_HirClassMethod = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
+        c.vizg_hir_class_method_at(result, c.VIZG_HIR_DETAIL_API_VERSION, class_entity, detail.method_count, &method),
+    );
+}
+
 test "HIR detail ABI exposes async and generator body completion types" {
     const Helpers = struct {
         fn typeKind(

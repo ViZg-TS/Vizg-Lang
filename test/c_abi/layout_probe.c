@@ -59,6 +59,8 @@ LAYOUT(Vizg_HirFunctionSignature)
 LAYOUT(Vizg_HirSignatureParameter)
 LAYOUT(Vizg_HirFunctionDetail)
 LAYOUT(Vizg_HirFunctionParameter)
+LAYOUT(Vizg_HirClassDetail)
+LAYOUT(Vizg_HirClassMethod)
 LAYOUT(Vizg_HirBlockDetail)
 LAYOUT(Vizg_HirBlockParameter)
 LAYOUT(Vizg_HirOriginDetail)
@@ -278,6 +280,18 @@ size_t vizg_c_fields_Vizg_HirFunctionParameter(void) {
     return F(Vizg_HirFunctionParameter, binding_id, 1) + F(Vizg_HirFunctionParameter, type_id, 2) +
         F(Vizg_HirFunctionParameter, argument_index, 3) + F(Vizg_HirFunctionParameter, origin_id, 4) +
         F(Vizg_HirFunctionParameter, flags, 5) + F(Vizg_HirFunctionParameter, reserved, 6);
+}
+size_t vizg_c_fields_Vizg_HirClassDetail(void) {
+    return F(Vizg_HirClassDetail, entity_id, 1) + F(Vizg_HirClassDetail, module_id, 2) +
+        F(Vizg_HirClassDetail, constructor_function_id, 3) +
+        F(Vizg_HirClassDetail, instance_initializer_function_id, 4) +
+        F(Vizg_HirClassDetail, static_initializer_function_id, 5) +
+        F(Vizg_HirClassDetail, method_count, 6);
+}
+size_t vizg_c_fields_Vizg_HirClassMethod(void) {
+    return F(Vizg_HirClassMethod, function_id, 1) + F(Vizg_HirClassMethod, name_ptr, 2) +
+        F(Vizg_HirClassMethod, name_len, 3) + F(Vizg_HirClassMethod, kind, 4) +
+        F(Vizg_HirClassMethod, flags, 5) + F(Vizg_HirClassMethod, reserved, 6);
 }
 size_t vizg_c_fields_Vizg_HirBlockDetail(void) {
     return F(Vizg_HirBlockDetail, id, 1) + F(Vizg_HirBlockDetail, parameter_count, 2);

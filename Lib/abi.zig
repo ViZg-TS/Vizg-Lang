@@ -7,7 +7,7 @@ const vizg = @import("vizg-impl");
 pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
-pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 5;
+pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 6;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
 pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION: u32 = vizg.language_item_contract_version;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
@@ -636,6 +636,26 @@ pub const Vizg_HirFunctionParameter = extern struct {
     type_id: u32,
     argument_index: u32,
     origin_id: u32,
+    flags: u8,
+    reserved: [3]u8,
+};
+
+/// Semantic composition of one HIR class entity. Added in detail API v6.
+pub const Vizg_HirClassDetail = extern struct {
+    entity_id: u64,
+    module_id: u64,
+    constructor_function_id: u64,
+    instance_initializer_function_id: u64,
+    static_initializer_function_id: u64,
+    method_count: usize,
+};
+
+/// One ordered method owned by a `Vizg_HirClassDetail`.
+pub const Vizg_HirClassMethod = extern struct {
+    function_id: u64,
+    name_ptr: [*c]const u8,
+    name_len: usize,
+    kind: u32,
     flags: u8,
     reserved: [3]u8,
 };
@@ -3003,6 +3023,85 @@ pub fn hirFunctionParameterAt(
     return .OK;
 }
 
+fn hirClassEntity(
+    project: vizg.hir.HirProject,
+    entity_id: u64,
+) ?vizg.hir.model.HirEntity {
+    for (project.entities) |entity| {
+        if (idIndex(entity.id) != entity_id) continue;
+        if (entity.kind != .class) return null;
+        return entity;
+    }
+    return null;
+}
+
+fn hirFunctionById(
+    project: vizg.hir.HirProject,
+    function_id: vizg.hir.ids.FunctionId,
+) ?vizg.hir.model.HirFunction {
+    for (project.functions) |function|
+        if (function.id.eql(function_id)) return function;
+    return null;
+}
+
+pub fn hirClassDetail(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    entity_id: u64,
+    out_detail: ?*Vizg_HirClassDetail,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version < 6) return .INVALID_STATE;
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_detail orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirClassDetail, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirClassDetail))) return .INVALID_ARGUMENT;
+    const project = owned.hir_result.?.project;
+    const entity = hirClassEntity(project, entity_id) orelse return .INVALID_ARGUMENT;
+    const class = entity.kind.class;
+    output.* = .{
+        .entity_id = entity_id,
+        .module_id = entity.module_id.value(),
+        .constructor_function_id = idIndex(class.constructor),
+        .instance_initializer_function_id = optionalId(class.instance_initializer),
+        .static_initializer_function_id = optionalId(class.static_initializer),
+        .method_count = class.methods.len,
+    };
+    return .OK;
+}
+
+pub fn hirClassMethodAt(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    entity_id: u64,
+    method_index: usize,
+    out_method: ?*Vizg_HirClassMethod,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version < 6) return .INVALID_STATE;
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_method orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirClassMethod, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirClassMethod))) return .INVALID_ARGUMENT;
+    const project = owned.hir_result.?.project;
+    const entity = hirClassEntity(project, entity_id) orelse return .INVALID_ARGUMENT;
+    const methods = entity.kind.class.methods;
+    if (method_index >= methods.len) return .INVALID_ARGUMENT;
+    const method = methods[method_index];
+    const function = hirFunctionById(project, method.function) orelse return .INVALID_STATE;
+    const name = switch (method.name) {
+        .static => |value| value,
+        .computed, .private => return .INVALID_STATE,
+    };
+    output.* = .{
+        .function_id = idIndex(method.function),
+        .name_ptr = if (name.len == 0) null else name.ptr,
+        .name_len = name.len,
+        .kind = @intFromEnum(function.kind),
+        .flags = @intFromBool(method.is_static),
+        .reserved = .{ 0, 0, 0 },
+    };
+    return .OK;
+}
+
 pub fn hirBlockDetailAt(
     result: ?*const Vizg_ProjectResult,
     requested_version: u32,
@@ -3849,6 +3948,8 @@ comptime {
     @export(&hirSignatureParameterAt, .{ .name = "vizg_hir_signature_parameter_at" });
     @export(&hirFunctionDetailAt, .{ .name = "vizg_hir_function_detail_at" });
     @export(&hirFunctionParameterAt, .{ .name = "vizg_hir_function_parameter_at" });
+    @export(&hirClassDetail, .{ .name = "vizg_hir_class_detail" });
+    @export(&hirClassMethodAt, .{ .name = "vizg_hir_class_method_at" });
     @export(&hirBlockDetailAt, .{ .name = "vizg_hir_block_detail_at" });
     @export(&hirBlockParameterAt, .{ .name = "vizg_hir_block_parameter_at" });
     @export(&hirOriginDetailAt, .{ .name = "vizg_hir_origin_detail_at" });

@@ -9,7 +9,7 @@
 #define VIZG_ABI_VERSION 1u
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
-#define VIZG_HIR_DETAIL_API_VERSION 5u
+#define VIZG_HIR_DETAIL_API_VERSION 6u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
 #define VIZG_INTRINSIC_CONTRACT_VERSION 3u
 #define VIZG_LANGUAGE_ITEM_CONTRACT_VERSION 1u
@@ -1012,6 +1012,25 @@ typedef struct Vizg_HirFunctionParameter {
     uint8_t reserved[3];
 } Vizg_HirFunctionParameter;
 
+/* Semantic composition of one class entity. HIR detail API v6. */
+typedef struct Vizg_HirClassDetail {
+    uint64_t entity_id;
+    uint64_t module_id;
+    uint64_t constructor_function_id;
+    uint64_t instance_initializer_function_id;
+    uint64_t static_initializer_function_id;
+    size_t method_count;
+} Vizg_HirClassDetail;
+
+typedef struct Vizg_HirClassMethod {
+    uint64_t function_id;
+    const char *name_ptr;
+    size_t name_len;
+    uint32_t kind;
+    uint8_t flags; /* bit 0 static */
+    uint8_t reserved[3];
+} Vizg_HirClassMethod;
+
 typedef struct Vizg_HirBlockDetail {
     uint64_t id;
     size_t parameter_count;
@@ -1294,6 +1313,14 @@ Vizg_ProjectStatus vizg_hir_function_parameter_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     size_t function_index, size_t parameter_index,
     Vizg_HirFunctionParameter *out_parameter);
+/* HIR detail API v6 exposes semantic class-entity composition. */
+Vizg_ProjectStatus vizg_hir_class_detail(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint64_t entity_id, Vizg_HirClassDetail *out_detail);
+Vizg_ProjectStatus vizg_hir_class_method_at(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint64_t entity_id, size_t method_index,
+    Vizg_HirClassMethod *out_method);
 Vizg_ProjectStatus vizg_hir_block_detail_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     size_t block_index, Vizg_HirBlockDetail *out_detail);
