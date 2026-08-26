@@ -202,8 +202,13 @@ fn callSignature(callee_type: types.TypeId, construct: bool, store: *const types
     if (!construct) {
         if (store.lookupFunction(callee_type)) |signature| return signature;
         const callee = store.lookup(callee_type) orelse return null;
-        if (callee.kind != .union_type) return null;
-        for (callee.kind.union_type) |member| if (store.lookupFunction(member)) |signature| return signature;
+        const members = if (callee.kind == .union_type)
+            callee.kind.union_type
+        else if (callee.kind == .intersection)
+            callee.kind.intersection
+        else
+            return null;
+        for (members) |member| if (store.lookupFunction(member)) |signature| return signature;
         return null;
     }
     const callee = store.lookup(callee_type) orelse return null;

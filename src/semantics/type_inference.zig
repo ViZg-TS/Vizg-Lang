@@ -368,16 +368,25 @@ fn inferCall(
 
     var returns: std.ArrayList(types.TypeId) = .empty;
     const receiver = receiverFor(entries, callee_id);
-    const members = if (callee.kind == .union_type) callee.kind.union_type else &.{callee_type};
+    const intersection = callee.kind == .intersection;
+    const members = if (callee.kind == .union_type)
+        callee.kind.union_type
+    else if (intersection)
+        callee.kind.intersection
+    else
+        &.{callee_type};
     for (members) |member| {
         if (isNullish(member, store) and optional) continue;
         const member_type = store.lookup(member) orelse return .{ .type_id = store.builtins.unknown };
-        if (member_type.kind != .function) return .{
-            .type_id = store.builtins.unknown,
-            .valid = false,
-            .issue = .invalid_callee,
-            .receiver_type = receiver,
-        };
+        if (member_type.kind != .function) {
+            if (intersection) continue;
+            return .{
+                .type_id = store.builtins.unknown,
+                .valid = false,
+                .issue = .invalid_callee,
+                .receiver_type = receiver,
+            };
+        }
         const signature = store.lookupFunction(member_type.kind.function) orelse return .{ .type_id = store.builtins.unknown };
         const result = validateCallArguments(signature, signature.return_type, arguments, receiver, entries, store) orelse return null;
         if (!result.valid) return result;
@@ -504,6 +513,21 @@ fn lookupAccessSingle(
     return switch (object.kind) {
         .object => |properties| try lookupObjectProperty(properties, key, tree, store),
         .class, .class_constructor, .interface => try lookupDeclaredMember(object_type, key, tree, store),
+        .intersection => |members| blk: {
+            var property_type: ?types.TypeId = null;
+            for (members) |member| {
+                const result = try lookupAccessSingle(member, key, tree, store);
+                if (!result.valid) continue;
+                property_type = if (property_type) |current|
+                    try store.intersectionOf(&.{ current, result.type_id })
+                else
+                    result.type_id;
+            }
+            break :blk if (property_type) |result|
+                .{ .type_id = result }
+            else
+                invalidAccess(key, b.unknown);
+        },
         .enum_type => |enum_type| try lookupEnumMember(enum_type, key, tree, store),
         .applied_generic => blk: {
             const target = try store.resolveAppliedTarget(object_type);
@@ -730,7 +754,7 @@ fn containsFunction(type_id: types.TypeId, store: *types.TypeStore) bool {
     const ty = store.lookup(type_id) orelse return false;
     return switch (ty.kind) {
         .function => true,
-        .union_type => |members| for (members) |member| {
+        .union_type, .intersection => |members| for (members) |member| {
             if (containsFunction(member, store)) break true;
         } else false,
         .applied_generic => blk: {

@@ -3000,6 +3000,36 @@ test "Goal 144 optional method and callable union calls retain validation" {
     try std.testing.expectEqual(@as(usize, 1), callee_errors);
 }
 
+test "callable intersections expose function calls and object members" {
+    var result = try analyze(std.testing.allocator,
+        \\type CallableObject = ((value?: any) => any) & {
+        \\    prototype: any;
+        \\    keys: (value: any) => string[];
+        \\    hasOwn: (value: any, key: any) => boolean;
+        \\};
+        \\let source: any;
+        \\const ObjectValue: CallableObject = source;
+        \\ObjectValue.prototype = {};
+        \\const created = ObjectValue();
+        \\const keys = ObjectValue.keys({});
+        \\const owns = ObjectValue.hasOwn({}, "key");
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+    try std.testing.expectEqual(
+        result.type_store.builtins.any,
+        result.lookupNodeType(testVariableInitializer(&result, "created").?).?,
+    );
+    try std.testing.expectEqual(
+        result.type_store.builtins.boolean,
+        result.lookupNodeType(testVariableInitializer(&result, "owns").?).?,
+    );
+    const keys_type = result.lookupType(result.lookupNodeType(testVariableInitializer(&result, "keys").?).?).?;
+    try std.testing.expect(keys_type.kind == .array);
+    try std.testing.expectEqual(result.type_store.builtins.string, keys_type.kind.array.element_type);
+}
+
 test "Goal 144 compound assignment checks call results and constructors remain stable" {
     var result = try analyze(std.testing.allocator,
         \\function text(): string { return "x"; }
