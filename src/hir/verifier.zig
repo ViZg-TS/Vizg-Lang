@@ -37,7 +37,8 @@ pub fn verifyBuilder(allocator: std.mem.Allocator, builder: *const builder_mod.B
     for (builder.language_items.items, 0..) |item, index| {
         if (item.id.value() == 0 or item.exported_name.len == 0 or
             item.target.declaration.external or item.target.external_module_id != null or
-            item.target.external_symbol_id != null or !hasModule(builder, .init(item.target.declaration.module_id)) or
+            item.target.external_symbol_id != null or
+            builder.result.semanticResult().lookupModule(item.target.declaration.module_id) == null or
             !validType(builder, item.target.type_id)) return .invalid_semantic_reference;
         for (builder.language_items.items[0..index]) |previous| if (previous.id == item.id) return .internal_invariant;
     }

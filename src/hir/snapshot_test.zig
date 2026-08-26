@@ -202,6 +202,12 @@ test "goal012: referencing module depends on global source module initialization
 test "goal012: unused global source modules do not become initialization dependencies" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
+    try project.registerSourceLanguageItems(&.{.{
+        .id = .init(1),
+        .module_id = .init(2),
+        .exported_name = "Object",
+        .namespace = .value,
+    }});
     try project.addGlobalRoot(.{
         .id = .init(0),
         .logical_name = "console.ts",
@@ -235,6 +241,8 @@ test "goal012: unused global source modules do not become initialization depende
     try std.testing.expectEqual(@as(usize, 2), lowered.project.modules.len);
     for (lowered.project.modules) |module|
         try std.testing.expect(module.module_id.value() != 2);
+    try std.testing.expectEqual(@as(usize, 1), lowered.project.language_items.len);
+    try std.testing.expectEqual(@as(u64, 2), lowered.project.language_items[0].target.declaration.module_id);
     try std.testing.expectEqual(@as(usize, 1), app_module.dependencies.len);
     try std.testing.expectEqual(@as(u64, 0), app_module.dependencies[0].module_id.value());
     try std.testing.expectEqual(@as(usize, 1), app_module.imports.len);
