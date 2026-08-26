@@ -199,6 +199,45 @@ test "goal012: referencing module depends on global source module initialization
     try std.testing.expect(found_dependency);
 }
 
+test "goal012: unused global source modules do not become initialization dependencies" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(0),
+        .logical_name = "console.ts",
+        .bytes = "export const console = 1;",
+    });
+    try project.addGlobalRoot(.{
+        .id = .init(2),
+        .logical_name = "object.ts",
+        .bytes = "export const Object = 2;",
+    });
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "main.ts",
+        .bytes = "console;",
+    });
+    while (switch (try project.step()) {
+        .complete => false,
+        .request => return error.UnexpectedModuleRequest,
+    }) {}
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var lowered = switch (try hir.lowerProject(std.testing.allocator, &project, .{})) {
+        .result => |result| result,
+        .diagnostics => return error.UnexpectedLoweringFailure,
+    };
+    defer lowered.deinit();
+
+    const app_module = for (lowered.project.modules) |module| {
+        if (module.module_id.value() == 1) break module;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), app_module.dependencies.len);
+    try std.testing.expectEqual(@as(u64, 0), app_module.dependencies[0].module_id.value());
+    try std.testing.expectEqual(@as(usize, 1), app_module.imports.len);
+    try std.testing.expectEqualStrings("console", app_module.imports[0].exported_name);
+}
+
 test "goal012: console.log lowers as ordinary call_method without standard operation" {
     var project = try goal012Project();
     defer project.deinit();

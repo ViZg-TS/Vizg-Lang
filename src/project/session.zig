@@ -1083,6 +1083,14 @@ pub const Project = struct {
         for (graph_modules.items) |module| {
             for (module.result.bind.symbols) |symbol| {
                 const source_module_id = symbol.source_module_id orelse continue;
+                var referenced = false;
+                for (module.result.resolve.references) |reference| {
+                    if (reference.symbol == symbol.id) {
+                        referenced = true;
+                        break;
+                    }
+                }
+                if (!referenced) continue;
                 const target = findSemanticModule(graph_modules.items, source_module_id.value()) orelse continue;
                 const edge_id: modules_mod.graph.ImportEdgeId = @intCast(graph_edges.items.len);
                 try graph_edges.append(allocator, .{
