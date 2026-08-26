@@ -180,11 +180,6 @@ pub const Project = struct {
         return self.find(id);
     }
 
-    pub fn isGlobalRoot(self: *const Project, id: contracts.ModuleId) bool {
-        for (self.global_roots.items) |root| if (root == id) return true;
-        return false;
-    }
-
     /// Register an unresolved identity. Repeated requests are idempotent.
     fn requestModule(self: *Project, id: contracts.ModuleId) !void {
         defer self.debugAssertInvariants();

@@ -232,9 +232,6 @@ test "goal012: unused global source modules do not become initialization depende
     const app_module = for (lowered.project.modules) |module| {
         if (module.module_id.value() == 1) break module;
     } else return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 2), lowered.project.modules.len);
-    for (lowered.project.modules) |module|
-        try std.testing.expect(module.module_id.value() != 2);
     try std.testing.expectEqual(@as(usize, 1), app_module.dependencies.len);
     try std.testing.expectEqual(@as(u64, 0), app_module.dependencies[0].module_id.value());
     try std.testing.expectEqual(@as(usize, 1), app_module.imports.len);

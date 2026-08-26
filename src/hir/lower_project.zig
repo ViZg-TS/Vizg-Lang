@@ -42,30 +42,13 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
 
     var reachable: std.ArrayList(project_mod.ModuleId) = .empty;
     defer reachable.deinit(allocator);
-    var has_application_root = false;
-    for (project.modules.items) |module| {
-        if (module.is_root and module.source != null and !project.isGlobalRoot(module.id)) {
-            has_application_root = true;
-            break;
-        }
-    }
-    for (project.modules.items) |module| {
-        if (!module.is_root or module.source == null) continue;
-        if (has_application_root and project.isGlobalRoot(module.id)) continue;
-        try appendUnique(&reachable, allocator, module.id);
-    }
+    for (project.modules.items) |module| if (module.is_root and module.source != null) try appendUnique(&reachable, allocator, module.id);
     var cursor: usize = 0;
     while (cursor < reachable.items.len) : (cursor += 1) {
         const current = reachable.items[cursor];
         for (project.edges()) |edge| {
             if (edge.importer != current or edge.state != .resolved) continue;
             if (edge.target) |target| try appendUnique(&reachable, allocator, target);
-        }
-        for (project.semanticResult().?.imports) |item| {
-            if (item.module_id != current.value() or item.type_only or !item.runtime_binding) continue;
-            const target = item.target orelse continue;
-            if (target.external_module_id != null) continue;
-            try appendUnique(&reachable, allocator, .init(target.declaration.module_id));
         }
     }
     std.mem.sort(project_mod.ModuleId, reachable.items, {}, lessModuleId);
