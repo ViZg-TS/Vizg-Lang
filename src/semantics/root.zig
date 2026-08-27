@@ -441,7 +441,7 @@ fn analyzeModuleGraphData(
         completion_index -= 1;
         const module = &project_modules.items[completion_index];
         const graph_module = graphModule(graph, module.id) orelse continue;
-        const imported_types = try importedTypeBindings(allocator, module.id, import_list.items, &type_store);
+        const imported_types = try importedTypeBindings(allocator, module.id, import_list.items, &type_store, external_exports.items, export_list.items);
         _ = try type_collector.collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
             allocator,
             graph_module.result.source,
@@ -460,7 +460,7 @@ fn analyzeModuleGraphData(
     // Missing/cyclic targets remain stable `unknown` placeholders.
     for (project_modules.items) |*module| {
         const graph_module = graphModule(graph, module.id) orelse continue;
-        const imported_types = try importedTypeBindings(allocator, module.id, import_list.items, &type_store);
+        const imported_types = try importedTypeBindings(allocator, module.id, import_list.items, &type_store, external_exports.items, export_list.items);
         module.type_info = try buildTypeInfo(
             allocator,
             module.id,
@@ -820,10 +820,67 @@ fn findExternalSemanticExport(
 ) ?ExternalSemanticExport {
     for (exports) |item| {
         if (item.external_module_id != module_id or !std.mem.eql(u8, item.name, name)) continue;
-        if (default_export != (item.kind == .default)) continue;
+        const is_default = item.kind == .default or
+            (item.kind == .namespace and std.mem.eql(u8, item.name, "default"));
+        if (default_export != is_default) continue;
         return item;
     }
     return null;
+}
+
+fn externalNamespaceIdentity(
+    allocator: std.mem.Allocator,
+    type_store: *types.TypeStore,
+    external_exports: []const ExternalSemanticExport,
+    external_module: u64,
+    namespace: binder.SymbolNamespace,
+) !SemanticIdentity {
+    var properties: std.ArrayList(types.ObjectProperty) = .empty;
+    for (external_exports) |exported| {
+        if (exported.external_module_id != external_module or std.mem.eql(u8, exported.name, "default")) continue;
+        const identity = switch (namespace) {
+            .value => exported.value_identity,
+            .type => exported.type_identity,
+        } orelse continue;
+        try properties.append(allocator, .{ .name = exported.name, .type_id = identity.type_id });
+    }
+    return .{
+        .symbol_id = null,
+        .declaration = types.SemanticDeclId.initExternal(external_module, ast.invalid_node),
+        .type_id = if (properties.items.len == 0)
+            type_store.builtins.unknown
+        else
+            try type_store.intern(.{ .object = properties.items }),
+        .namespace = namespace,
+        .external_module_id = external_module,
+    };
+}
+
+fn sourceNamespaceIdentity(
+    allocator: std.mem.Allocator,
+    type_store: *types.TypeStore,
+    exports: []const SemanticExport,
+    target_module: ModuleId,
+    namespace: binder.SymbolNamespace,
+) !SemanticIdentity {
+    var properties: std.ArrayList(types.ObjectProperty) = .empty;
+    for (exports) |exported| {
+        if (exported.module_id != target_module or std.mem.eql(u8, exported.name, "default")) continue;
+        const identity = switch (namespace) {
+            .value => if (!exported.type_only and exported.identity.namespace == .value) exported.identity else continue,
+            .type => exported.type_identity orelse continue,
+        };
+        try properties.append(allocator, .{ .name = exported.name, .type_id = identity.type_id });
+    }
+    return .{
+        .symbol_id = null,
+        .declaration = types.SemanticDeclId.init(target_module, ast.invalid_node),
+        .type_id = if (properties.items.len == 0)
+            type_store.builtins.unknown
+        else
+            try type_store.intern(.{ .object = properties.items }),
+        .namespace = namespace,
+    };
 }
 
 fn appendExternalReExport(
@@ -882,7 +939,7 @@ fn resolveReExports(
                     const edge = edgeForSpan(graph, module.id, decl.source_span orelse continue, true) orelse continue;
                     if (edge.external_to) |external_module| {
                         for (external_exports) |target| {
-                            if (target.external_module_id != external_module or target.kind == .default) continue;
+                            if (target.external_module_id != external_module or std.mem.eql(u8, target.name, "default")) continue;
                             const type_only = if (decl.type_only)
                                 if (target.type_identity != null) true else continue
                             else if (target.value_identity != null)
@@ -949,24 +1006,10 @@ fn collectSemanticImports(
         var type_target: ?SemanticIdentity = null;
         if (edge.external_to) |external_module| {
             if (import_kind == .namespace) {
-                var properties: std.ArrayList(types.ObjectProperty) = .empty;
-                for (external_exports) |exported| {
-                    if (exported.external_module_id != external_module) continue;
-                    const property_identity = if (type_only) exported.type_identity else exported.value_identity;
-                    if (property_identity) |identity| try properties.append(allocator, .{ .name = exported.name, .type_id = identity.type_id });
-                }
-                const namespace_type = if (properties.items.len == 0)
-                    type_store.builtins.unknown
-                else
-                    try type_store.intern(.{ .object = properties.items });
-                target = .{
-                    .symbol_id = null,
-                    .declaration = types.SemanticDeclId.initExternal(external_module, ast.invalid_node),
-                    .type_id = namespace_type,
-                    .namespace = if (type_only) .type else .value,
-                    .external_module_id = external_module,
-                };
-                if (type_only) type_target = target;
+                const value_namespace = try externalNamespaceIdentity(allocator, type_store, external_exports, external_module, .value);
+                const type_namespace = try externalNamespaceIdentity(allocator, type_store, external_exports, external_module, .type);
+                target = if (type_only) type_namespace else value_namespace;
+                type_target = type_namespace;
                 state = .namespace;
             } else if (findExternalSemanticExport(
                 external_exports,
@@ -974,31 +1017,37 @@ fn collectSemanticImports(
                 link.imported_name,
                 import_kind == .default,
             )) |exported| {
-                if (type_only) {
-                    target = exported.type_identity;
-                    type_target = exported.type_identity;
+                // A namespace-valued default export is an explicit host signal
+                // that the default binding aliases the external module namespace.
+                // This is how hosts can support `defaultImport.Type` without
+                // assigning semantics to the module specifier spelling.
+                if (exported.kind == .namespace and std.mem.eql(u8, exported.name, "default")) {
+                    const value_namespace = try externalNamespaceIdentity(allocator, type_store, external_exports, external_module, .value);
+                    const type_namespace = try externalNamespaceIdentity(allocator, type_store, external_exports, external_module, .type);
+                    target = if (type_only) type_namespace else value_namespace;
+                    type_target = type_namespace;
+                    state = .namespace;
                 } else {
-                    target = exported.value_identity;
-                    type_target = exported.type_identity;
+                    if (type_only) {
+                        target = exported.type_identity;
+                        type_target = exported.type_identity;
+                    } else {
+                        target = exported.value_identity;
+                        type_target = exported.type_identity;
+                    }
+                    state = if (target != null) .resolved else .unresolved;
                 }
-                state = if (target != null) .resolved else .unresolved;
             } else {
                 state = .unresolved;
             }
         }
         if (link.target_module) |target_module| {
             if (link.kind == .namespace) {
-                var properties: std.ArrayList(types.ObjectProperty) = .empty;
-                for (exports) |item| {
-                    if (item.module_id != target_module or item.type_only) continue;
-                    try properties.append(allocator, .{ .name = item.name, .type_id = item.identity.type_id });
-                }
-                target = .{
-                    .symbol_id = null,
-                    .declaration = types.SemanticDeclId.init(target_module, ast.invalid_node),
-                    .type_id = if (properties.items.len == 0) type_store.builtins.unknown else try type_store.intern(.{ .object = properties.items }),
-                    .namespace = if (type_only) .type else .value,
-                };
+                const value_namespace = try sourceNamespaceIdentity(allocator, type_store, exports, target_module, .value);
+                const type_namespace = try sourceNamespaceIdentity(allocator, type_store, exports, target_module, .type);
+                target = if (type_only) type_namespace else value_namespace;
+                type_target = type_namespace;
+                state = .namespace;
             } else if (exportIndex(exports, target_module, link.imported_name, type_only)) |index| {
                 target = if (type_only) exports[index].type_identity orelse exports[index].identity else exports[index].identity;
                 type_target = exports[index].type_identity;
@@ -1059,23 +1108,13 @@ fn refreshNamespaceImportTargets(
             if (candidate.from_module == item.module_id and candidate.import_symbol == item.import_symbol) break :blk candidate;
         } else continue;
         const target_module = link.target_module orelse continue;
-        var properties: std.ArrayList(types.ObjectProperty) = .empty;
-        for (exports) |exported| {
-            if (exported.module_id != target_module or exported.type_only) continue;
-            try properties.append(allocator, .{ .name = exported.name, .type_id = exported.identity.type_id });
-        }
-        const type_id = if (properties.items.len == 0)
-            type_store.builtins.unknown
-        else
-            try type_store.intern(.{ .object = properties.items });
-        if (item.target == null or item.target.?.type_id != type_id) changed = true;
-        item.target = .{
-            .symbol_id = null,
-            .declaration = types.SemanticDeclId.init(target_module, ast.invalid_node),
-            .type_id = type_id,
-            .namespace = if (item.type_only) .type else .value,
-        };
-        if (item.type_only) item.type_target = item.target;
+        const value_namespace = try sourceNamespaceIdentity(allocator, type_store, exports, target_module, .value);
+        const type_namespace = try sourceNamespaceIdentity(allocator, type_store, exports, target_module, .type);
+        const target = if (item.type_only) type_namespace else value_namespace;
+        if (item.target == null or item.target.?.type_id != target.type_id or
+            item.type_target == null or item.type_target.?.type_id != type_namespace.type_id) changed = true;
+        item.target = target;
+        item.type_target = type_namespace;
         item.runtime_binding = !item.type_only;
     }
     return changed;
@@ -1195,17 +1234,46 @@ fn importedTypeBindings(
     module_id: ModuleId,
     imports: []const SemanticImport,
     type_store: *const types.TypeStore,
+    external_exports: []const ExternalSemanticExport,
+    exports: []const SemanticExport,
 ) ![]const type_collector.ImportedTypeBinding {
     var bindings: std.ArrayList(type_collector.ImportedTypeBinding) = .empty;
     for (imports) |item| {
-        if (item.module_id != module_id or item.state == .namespace) continue;
-        const target = item.type_target orelse if (item.state == .unresolved or item.state == .cyclic_partial) null else continue;
+        if (item.module_id != module_id) continue;
+        const target = item.type_target;
+        var namespace_members: std.ArrayList(type_collector.ImportedTypeMember) = .empty;
+        if (item.state == .namespace) {
+            if (item.external_module_id) |external_module| {
+                for (external_exports) |exported| {
+                    if (exported.external_module_id != external_module or std.mem.eql(u8, exported.name, "default")) continue;
+                    const identity = exported.type_identity orelse continue;
+                    try namespace_members.append(allocator, .{
+                        .name = exported.name,
+                        .type_id = identity.type_id,
+                        .declaration = identity.declaration,
+                    });
+                }
+            } else if (item.target_module_id) |target_module| {
+                for (exports) |exported| {
+                    if (exported.module_id != target_module or std.mem.eql(u8, exported.name, "default")) continue;
+                    const identity = exported.type_identity orelse continue;
+                    try namespace_members.append(allocator, .{
+                        .name = exported.name,
+                        .type_id = identity.type_id,
+                        .declaration = identity.declaration,
+                    });
+                }
+            }
+        }
         try bindings.append(allocator, .{
             .local_name = item.local_name,
             .symbol_id = item.import_symbol,
             .type_id = if (target) |identity| identity.type_id else type_store.builtins.unknown,
             .declaration = if (target) |identity| identity.declaration else null,
-            .placeholder = target == null,
+            .placeholder = target == null and (item.state == .unresolved or item.state == .cyclic_partial),
+            .type_available = target != null,
+            .namespace = item.state == .namespace,
+            .namespace_members = try namespace_members.toOwnedSlice(allocator),
         });
     }
     return bindings.toOwnedSlice(allocator);

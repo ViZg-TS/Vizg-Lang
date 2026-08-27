@@ -902,6 +902,70 @@ test "HIR eligibility accepts typed external bindings without source bodies" {
     try std.testing.expectEqual(@as(u64, 7001), result.project.modules[0].imports[0].target.intrinsic_id.?.value());
 }
 
+test "HIR preserves namespace-valued default external identity for qualified types" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(13),
+        .logical_name = "qualified-external.ts",
+        .bytes =
+        \\import native from 'native:qualified';
+        \\const value: native.NativeShape = { x: 1 };
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, .{
+            .id = .init(9002),
+            .logical_name = "native:qualified",
+            .types = &.{.{
+                .id = .init(73),
+                .name = "NativeShape",
+                .members = &.{.{
+                    .name = "x",
+                    .type_reference = .{ .builtin = .number },
+                }},
+            }},
+            .exports = &.{
+                .{
+                    .name = "default",
+                    .kind = .namespace,
+                    .namespace = .{ .value = true, .type = true },
+                    .type_metadata = .any,
+                    .symbol_id = .init(0),
+                    .declaration_kind = .global,
+                    .effects = .{ .unknown = false },
+                },
+                .{
+                    .name = "NativeShape",
+                    .namespace = .{ .type = true },
+                    .type_reference = .{ .declared = .init(73) },
+                    .declaration_kind = .type,
+                },
+            },
+        }),
+    };
+    try std.testing.expect(!(try project.finish()).has_failures);
+
+    var report = try hir.eligibility.check(std.testing.allocator, &project, .{});
+    defer report.deinit();
+    try std.testing.expect(report.isEligible());
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    try std.testing.expectEqual(@as(usize, 1), result.project.modules.len);
+    try std.testing.expectEqual(@as(usize, 1), result.project.modules[0].imports.len);
+    try std.testing.expectEqual(@as(u64, 9002), result.project.modules[0].imports[0].source.external.value());
+    try std.testing.expectEqual(@as(u64, 0), result.project.modules[0].imports[0].target.external_symbol_id.?.value());
+    try std.testing.expectEqual(@as(usize, 1), result.project.external_declarations.len);
+    try std.testing.expectEqual(@as(u64, 0), result.project.external_declarations[0].symbol_id.value());
+    try std.testing.expectEqualStrings("default", result.project.external_declarations[0].exported_name);
+}
+
 test "semantic intrinsic calls lower as first-class HIR operations" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();

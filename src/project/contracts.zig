@@ -257,9 +257,11 @@ pub const ExternalEffectSet = packed struct(u16) {
     reserved: u9 = 0,
 };
 
-/// One external export. Default exports must use name `default`. Namespace
-/// exports are named namespace-valued members; `import *` is synthesized from
-/// every member available in the namespace requested by the import.
+/// One external export. Default exports must use name `default`. A namespace
+/// export may also use name `default` to declare that the default binding is a
+/// module-namespace alias; named namespace exports remain namespace-valued
+/// members. `import *` is synthesized from every member available in the
+/// namespace requested by the import.
 pub const ExternalExportDescriptor = struct {
     name: []const u8,
     kind: ExternalExportKind = .named,

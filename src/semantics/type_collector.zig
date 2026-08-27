@@ -17,12 +17,26 @@ pub const DeclaredSymbolType = struct {
 /// Project-owned type identity made visible by one import binding. A missing
 /// target uses `unknown` as a cycle-safe placeholder and emits no local-name
 /// diagnostic while module linking is incomplete.
+pub const ImportedTypeMember = struct {
+    name: []const u8,
+    type_id: types.TypeId,
+    declaration: ?types.SemanticDeclId = null,
+};
+
 pub const ImportedTypeBinding = struct {
     local_name: []const u8,
     symbol_id: ?binder.SymbolId,
     type_id: types.TypeId,
     declaration: ?types.SemanticDeclId = null,
     placeholder: bool = false,
+    /// Whether this import itself contributes a type-space identity. Value-only
+    /// imports remain visible here so qualified-name resolution can distinguish
+    /// a project-resolved non-namespace from the import-blind single-file pass.
+    type_available: bool = true,
+    /// True when the import binding denotes a module/type namespace that may
+    /// qualify a named type (`ns.Type`).
+    namespace: bool = false,
+    namespace_members: []const ImportedTypeMember = &.{},
 };
 
 pub const FunctionSignatureEntry = struct {
@@ -844,7 +858,10 @@ fn resolveTypeNode(
     const node = context.tree.typeNode(node_id);
     const resolved = switch (node.data) {
         .Named => |named| blk: {
-            const resolution = try resolveTypeName(context, named.name);
+            const resolution = if (named.qualifiers.len == 0)
+                try resolveTypeName(context, named.name)
+            else
+                try resolveQualifiedTypeName(context, named);
             break :blk switch (resolution) {
                 .resolved => |value| resolved: {
                     if (context.type_store.lookup(value.type_id)) |resolved_type| {
@@ -1234,8 +1251,12 @@ fn resolveTypeQuery(context: *TypeResolutionContext, name: []const u8, span: ast
 pub fn resolveTypeName(context: *TypeResolutionContext, name: []const u8) anyerror!TypeNameResolution {
     if (findVisibleSymbol(context, name, .type)) |symbol| {
         if (symbol.kind == .import) {
-            if (findImportedType(context, name, symbol.id)) |imported| return importedResolution(imported);
-            if (findImportedType(context, name, null)) |imported| return importedResolution(imported);
+            if (findImportedType(context, name, symbol.id)) |imported| {
+                if (imported.type_available and !imported.namespace) return importedResolution(imported);
+            }
+            if (findImportedType(context, name, null)) |imported| {
+                if (imported.type_available and !imported.namespace) return importedResolution(imported);
+            }
             // Import types are resolved at the project level, not during
             // single-module analysis. Return unknown instead of unresolved
             // to avoid false "cannot find type name" diagnostics during the
@@ -1257,7 +1278,9 @@ pub fn resolveTypeName(context: *TypeResolutionContext, name: []const u8) anyerr
             .declaration = types.SemanticDeclId.init(context.current_module, symbol.declaration),
         } };
     }
-    if (findImportedType(context, name, null)) |imported| return importedResolution(imported);
+    if (findImportedType(context, name, null)) |imported| {
+        if (imported.type_available and !imported.namespace) return importedResolution(imported);
+    }
     inline for (builtin_kind.builtinKinds) |kind| {
         if (std.mem.eql(u8, name, builtin_kind.builtinKindName(kind))) return .{ .resolved = .{
             .type_id = context.type_store.builtins.id(kind),
@@ -1267,6 +1290,73 @@ pub fn resolveTypeName(context: *TypeResolutionContext, name: []const u8) anyerr
         .name = name,
         .reason = if (findVisibleSymbol(context, name, .value) != null) .value_only else .unknown_name,
     } };
+}
+
+fn resolveQualifiedTypeName(context: *TypeResolutionContext, named: ast_mod.NamedType) anyerror!TypeNameResolution {
+    std.debug.assert(named.qualifiers.len != 0);
+    const root_name = named.qualifiers[0];
+    const symbol = findVisibleSymbol(context, root_name, .type) orelse
+        findVisibleSymbol(context, root_name, .value) orelse
+        return .{ .unresolved = .{ .name = root_name, .reason = .unknown_name } };
+    if (symbol.kind != .import) return .{ .unresolved = .{
+        .name = root_name,
+        .reason = if (symbol.namespace == .value) .value_only else .unavailable_declaration,
+    } };
+
+    const imported = findImportedType(context, root_name, symbol.id) orelse
+        findImportedType(context, root_name, null) orelse
+        // Single-file analysis intentionally has no project import table. As
+        // with direct imported type names, defer the decision to the project
+        // pass rather than emitting a false unknown-name diagnostic that would
+        // survive into Project diagnostics.
+        return .{ .resolved = .{
+            .type_id = context.type_store.builtins.unknown,
+            .symbol_id = symbol.id,
+            .declaration = types.SemanticDeclId.init(context.current_module, symbol.declaration),
+        } };
+    if (!imported.namespace) return .{ .unresolved = .{ .name = root_name, .reason = .value_only } };
+    if (imported.placeholder) return .{ .resolved = .{
+        .type_id = context.type_store.builtins.unknown,
+        .symbol_id = imported.symbol_id,
+        .declaration = imported.declaration,
+    } };
+
+    // The first member is resolved from the namespace's identity-preserving
+    // member table so a qualified generic (`ns.Box<T>`) retains its declaration
+    // key. Deeper namespace/object qualification falls back to structural
+    // property lookup after the first hop.
+    const first_member_name = if (named.qualifiers.len == 1) named.name else named.qualifiers[1];
+    var current_type: types.TypeId = context.type_store.builtins.unknown;
+    var current_declaration: ?types.SemanticDeclId = null;
+    var found_first = false;
+    for (imported.namespace_members) |member| {
+        if (!std.mem.eql(u8, member.name, first_member_name)) continue;
+        current_type = member.type_id;
+        current_declaration = member.declaration;
+        found_first = true;
+        break;
+    }
+    if (!found_first) {
+        const property = try lookupStringProperty(context, imported.type_id, first_member_name) orelse
+            return .{ .unresolved = .{ .name = first_member_name, .reason = .unknown_name } };
+        current_type = property.type_id;
+    }
+
+    if (named.qualifiers.len == 1) return .{ .resolved = .{
+        .type_id = current_type,
+        .declaration = current_declaration,
+    } };
+
+    var qualifier_index: usize = 2;
+    while (qualifier_index < named.qualifiers.len) : (qualifier_index += 1) {
+        const property = try lookupStringProperty(context, current_type, named.qualifiers[qualifier_index]) orelse
+            return .{ .unresolved = .{ .name = named.qualifiers[qualifier_index], .reason = .unknown_name } };
+        current_type = property.type_id;
+        current_declaration = null;
+    }
+    const final_property = try lookupStringProperty(context, current_type, named.name) orelse
+        return .{ .unresolved = .{ .name = named.name, .reason = .unknown_name } };
+    return .{ .resolved = .{ .type_id = final_property.type_id } };
 }
 
 fn ensureSymbolType(context: *TypeResolutionContext, symbol_id: binder.SymbolId) anyerror!?types.TypeId {

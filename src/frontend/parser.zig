@@ -1056,10 +1056,19 @@ const Parser = struct {
             return self.addTypeNode(.{ .span = template.span, .data = .{ .Named = .{ .name = "<unsupported-template-literal>" } } });
         }
         if (self.at(.Identifier) or self.at(.PrivateIdentifier) or self.at(.Keyword_void)) {
-            const name = self.advance();
+            const first = self.advance();
+            var parts: std.ArrayList([]const u8) = .empty;
+            defer parts.deinit(self.allocator);
+            try parts.append(self.allocator, first.lexeme);
+            var end = first.span;
+            while (self.eat(.Dot)) {
+                const part = self.expectIdentifierLike("expected type name after '.'");
+                try parts.append(self.allocator, part.lexeme);
+                end = part.span;
+            }
+
             var arguments: std.ArrayList(ast_mod.TypeNodeId) = .empty;
             errdefer arguments.deinit(self.allocator);
-            var end = name.span;
             if (self.eat(.LessThan)) {
                 while (!self.at(.GreaterThan) and !self.at(.EOF)) {
                     const before = self.index;
@@ -1069,9 +1078,18 @@ const Parser = struct {
                 }
                 end = self.expect(.GreaterThan, "expected '>' after type arguments").span;
             }
+
+            const qualifiers = if (parts.items.len > 1)
+                try self.allocator.dupe([]const u8, parts.items[0 .. parts.items.len - 1])
+            else
+                &.{};
             return self.addTypeNode(.{
-                .span = joinSpans(name.span, end),
-                .data = .{ .Named = .{ .name = name.lexeme, .type_arguments = try arguments.toOwnedSlice(self.allocator) } },
+                .span = joinSpans(first.span, end),
+                .data = .{ .Named = .{
+                    .qualifiers = qualifiers,
+                    .name = parts.items[parts.items.len - 1],
+                    .type_arguments = try arguments.toOwnedSlice(self.allocator),
+                } },
             });
         }
 

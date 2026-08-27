@@ -17,6 +17,9 @@ pub const TypeAnnotation = struct {
 };
 
 pub const NamedType = struct {
+    /// Qualifier segments preceding `name` in a TypeScript entity name.
+    /// `raylib.Camera3D` is represented as qualifiers=["raylib"], name="Camera3D".
+    qualifiers: []const []const u8 = &.{},
     name: []const u8,
     type_arguments: []const TypeNodeId = &.{},
 };
@@ -581,7 +584,7 @@ pub const Ast = struct {
     pub fn annotationName(self: Ast, annotation: TypeAnnotation) ?[]const u8 {
         const type_node = self.typeNode(annotation.root);
         return switch (type_node.data) {
-            .Named => |named| if (named.type_arguments.len == 0) named.name else null,
+            .Named => |named| if (named.qualifiers.len == 0 and named.type_arguments.len == 0) named.name else null,
             .Parenthesized => |inner| self.annotationName(.{ .root = inner, .span = self.typeNode(inner).span }),
             else => null,
         };

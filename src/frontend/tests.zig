@@ -3153,3 +3153,30 @@ test "frontend suite: color_art.ts fixture — 0 diagnostics smoke test" {
     // Fixture must produce a module AST with exports (exercise export default).
     try std.testing.expect(result.bind.module.exports.len > 0);
 }
+
+test "frontend suite: qualified type names preserve namespace segments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\let camera: raylib.Camera3D;
+        \\function make(): api.graphics.Vector3<number> { return value; }
+    );
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+
+    const camera_decl = parsed.ast.node(parsed.ast.node(statements[0]).data.VariableDeclaration.declarations[0]).data.VariableDeclarator;
+    const camera_type = parsed.ast.typeNode(camera_decl.type_annotation.?.root).data.Named;
+    try std.testing.expectEqual(@as(usize, 1), camera_type.qualifiers.len);
+    try std.testing.expectEqualStrings("raylib", camera_type.qualifiers[0]);
+    try std.testing.expectEqualStrings("Camera3D", camera_type.name);
+    try std.testing.expectEqual(@as(usize, 0), camera_type.type_arguments.len);
+
+    const make_decl = parsed.ast.node(statements[1]).data.FunctionDeclaration;
+    const return_type = parsed.ast.typeNode(make_decl.return_type.?.root).data.Named;
+    try std.testing.expectEqual(@as(usize, 2), return_type.qualifiers.len);
+    try std.testing.expectEqualStrings("api", return_type.qualifiers[0]);
+    try std.testing.expectEqualStrings("graphics", return_type.qualifiers[1]);
+    try std.testing.expectEqualStrings("Vector3", return_type.name);
+    try std.testing.expectEqual(@as(usize, 1), return_type.type_arguments.len);
+}

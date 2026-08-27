@@ -1279,7 +1279,37 @@ pub const Project = struct {
             if (edge.state != .external) continue;
             const external_id = edge.external_target orelse continue;
             const external = self.findExternal(external_id) orelse continue;
-            if (item.state == .namespace) continue;
+            if (item.state == .namespace) {
+                // A namespace-valued default import still needs the host's
+                // stable external symbol identity (VZed uses symbol 0 for its
+                // synthetic native-module namespace). Preserve the semantic
+                // namespace object TypeId while attaching only identity/effect
+                // metadata; explicit `import *` has no single export symbol.
+                if (std.mem.eql(u8, item.imported_name, "default")) {
+                    const exported = findExternalExport(external.exports, item.imported_name, .default, item.type_only);
+                    if (exported) |descriptor| {
+                        if (descriptor.kind == .namespace) {
+                            if (item.target) |identity| {
+                                var enriched = identity;
+                                enriched.external_symbol_id = if (descriptor.symbol_id) |id| id.value() else null;
+                                enriched.intrinsic_id = if (descriptor.intrinsic_id) |id| id.value() else null;
+                                enriched.external_declaration_kind = descriptor.declaration_kind;
+                                enriched.external_effects = descriptor.effects;
+                                item.target = enriched;
+                            }
+                            if (item.type_target) |identity| {
+                                var enriched = identity;
+                                enriched.external_symbol_id = if (descriptor.symbol_id) |id| id.value() else null;
+                                enriched.intrinsic_id = if (descriptor.intrinsic_id) |id| id.value() else null;
+                                enriched.external_declaration_kind = descriptor.declaration_kind;
+                                enriched.external_effects = descriptor.effects;
+                                item.type_target = enriched;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             const import_kind: ast.ImportSpecifierKind = if (std.mem.eql(u8, item.imported_name, "default")) .default else .named;
             const exported = findExternalExport(external.exports, item.imported_name, import_kind, item.type_only);
             if (exported == null) {
@@ -1634,7 +1664,11 @@ fn validateExternalDescriptor(descriptor: contracts.ExternalModuleDescriptor) !v
         if (item.name.len == 0 or !item.namespace.isValid()) return error.InvalidExternalExport;
         switch (item.kind) {
             .default => if (!std.mem.eql(u8, item.name, "default")) return error.InvalidExternalExport,
-            .named, .namespace => if (std.mem.eql(u8, item.name, "default")) return error.InvalidExternalExport,
+            .named => if (std.mem.eql(u8, item.name, "default")) return error.InvalidExternalExport,
+            // A namespace export named `default` explicitly models a default
+            // binding that aliases the module namespace. This lets hosts expose
+            // namespace-valued defaults without inventing specifier semantics.
+            .namespace => {},
         }
         for (descriptor.exports[0..index]) |previous| {
             if (std.mem.eql(u8, previous.name, item.name)) return error.DuplicateExternalExport;
@@ -1714,7 +1748,8 @@ fn findExternalExport(
 ) ?contracts.ExternalExportDescriptor {
     for (exports) |item| {
         const kind_matches = switch (import_kind) {
-            .default => item.kind == .default,
+            .default => item.kind == .default or
+                (item.kind == .namespace and std.mem.eql(u8, item.name, "default")),
             .named => item.kind == .named or item.kind == .namespace,
             .namespace => unreachable,
         };
@@ -3595,4 +3630,107 @@ test "named source re-export refreshes downstream expression typing without reco
         if (symbol.effective()) |type_id|
             try std.testing.expect(type_id != semantic.type_store.builtins.unknown);
     }
+}
+
+test "external namespace-valued default resolves qualified type annotations" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+
+    const root_id = contracts.ModuleId.init(419);
+    const external_id = contracts.ExternalModuleId.init(9019);
+    const native_shape_id = contracts.ExternalTypeId.init(71);
+    const native_child_id = contracts.ExternalTypeId.init(72);
+    try project.addRoot(.{
+        .id = root_id,
+        .logical_name = "root",
+        .bytes =
+        \\import native from 'native:qualified';
+        \\function update() {
+        \\    let value: native.NativeShape = { child: { x: 1 }, y: 2 };
+        \\    value.y = value.y + 1;
+        \\    value.child.x = 3;
+        \\}
+        \\update();
+        ,
+    });
+
+    const descriptor: contracts.ExternalModuleDescriptor = .{
+        .id = external_id,
+        .logical_name = "native:qualified",
+        .types = &.{
+            .{
+                .id = native_child_id,
+                .name = "NativeChild",
+                .members = &.{.{
+                    .name = "x",
+                    .type_reference = .{ .builtin = .number },
+                }},
+            },
+            .{
+                .id = native_shape_id,
+                .name = "NativeShape",
+                .members = &.{
+                    .{
+                        .name = "child",
+                        .type_reference = .{ .declared = native_child_id },
+                    },
+                    .{
+                        .name = "y",
+                        .type_reference = .{ .builtin = .number },
+                    },
+                },
+            },
+        },
+        .exports = &.{
+            .{
+                .name = "default",
+                .kind = .namespace,
+                .namespace = .{ .value = true, .type = true },
+                .type_metadata = .any,
+                .symbol_id = contracts.ExternalSymbolId.init(0),
+                .declaration_kind = .global,
+                .effects = .{},
+            },
+            .{
+                .name = "NativeShape",
+                .namespace = .{ .type = true },
+                .type_reference = .{ .declared = native_shape_id },
+                .declaration_kind = .type,
+            },
+        },
+    };
+
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, descriptor),
+    };
+    const finished = try project.finish();
+    try std.testing.expect(!finished.has_failures);
+
+    const result = project.semanticResult().?;
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    const expected_type = result.type_store.lookupExternalType(.{
+        .module_id = external_id.value(),
+        .type_id = native_shape_id.value(),
+    }) orelse return error.ExpectedExternalType;
+
+    const source_module = project.lookup(root_id).?.semantic_result.?.frontend;
+    var value_symbol: ?binder.SymbolId = null;
+    for (source_module.bind.symbols) |symbol| {
+        if (symbol.namespace == .value and std.mem.eql(u8, symbol.name, "value")) {
+            value_symbol = symbol.id;
+            break;
+        }
+    }
+    const symbol_id = value_symbol orelse return error.ExpectedValueSymbol;
+    const semantic_module = result.lookupModule(root_id.value()) orelse return error.ExpectedSemanticModule;
+    try std.testing.expectEqual(expected_type, semantic_module.type_info.lookupSymbol(symbol_id).?.declared_type.?);
+
+    var saw_namespace = false;
+    for (result.imports) |item| {
+        if (!std.mem.eql(u8, item.local_name, "native")) continue;
+        saw_namespace = item.state == .namespace and item.type_target != null and item.runtime_binding and
+            item.target != null and item.target.?.external_symbol_id == 0;
+    }
+    try std.testing.expect(saw_namespace);
 }

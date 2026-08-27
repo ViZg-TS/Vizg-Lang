@@ -256,7 +256,9 @@ fn printTypeNode(writer: *Io.Writer, tree: ast_mod.Ast, type_id: ast_mod.TypeNod
     try writer.print("Type{s} #{} {}..{}", .{ @tagName(node.data), type_id, node.span.start, node.span.end });
     switch (node.data) {
         .Named => |named| {
-            try writer.print(" name=\"{s}\"\n", .{named.name});
+            try writer.writeAll(" name=\"");
+            for (named.qualifiers) |qualifier| try writer.print("{s}.", .{qualifier});
+            try writer.print("{s}\"\n", .{named.name});
             for (named.type_arguments) |child| try printTypeNode(writer, tree, child, depth + 1);
         },
         .Literal => |literal| try writer.print(" kind={s} spelling=\"{s}\"\n", .{ @tagName(literal.kind), literal.spelling }),
