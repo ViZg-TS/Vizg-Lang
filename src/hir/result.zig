@@ -68,6 +68,12 @@ pub const HirResult = struct {
         return if (self.type_store) |*store| store.lookupFunctionSignature(id) else null;
     }
 
+    /// Resolve one applied generic to its canonical substituted target. This
+    /// remains a read-only HIR detail query; ordinary types return themselves.
+    pub fn resolveAppliedTarget(self: *const HirResult, id: types.TypeId) !types.TypeId {
+        return if (self.type_store) |*store| store.resolveAppliedTarget(id) else error.UnsealedResult;
+    }
+
     pub fn makeId(self: *const HirResult, comptime IdType: type, index: u32) !IdType {
         return IdType.init(self.identity_domain, index);
     }

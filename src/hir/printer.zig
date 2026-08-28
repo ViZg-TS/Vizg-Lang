@@ -71,12 +71,17 @@ pub fn write(
     for (project.language_items) |item| {
         try writer.print("language-item 0x{x} name=", .{item.id.value()});
         try writeQuoted(writer, item.exported_name);
-        try writer.print(" declaration={}:{} type={} namespace={s}\n", .{
+        try writer.print(" declaration={}:{} type={} namespace={s} function=", .{
             item.target.declaration.module_id,
             item.target.declaration.declaration_id,
             item.target.type_id,
             @tagName(item.target.namespace),
         });
+        if (item.function) |function_id|
+            try writer.print("{}", .{function_id})
+        else
+            try writer.writeAll("none");
+        try writer.writeByte('\n');
     }
 
     for (project.modules) |module| {

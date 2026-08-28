@@ -8,6 +8,13 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- HIR detail API v7 now exposes the optional executable HIR `FunctionId` for
+  source-defined value language items through an additive accessor while
+  preserving the v5 language-item record layout. Source-function value language-item modules
+  are retained in executable HIR reachability; type-only and non-callable value
+  anchors remain semantic-only. The same v7 surface can resolve an applied generic to its
+  canonical substituted target so downstream consumers do not need source-name
+  knowledge for aliases such as a selected-STD `Array<T>`.
 - Global source registration now accepts multiple source modules before any
   application root. Their disjoint named exports are published together while
   preserving each declaration's source-module identity.

@@ -169,6 +169,10 @@ pub const GenericParameter = struct {
 pub const AppliedGenericType = struct {
     declaration: SemanticDeclId,
     base_type: TypeId,
+    /// Canonical substituted target captured when the application is created.
+    /// Keeping it in the immutable type record lets HIR consumers resolve a
+    /// generic alias without mutating the sealed TypeStore.
+    resolved_target: TypeId,
     arguments: []const TypeId,
 };
 

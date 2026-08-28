@@ -350,7 +350,71 @@ test "source language item C API resolves versioned deterministic HIR identities
         try std.testing.expectEqual(@as(u64, index + 1), item.language_item_id);
         try std.testing.expectEqual(@as(u64, 52), item.target.declaration_module_id);
         try std.testing.expectEqualStrings(name, item.exported_name_ptr[0..item.exported_name_len]);
+        var function_id: u64 = 0;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+            c.vizg_hir_language_item_function(result, 6, item.language_item_id, &function_id),
+        );
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_language_item_function(result, c.VIZG_HIR_DETAIL_API_VERSION, item.language_item_id, &function_id),
+        );
+        try std.testing.expectEqual(c.VIZG_HIR_ID_NONE, function_id);
     }
+}
+
+test "HIR detail v7 exposes executable value language-item function identity" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    const export_name = "definitelyNotNamedMaterializeSequence";
+    var item = [_]c.Vizg_SourceLanguageItem{.{
+        .language_item_id = 0x101,
+        .module_id = 54,
+        .exported_name_ptr = export_name.ptr,
+        .exported_name_len = export_name.len,
+        .namespace_kind = c.VIZG_LANGUAGE_ITEM_NAMESPACE_VALUE,
+        .reserved = .{ 0, 0, 0, 0 },
+    }};
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_register_source_language_items(project, &item, item.len),
+    );
+    var root = projectSource(
+        54,
+        "std/internal/array_protocol.ts",
+        "export function definitelyNotNamedMaterializeSequence(value: number[]): number[] { return value; }",
+        true,
+    );
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+    const result = try finishProject(project);
+
+    var function_id: u64 = c.VIZG_HIR_ID_NONE;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_language_item_function(result, c.VIZG_HIR_DETAIL_API_VERSION, 0x101, &function_id),
+    );
+    try std.testing.expect(function_id != c.VIZG_HIR_ID_NONE);
+
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
+    );
+    var found = false;
+    for (0..summary.function_count) |index| {
+        var record: c.Vizg_HirRecord = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_FUNCTION, index, &record),
+        );
+        if (record.id != function_id) continue;
+        found = true;
+        try std.testing.expectEqualStrings(export_name, record.name_ptr[0..record.name_len]);
+    }
+    try std.testing.expect(found);
 }
 
 test "missing source language item fails closed with a stable project diagnostic" {
@@ -2289,4 +2353,39 @@ test "official ABI v1 add_global_root: validates hostile inputs without state mu
     // After all hostile inputs, a valid global root still succeeds.
     global_root = projectSource(0, "std.ts", "export const console = {};", true);
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_global_root(project, &global_root));
+}
+
+test "HIR detail v7 resolves applied generic targets without spelling knowledge" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(61, "generic-array.ts", "type Sequence<T> = T[]; type Via = Sequence<number>; const value: Via = [1, 2]; value;", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+    const result = try finishProject(project);
+
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary));
+    var saw_applied = false;
+    for (0..summary.type_count) |index| {
+        var detail: c.Vizg_HirTypeDetail = undefined;
+        try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail));
+        if (detail.kind != c.VIZG_HIR_TYPE_APPLIED_GENERIC) continue;
+        saw_applied = true;
+        var target: u32 = 0;
+        try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_hir_applied_generic_target(result, 6, detail.id, &target));
+        try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_applied_generic_target(result, c.VIZG_HIR_DETAIL_API_VERSION, detail.id, &target));
+        var found_target = false;
+        for (0..summary.type_count) |target_index| {
+            var target_detail: c.Vizg_HirTypeDetail = undefined;
+            try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, target_index, &target_detail));
+            if (target_detail.id != target) continue;
+            found_target = true;
+            try std.testing.expectEqual(@as(u32, c.VIZG_HIR_TYPE_ARRAY), target_detail.kind);
+            break;
+        }
+        try std.testing.expect(found_target);
+    }
+    try std.testing.expect(saw_applied);
 }

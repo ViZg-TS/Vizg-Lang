@@ -131,3 +131,60 @@ test "resolved source language items are deterministic immutable HIR identities"
     try std.testing.expectEqual(@as(usize, 2), view.languageItems().len);
     try std.testing.expectEqual(result.project.language_items[1].target.declaration, (try view.languageItem(.init(2))).target.declaration);
 }
+
+test "value language items retain executable HIR while type-only anchors stay semantic-only" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{
+        .{ .id = .init(2), .module_id = .init(243), .exported_name = "TypeAnchor", .namespace = .type },
+        .{ .id = .init(257), .module_id = .init(241), .exported_name = "materializeSequence", .namespace = .value },
+    });
+    try project.addGlobalRoot(.{
+        .id = .init(241),
+        .logical_name = "std/internal/array_protocol.ts",
+        .bytes = "export function materializeSequence(value: number): number { return value + 1; }",
+        .kind = .module,
+    });
+    try project.addGlobalRoot(.{
+        .id = .init(243),
+        .logical_name = "std/internal/type_anchor.ts",
+        .bytes = "export interface TypeAnchor { value: number; }",
+        .kind = .module,
+    });
+    try project.addRoot(.{
+        .id = .init(242),
+        .logical_name = "app.ts",
+        .bytes = "export const answer = 42;",
+        .kind = .module,
+    });
+    while (try project.step() != .complete) {}
+
+    var outcome = try derive(&project, .{});
+    defer outcome.deinit();
+    const result = outcome.result;
+
+    try std.testing.expectEqual(@as(usize, 2), result.project.language_items.len);
+    const type_item = result.project.language_items[0];
+    const value_item = result.project.language_items[1];
+    try std.testing.expectEqual(@as(u64, 2), type_item.id.value());
+    try std.testing.expect(type_item.function == null);
+    try std.testing.expectEqual(@as(u64, 257), value_item.id.value());
+    const function_id = value_item.function orelse return error.TestExpectedExecutableLanguageItem;
+    const function = for (result.project.functions) |candidate| {
+        if (candidate.id.eql(function_id)) break candidate;
+    } else return error.TestExpectedExecutableLanguageItem;
+    try std.testing.expectEqual(value_item.target.declaration, function.symbol.?);
+    try std.testing.expectEqual(@as(u64, 241), function.module_id.value());
+
+    var saw_value_module = false;
+    var saw_application_module = false;
+    var saw_type_only_module = false;
+    for (result.project.modules) |module| {
+        if (module.module_id.value() == 241) saw_value_module = true;
+        if (module.module_id.value() == 242) saw_application_module = true;
+        if (module.module_id.value() == 243) saw_type_only_module = true;
+    }
+    try std.testing.expect(saw_value_module);
+    try std.testing.expect(saw_application_module);
+    try std.testing.expect(!saw_type_only_module);
+}

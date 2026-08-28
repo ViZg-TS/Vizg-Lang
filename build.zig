@@ -389,6 +389,7 @@ pub fn build(b: *std.Build) void {
         \\expected='vizg_abi_version
         \\vizg_external_module_api_version
         \\vizg_hir_api_version
+        \\vizg_hir_applied_generic_target
         \\vizg_hir_array_element_type
         \\vizg_hir_binding_detail_at
         \\vizg_hir_block_detail_at
@@ -406,6 +407,7 @@ pub fn build(b: *std.Build) void {
         \\vizg_hir_function_storage_detail_at
         \\vizg_hir_language_item_at
         \\vizg_hir_language_item_count
+        \\vizg_hir_language_item_function
         \\vizg_hir_module_dependency_at
         \\vizg_hir_module_detail_at
         \\vizg_hir_module_export_at
@@ -499,7 +501,7 @@ pub fn build(b: *std.Build) void {
 
     // Regression gate: the installed archive must link into the default PIE
     // produced by the documented native C compiler command.
-    const native_consumer_link = b.addSystemCommand(&.{ "cc", "-std=c11", "-I", "Lib" });
+    const native_consumer_link = b.addSystemCommand(&.{ b.graph.zig_exe, "cc", "-std=c11", "-I", "Lib" });
     if (target.result.os.tag == .linux) native_consumer_link.addArg("-Wl,-z,noexecstack");
     native_consumer_link.addFileArg(b.path("example/hir_consumer.c"));
     native_consumer_link.addArtifactArg(vizg_lib);

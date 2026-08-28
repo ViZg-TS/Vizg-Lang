@@ -158,11 +158,36 @@ pub const TypeStore = struct {
         if (arguments.len > max_generic_arguments) return error.TypeComplexityLimit;
         const declaration = self.lookupGenericDeclaration(identity) orelse return error.UnknownGenericDeclaration;
         if (arguments.len != declaration.parameters.len) return error.InvalidGenericArity;
-        return self.intern(.{ .applied_generic = .{
+        if (self.findGenericApplication(identity, arguments)) |existing| return existing;
+
+        // Publish the canonical application identity before substituting its
+        // target. Recursive aliases can then refer back to this exact id while
+        // the target shape is being constructed.
+        const application = try self.intern(.{ .applied_generic = .{
             .declaration = identity,
             .base_type = declaration.template_type,
+            .resolved_target = declaration.template_type,
             .arguments = arguments,
         } });
+        const resolved_target = try self.substitute(declaration.template_type, declaration.parameters, arguments);
+        const record = self.storedMut(application) orelse return error.InvalidTypeId;
+        record.kind.?.applied_generic.resolved_target = resolved_target;
+        return application;
+    }
+
+    fn findGenericApplication(
+        self: *const TypeStore,
+        identity: model.SemanticDeclId,
+        arguments: []const model.TypeId,
+    ) ?model.TypeId {
+        for (self.records.items) |record| {
+            const kind = record.kind orelse continue;
+            if (kind != .applied_generic) continue;
+            const applied = kind.applied_generic;
+            if (applied.declaration.eql(identity) and std.mem.eql(model.TypeId, applied.arguments, arguments))
+                return record.id;
+        }
+        return null;
     }
 
     /// Substitute type parameters throughout a stored shape. Active ids are
@@ -180,12 +205,10 @@ pub const TypeStore = struct {
         return self.substituteInner(type_id, parameters, arguments, &active, 0);
     }
 
-    pub fn resolveAppliedTarget(self: *TypeStore, type_id: model.TypeId) !model.TypeId {
+    pub fn resolveAppliedTarget(self: *const TypeStore, type_id: model.TypeId) !model.TypeId {
         const ty = self.lookup(type_id) orelse return type_id;
         if (ty.kind != .applied_generic) return type_id;
-        const applied = ty.kind.applied_generic;
-        const declaration = self.lookupGenericDeclaration(applied.declaration) orelse return applied.base_type;
-        return self.substitute(declaration.template_type, declaration.parameters, applied.arguments);
+        return ty.kind.applied_generic.resolved_target;
     }
 
     fn substituteInner(
@@ -260,11 +283,7 @@ pub const TypeStore = struct {
             .applied_generic => |applied| blk: {
                 const converted = try self.allocator.alloc(model.TypeId, applied.arguments.len);
                 for (applied.arguments, 0..) |argument, index| converted[index] = try self.substituteInner(argument, parameters, arguments, active, depth + 1);
-                break :blk try self.intern(.{ .applied_generic = .{
-                    .declaration = applied.declaration,
-                    .base_type = applied.base_type,
-                    .arguments = converted,
-                } });
+                break :blk try self.instantiateGeneric(applied.declaration, converted);
             },
         };
     }
@@ -740,6 +759,8 @@ pub const TypeStore = struct {
                 }
                 try writer.writeAll("> base=");
                 try self.writeTypeDebug(writer, value.base_type, stack, depth + 1);
+                try writer.writeAll(" resolved=");
+                try self.writeTypeDebug(writer, value.resolved_target, stack, depth + 1);
             },
         }
     }
@@ -832,6 +853,7 @@ pub const TypeStore = struct {
             .applied_generic => |applied| .{ .applied_generic = .{
                 .declaration = applied.declaration,
                 .base_type = applied.base_type,
+                .resolved_target = applied.resolved_target,
                 .arguments = try self.allocator.dupe(model.TypeId, applied.arguments),
             } },
         };

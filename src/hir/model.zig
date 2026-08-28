@@ -33,6 +33,9 @@ pub const HirLanguageItem = struct {
     id: project.LanguageItemId,
     exported_name: []const u8,
     target: HirSemanticIdentity,
+    /// Executable HIR body for value language items implemented by a source
+    /// function. Type-only roles and non-callable value roles keep this null.
+    function: ?ids.FunctionId = null,
 };
 
 /// Body-less declaration supplied by the host. Identity is the pair

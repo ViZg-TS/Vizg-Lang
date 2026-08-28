@@ -40,6 +40,13 @@ pub fn verifyBuilder(allocator: std.mem.Allocator, builder: *const builder_mod.B
             item.target.external_symbol_id != null or
             builder.result.semanticResult().lookupModule(item.target.declaration.module_id) == null or
             !validType(builder, item.target.type_id)) return .invalid_semantic_reference;
+        if (item.function) |function_id| {
+            if (item.target.namespace != .value or !validFunction(builder, function_id))
+                return .invalid_semantic_reference;
+            const function = builder.functions.items[function_id.index().?];
+            if (function.symbol == null or !function.symbol.?.eql(item.target.declaration))
+                return .invalid_semantic_reference;
+        }
         for (builder.language_items.items[0..index]) |previous| if (previous.id == item.id) return .internal_invariant;
     }
 

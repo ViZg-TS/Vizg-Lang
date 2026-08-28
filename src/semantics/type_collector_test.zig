@@ -706,3 +706,27 @@ fn semanticMember(table: types.MemberTable, name: []const u8) ?types.SemanticMem
     for (table.members) |member| if (std.mem.eql(u8, member.name, name)) return member;
     return null;
 }
+
+test "P10-G009 generic Array alias resolves to the canonical array target" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\type Array<T> = T[];
+        \\type ViaArray = Array<number>;
+        \\type DirectArray = number[];
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+    try testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try testing.expectEqual(@as(usize, 0), collected.diagnostics.len);
+    const via = collectedType(collected, symbolByName(result, "ViaArray", .type).?.id).?;
+    const direct = collectedType(collected, symbolByName(result, "DirectArray", .type).?.id).?;
+    try testing.expectEqual(direct, try type_store.resolveAppliedTarget(via));
+    try testing.expect(type_store.lookup(direct).?.kind == .array);
+}

@@ -25,7 +25,17 @@ The Zig consumer API version is 2. Official ABI v1 exposes the additive
 `vizg_hir_language_item_count`/`vizg_hir_language_item_at` accessors. Existing
 source-host-binding and earlier HIR detail layouts are unchanged.
 
+HIR detail API v7 additively exposes
+`vizg_hir_language_item_function(LanguageItemId)`. A source-defined value
+language item whose resolved declaration is an ordinary HIR function returns
+that executable `FunctionId`; type-only or non-callable roles return
+`VIZG_HIR_ID_NONE`. Source-function value-language-item modules are executable HIR roots so
+downstream compilers can invoke an authorized protocol even when ordinary
+application imports do not reach its implementation module. Type-only and
+non-callable value language items remain semantic-only and do not by themselves
+keep a module executable.
+
 Signature or behavioral compatibility for a particular role is deliberately a
-host concern: ViZG supplies the resolved type identity so the host can validate
-its own versioned role contract without moving compiler/runtime policy into the
-frontend.
+host concern: ViZG supplies the resolved type identity and optional executable
+function identity so the host can validate and invoke its own versioned role
+contract without moving compiler/runtime policy into the frontend.

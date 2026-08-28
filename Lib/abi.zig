@@ -7,7 +7,7 @@ const vizg = @import("vizg-impl");
 pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
-pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 6;
+pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 7;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
 pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION: u32 = vizg.language_item_contract_version;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
@@ -2899,6 +2899,24 @@ pub fn hirArrayElementType(
     return .OK;
 }
 
+/// HIR detail API v7: resolve an applied generic type to its canonical
+/// substituted target. Non-applied types are returned unchanged.
+pub fn hirAppliedGenericTarget(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    type_id: u32,
+    out_type_id: ?*u32,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version < 7) return .INVALID_STATE;
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_type_id orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(u32, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(u32))) return .INVALID_ARGUMENT;
+    _ = owned.hir_result.?.lookupType(type_id) orelse return .INVALID_ARGUMENT;
+    output.* = owned.hir_result.?.resolveAppliedTarget(type_id) catch return .INVALID_ARGUMENT;
+    return .OK;
+}
+
 pub fn hirFunctionSignature(
     result: ?*const Vizg_ProjectResult,
     requested_version: u32,
@@ -3324,6 +3342,28 @@ pub fn hirLanguageItemAt(
         .target = hirSemanticIdentity(item.target),
     };
     return .OK;
+}
+
+/// HIR detail API v7: return the executable HIR function associated with a
+/// value language item. Non-callable and type-only roles return
+/// VIZG_HIR_ID_NONE without changing the frozen v5 language-item record.
+pub fn hirLanguageItemFunction(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    language_item_id: u64,
+    out_function_id: ?*u64,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version < 7) return .INVALID_STATE;
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_function_id orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(u64, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(u64))) return .INVALID_ARGUMENT;
+    for (owned.hir_result.?.project.language_items) |item| {
+        if (item.id.value() != language_item_id) continue;
+        output.* = if (item.function) |function| idIndex(function) else VIZG_HIR_ID_NONE;
+        return .OK;
+    }
+    return .INVALID_ARGUMENT;
 }
 
 pub fn hirBindingDetailAt(
@@ -3943,6 +3983,7 @@ comptime {
     @export(&hirTypeMemberCount, .{ .name = "vizg_hir_type_member_count" });
     @export(&hirTypeMemberAt, .{ .name = "vizg_hir_type_member_at" });
     @export(&hirArrayElementType, .{ .name = "vizg_hir_array_element_type" });
+    @export(&hirAppliedGenericTarget, .{ .name = "vizg_hir_applied_generic_target" });
     @export(&hirFunctionSignature, .{ .name = "vizg_hir_function_signature" });
     @export(&hirFunctionCompletionType, .{ .name = "vizg_hir_function_completion_type" });
     @export(&hirSignatureParameterAt, .{ .name = "vizg_hir_signature_parameter_at" });
@@ -3959,6 +4000,7 @@ comptime {
     @export(&hirModuleExportAt, .{ .name = "vizg_hir_module_export_at" });
     @export(&hirLanguageItemCount, .{ .name = "vizg_hir_language_item_count" });
     @export(&hirLanguageItemAt, .{ .name = "vizg_hir_language_item_at" });
+    @export(&hirLanguageItemFunction, .{ .name = "vizg_hir_language_item_function" });
     @export(&hirBindingDetailAt, .{ .name = "vizg_hir_binding_detail_at" });
     @export(&hirFunctionStorageDetailAt, .{ .name = "vizg_hir_function_storage_detail_at" });
     @export(&hirFunctionCaptureAt, .{ .name = "vizg_hir_function_capture_at" });

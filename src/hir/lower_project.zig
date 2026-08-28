@@ -13,6 +13,8 @@ const result_mod = @import("result.zig");
 const origin = @import("origin.zig");
 const verifier = @import("verifier.zig");
 const model = @import("model.zig");
+const ids = @import("ids.zig");
+const semantics = @import("../semantics/root.zig");
 
 pub const Outcome = union(enum) {
     result: result_mod.HirResult,
@@ -53,6 +55,16 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
         if (!module.is_root or module.source == null) continue;
         if (has_application_root and project.isGlobalRoot(module.id)) continue;
         try appendUnique(&reachable, allocator, module.id);
+    }
+    // Type language items and non-callable value anchors are semantic-only.
+    // Source function language items may be invoked by a downstream compiler
+    // even when ordinary application imports do not reach their module, so
+    // those implementation modules are executable HIR roots. Their normal
+    // source dependencies are discovered by the same closure below; no source
+    // spelling participates in the decision.
+    for (project.sourceLanguageItems()) |item| {
+        if (!languageItemHasExecutableSourceFunction(project, item)) continue;
+        try appendUnique(&reachable, allocator, item.module_id);
     }
     var cursor: usize = 0;
     while (cursor < reachable.items.len) : (cursor += 1) {
@@ -119,6 +131,21 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
     return .{ .result = result };
 }
 
+fn languageItemHasExecutableSourceFunction(
+    project: *const project_mod.Project,
+    descriptor: project_mod.SourceLanguageItem,
+) bool {
+    if (descriptor.namespace != .value) return false;
+    const semantic = project.semanticResult() orelse return false;
+    const identity = switch (project_mod.session.resolveLanguageItem(semantic, descriptor)) {
+        .resolved => |value| value,
+        .missing, .namespace_mismatch, .duplicate => return false,
+    };
+    if (identity.external_module_id != null) return false;
+    const ty = semantic.type_store.lookup(identity.type_id) orelse return false;
+    return ty.kind == .function;
+}
+
 fn lowerLanguageItems(builder: *builder_mod.Builder, project: *const project_mod.Project) !void {
     var descriptors: std.ArrayList(project_mod.SourceLanguageItem) = .empty;
     defer descriptors.deinit(builder.allocator);
@@ -135,8 +162,24 @@ fn lowerLanguageItems(builder: *builder_mod.Builder, project: *const project_mod
             .id = descriptor.id,
             .exported_name = try builder.copyString(descriptor.exported_name),
             .target = lower_module.semanticIdentity(identity),
+            .function = if (languageItemHasExecutableSourceFunction(project, descriptor))
+                executableLanguageItemFunction(builder, identity)
+            else
+                null,
         });
     }
+}
+
+fn executableLanguageItemFunction(
+    builder: *builder_mod.Builder,
+    identity: semantics.SemanticIdentity,
+) ?ids.FunctionId {
+    if (identity.namespace != .value or identity.external_module_id != null) return null;
+    for (builder.functions.items) |function| {
+        const symbol = function.symbol orelse continue;
+        if (symbol.eql(identity.declaration)) return function.id;
+    }
+    return null;
 }
 
 fn lessLanguageItem(_: void, left: project_mod.SourceLanguageItem, right: project_mod.SourceLanguageItem) bool {

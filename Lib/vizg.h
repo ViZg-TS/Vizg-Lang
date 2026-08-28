@@ -9,7 +9,7 @@
 #define VIZG_ABI_VERSION 1u
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
-#define VIZG_HIR_DETAIL_API_VERSION 6u
+#define VIZG_HIR_DETAIL_API_VERSION 7u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
 #define VIZG_INTRINSIC_CONTRACT_VERSION 3u
 #define VIZG_LANGUAGE_ITEM_CONTRACT_VERSION 1u
@@ -1293,6 +1293,11 @@ Vizg_ProjectStatus vizg_hir_type_member_at(
 Vizg_ProjectStatus vizg_hir_array_element_type(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     uint32_t type_id, uint32_t *out_type_id);
+/* HIR detail API v7: resolves an applied generic to the canonical
+ * substituted target; ordinary types are returned unchanged. */
+Vizg_ProjectStatus vizg_hir_applied_generic_target(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint32_t type_id, uint32_t *out_type_id);
 Vizg_ProjectStatus vizg_hir_function_signature(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     uint32_t type_id, Vizg_HirFunctionSignature *out_signature);
@@ -1353,6 +1358,11 @@ Vizg_ProjectStatus vizg_hir_language_item_count(
 Vizg_ProjectStatus vizg_hir_language_item_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     size_t index, Vizg_HirLanguageItem *out_item);
+/* HIR detail API v7 exposes an optional executable source-function identity
+ * for value language items without changing the frozen v5 record layout. */
+Vizg_ProjectStatus vizg_hir_language_item_function(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint64_t language_item_id, uint64_t *out_function_id);
 Vizg_ProjectStatus vizg_hir_binding_detail_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     size_t binding_index, Vizg_HirBindingDetail *out_detail);
