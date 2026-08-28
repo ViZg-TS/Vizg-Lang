@@ -456,6 +456,8 @@ fn analyzeModuleGraphData(
         );
     }
 
+    try registerCanonicalLanguageItemSurfaces(graph, export_list.items, &type_store);
+
     // Rebuild effective module types against the now-immutable nominal tables.
     // Missing/cyclic targets remain stable `unknown` placeholders.
     for (project_modules.items) |*module| {
@@ -515,6 +517,33 @@ fn analyzeModuleGraphData(
         .diagnostics = diagnostic_slice,
         .is_partial = diagnostic_slice.len != 0 or hasUnresolvedLinks(import_slice),
     };
+}
+
+const canonical_array_language_item_id: u64 = 0x0002;
+const canonical_array_constructor_language_item_id: u64 = 0x0005;
+
+fn registerCanonicalLanguageItemSurfaces(
+    graph: *const modules_mod.ModuleGraph,
+    exports: []const SemanticExport,
+    type_store: *types.TypeStore,
+) !void {
+    for (graph.source_language_items) |item| {
+        if (item.id != canonical_array_language_item_id and
+            item.id != canonical_array_constructor_language_item_id) continue;
+        for (exports) |exported| {
+            if (exported.module_id != item.module or
+                !std.mem.eql(u8, exported.name, item.exported_name)) continue;
+            if (item.id == canonical_array_language_item_id and item.type_only) {
+                const identity = exported.type_identity orelse exported.identity;
+                type_store.registerCanonicalArraySurface(identity.declaration) catch |err| switch (err) {
+                    error.InvalidCanonicalArraySurface => {},
+                };
+            } else if (item.id == canonical_array_constructor_language_item_id and !item.type_only) {
+                type_store.registerCanonicalArrayConstructor(exported.identity.type_id);
+            }
+            break;
+        }
+    }
 }
 
 fn externalBuiltinTypeId(builtins: *const types.Builtins, metadata: ?modules_mod.graph.ExternalType) types.TypeId {

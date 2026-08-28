@@ -1127,6 +1127,16 @@ pub const Project = struct {
 
         var placeholder_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer placeholder_arena.deinit();
+        const graph_language_items = try allocator.alloc(
+            modules_mod.graph.SourceLanguageItem,
+            self.source_language_items.items.len,
+        );
+        for (self.source_language_items.items, 0..) |item, index| graph_language_items[index] = .{
+            .id = item.id.value(),
+            .module = item.module_id.value(),
+            .exported_name = item.exported_name,
+            .type_only = item.namespace == .type,
+        };
         const semantic_graph: modules_mod.ModuleGraph = .{
             .arena = placeholder_arena,
             .entry = entry,
@@ -1134,6 +1144,7 @@ pub const Project = struct {
             .imports = graph_edges.items,
             .linked_imports = linked_imports.items,
             .external_modules = graph_external_modules.items,
+            .source_language_items = graph_language_items,
             .diagnostics = &.{},
         };
         const result = try self.allocator.create(semantics.BorrowedProjectSemanticResult);
@@ -1156,20 +1167,26 @@ pub const Project = struct {
         std.debug.assert(self.project_diagnostics.items.len == 0);
         errdefer self.clearProjectDiagnostics();
 
-        // Preserve every diagnostic produced by each reachable single-file
-        // analysis while attaching its already-known host identity directly.
+        // Preserve frontend diagnostics produced by each reachable
+        // single-file analysis while attaching its host identity. Checker and
+        // CFG diagnostics are intentionally omitted here: the project pass
+        // below recomputes them after imports, globals and authorized language
+        // items are linked, and is their sole canonical authority.
         for (self.modules.items) |module| {
             const semantic = module.semantic_result orelse continue;
             const source = module.source orelse continue;
-            for (semantic.diagnostics) |item| try self.appendProjectDiagnostic(.{
-                .module_id = module.id,
-                .phase = canonicalPhase(item),
-                .severity = item.severity,
-                .code = item.code,
-                .message = item.message,
-                .logical_name = source.logical_name,
-                .span = item.span,
-            });
+            for (semantic.diagnostics) |item| {
+                if (item.phase == .type_checker or item.phase == .cfg) continue;
+                try self.appendProjectDiagnostic(.{
+                    .module_id = module.id,
+                    .phase = canonicalPhase(item),
+                    .severity = item.severity,
+                    .code = item.code,
+                    .message = item.message,
+                    .logical_name = source.logical_name,
+                    .span = item.span,
+                });
+            }
         }
 
         // Project semantic passes may add diagnostics beyond the single-file
@@ -3125,6 +3142,54 @@ test "source language items resolve by module export and namespace without canon
     const semantic = project.semanticResult().?;
     try std.testing.expect(resolveLanguageItem(semantic, project.sourceLanguageItems()[0]) == .resolved);
     try std.testing.expect(resolveLanguageItem(semantic, project.sourceLanguageItems()[1]) == .resolved);
+}
+
+test "authorized generic array language item supplies renamed members to plain array syntax" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{.{
+        .id = .init(2),
+        .module_id = .init(31),
+        .exported_name = "RenamedSequenceSurface",
+        .namespace = .type,
+    }});
+    try project.addRoot(.{
+        .id = .init(31),
+        .logical_name = "replacement-array-std.ts",
+        .bytes = "export type RenamedSequenceSurface<T> = T[] & { first: T; push: (value: T) => number };",
+    });
+    try project.addRoot(.{
+        .id = .init(32),
+        .logical_name = "array-consumer.ts",
+        .bytes =
+        \\const values: number[] = [1];
+        \\const first = values.first;
+        \\const size = values.push(1);
+        ,
+    });
+    while (try project.step() != .complete) {}
+    const finished = try project.finish();
+    try std.testing.expect(!finished.has_failures);
+    const semantic = project.semanticResult().?;
+    try std.testing.expect(semantic.type_store.canonicalArrayDeclaration() != null);
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+    const consumer = semantic.lookupModule(32) orelse return error.TestExpectedConsumerModule;
+    const source = project.find(.init(32)).?.semantic_result.?;
+    var saw_first = false;
+    var saw_size = false;
+    for (source.frontend.bind.symbols) |symbol| {
+        const info = consumer.type_info.lookupSymbol(symbol.id) orelse continue;
+        if (std.mem.eql(u8, symbol.name, "first")) {
+            try std.testing.expectEqual(semantic.type_store.builtins.number, info.effective());
+            saw_first = true;
+        }
+        if (std.mem.eql(u8, symbol.name, "size")) {
+            try std.testing.expectEqual(semantic.type_store.builtins.number, info.effective());
+            saw_size = true;
+        }
+    }
+    try std.testing.expect(saw_first);
+    try std.testing.expect(saw_size);
 }
 
 test "missing and namespace-incompatible source language items produce stable project diagnostics" {

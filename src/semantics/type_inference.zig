@@ -507,6 +507,16 @@ fn lookupAccessSingle(
     tree: ast_mod.Ast,
     store: *types.TypeStore,
 ) !OperatorResult {
+    return lookupAccessSingleWithArraySurface(object_type, key, tree, store, true);
+}
+
+fn lookupAccessSingleWithArraySurface(
+    object_type: types.TypeId,
+    key: AccessKey,
+    tree: ast_mod.Ast,
+    store: *types.TypeStore,
+    use_array_surface: bool,
+) !OperatorResult {
     const b = &store.builtins;
     if (object_type == b.any or object_type == b.unknown) return .{ .type_id = object_type };
     const object = store.lookup(object_type) orelse return .{ .type_id = b.unknown };
@@ -516,7 +526,7 @@ fn lookupAccessSingle(
         .intersection => |members| blk: {
             var property_type: ?types.TypeId = null;
             for (members) |member| {
-                const result = try lookupAccessSingle(member, key, tree, store);
+                const result = try lookupAccessSingleWithArraySurface(member, key, tree, store, use_array_surface);
                 if (!result.valid) continue;
                 property_type = if (property_type) |current|
                     try store.intersectionOf(&.{ current, result.type_id })
@@ -544,8 +554,12 @@ fn lookupAccessSingle(
         else if (accessPropertyName(key, tree)) |name|
             if (std.mem.eql(u8, name, "length"))
                 .{ .type_id = b.number }
-            else
-                invalidAccess(key, b.unknown)
+            else if (use_array_surface) blk: {
+                const surface = try store.canonicalArraySurface(array.element_type) orelse
+                    break :blk invalidAccess(key, b.unknown);
+                const target = try store.resolveAppliedTarget(surface);
+                break :blk lookupAccessSingleWithArraySurface(target, key, tree, store, false);
+            } else invalidAccess(key, b.unknown)
         else
             invalidAccess(key, b.unknown),
         .primitive => |primitive| if (primitive == .string and isNumericIndex(key, tree, store))

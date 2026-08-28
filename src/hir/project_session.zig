@@ -132,6 +132,37 @@ test "resolved source language items are deterministic immutable HIR identities"
     try std.testing.expectEqual(result.project.language_items[1].target.declaration, (try view.languageItem(.init(2))).target.declaration);
 }
 
+test "authorized generic array surface method calls remain HIR eligible" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{.{
+        .id = .init(2),
+        .module_id = .init(244),
+        .exported_name = "RenamedSequenceSurface",
+        .namespace = .type,
+    }});
+    try project.addGlobalRoot(.{
+        .id = .init(244),
+        .logical_name = "replacement-array-std.ts",
+        .bytes = "export type RenamedSequenceSurface<T> = T[] & { push: (value: T) => number };",
+        .kind = .module,
+    });
+    try project.addRoot(.{
+        .id = .init(245),
+        .logical_name = "array-consumer.ts",
+        .bytes = "const values: number[] = [1]; const size = values.push(2);",
+        .kind = .module,
+    });
+    while (try project.step() != .complete) {}
+
+    var outcome = try derive(&project, .{});
+    defer outcome.deinit();
+    switch (outcome) {
+        .result => {},
+        .diagnostics => return error.TestExpectedHirResult,
+    }
+}
+
 test "value language items retain executable HIR while type-only anchors stay semantic-only" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();

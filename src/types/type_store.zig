@@ -22,6 +22,9 @@ pub const TypeStore = struct {
     generic_declarations: std.AutoHashMap(model.SemanticDeclId, model.GenericDeclaration),
     external_types: std.AutoHashMap(model.ExternalTypeIdentity, model.TypeId),
     external_type_origins: std.AutoHashMap(model.TypeId, model.ExternalTypeIdentity),
+    canonical_array_declaration: ?model.SemanticDeclId,
+    canonical_array_carrier: ?model.TypeId,
+    canonical_array_constructor: ?model.TypeId,
 
     const StoredType = struct {
         id: model.TypeId,
@@ -45,6 +48,9 @@ pub const TypeStore = struct {
             .generic_declarations = std.AutoHashMap(model.SemanticDeclId, model.GenericDeclaration).init(allocator),
             .external_types = std.AutoHashMap(model.ExternalTypeIdentity, model.TypeId).init(allocator),
             .external_type_origins = std.AutoHashMap(model.TypeId, model.ExternalTypeIdentity).init(allocator),
+            .canonical_array_declaration = null,
+            .canonical_array_carrier = null,
+            .canonical_array_constructor = null,
         };
     }
 
@@ -83,7 +89,59 @@ pub const TypeStore = struct {
             try copy.external_types.put(entry.key_ptr.*, entry.value_ptr.*);
             try copy.external_type_origins.put(entry.value_ptr.*, entry.key_ptr.*);
         }
+        copy.canonical_array_declaration = self.canonical_array_declaration;
+        copy.canonical_array_carrier = self.canonical_array_carrier;
+        copy.canonical_array_constructor = self.canonical_array_constructor;
         return copy;
+    }
+
+    /// Binds the authorized canonical Array surface without relying on its
+    /// source spelling. The language-item target must be a generic
+    /// application so element substitutions remain type-correct.
+    pub fn registerCanonicalArraySurface(self: *TypeStore, declaration: model.SemanticDeclId) !void {
+        const generic = self.lookupGenericDeclaration(declaration) orelse
+            return error.InvalidCanonicalArraySurface;
+        if (generic.parameters.len != 1) return error.InvalidCanonicalArraySurface;
+        const carrier = self.findArrayType(generic.template_type, 0) orelse
+            return error.InvalidCanonicalArraySurface;
+        self.canonical_array_declaration = declaration;
+        self.canonical_array_carrier = carrier;
+    }
+
+    pub fn canonicalArraySurface(self: *TypeStore, element_type: model.TypeId) !?model.TypeId {
+        const declaration = self.canonical_array_declaration orelse return null;
+        return try self.instantiateGeneric(declaration, &.{element_type});
+    }
+
+    pub fn canonicalArrayDeclaration(self: *const TypeStore) ?model.SemanticDeclId {
+        return self.canonical_array_declaration;
+    }
+
+    pub fn canonicalArrayCarrier(self: *const TypeStore, declaration: model.SemanticDeclId) ?model.TypeId {
+        const canonical = self.canonical_array_declaration orelse return null;
+        if (!canonical.eql(declaration)) return null;
+        return self.canonical_array_carrier;
+    }
+
+    pub fn registerCanonicalArrayConstructor(self: *TypeStore, type_id: model.TypeId) void {
+        self.canonical_array_constructor = type_id;
+    }
+
+    pub fn isCanonicalArrayConstructor(self: *const TypeStore, type_id: model.TypeId) bool {
+        return self.canonical_array_constructor == type_id;
+    }
+
+    fn findArrayType(self: *const TypeStore, type_id: model.TypeId, depth: usize) ?model.TypeId {
+        if (depth >= max_substitution_depth) return null;
+        const ty = self.lookup(type_id) orelse return null;
+        return switch (ty.kind) {
+            .array => type_id,
+            .applied_generic => |applied| self.findArrayType(applied.resolved_target, depth + 1),
+            .intersection, .union_type => |members| for (members) |member| {
+                if (self.findArrayType(member, depth + 1)) |carrier| break carrier;
+            } else null,
+            else => null,
+        };
     }
 
     pub fn externalTypeIdentity(self: *const TypeStore, id: model.TypeId) ?model.ExternalTypeIdentity {

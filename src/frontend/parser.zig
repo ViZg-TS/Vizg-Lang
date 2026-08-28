@@ -2735,6 +2735,16 @@ const Parser = struct {
             break;
         }
 
+        var type_arguments: std.ArrayList(ast_mod.TypeNodeId) = .empty;
+        errdefer type_arguments.deinit(self.allocator);
+        if (self.eat(.LessThan)) {
+            while (!self.at(.GreaterThan) and !self.at(.EOF)) {
+                try type_arguments.append(self.allocator, try self.parseType());
+                if (!self.eat(.Comma)) break;
+            }
+            _ = self.expect(.GreaterThan, "expected '>' after constructor type arguments");
+        }
+
         const arguments = if (self.eat(.LParen)) try self.parseArguments() else try self.allocator.alloc(NodeId, 0);
         const end_span = if (arguments.len > 0 or self.previousOrCurrent().kind == .RParen)
             self.previousOrCurrent().span
@@ -2742,7 +2752,11 @@ const Parser = struct {
             self.nodes.items[@intCast(callee)].span;
         return self.addNode(.{
             .span = joinSpans(new_token.span, end_span),
-            .data = .{ .NewExpression = .{ .callee = callee, .arguments = arguments } },
+            .data = .{ .NewExpression = .{
+                .callee = callee,
+                .type_arguments = try type_arguments.toOwnedSlice(self.allocator),
+                .arguments = arguments,
+            } },
         });
     }
 

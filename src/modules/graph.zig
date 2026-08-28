@@ -107,6 +107,16 @@ pub const Module = struct {
     text: []const u8,
 };
 
+/// Source language-item locators are authorized by the embedding project
+/// before semantic analysis. They carry no source-name meaning on their own:
+/// consumers select behavior exclusively by the stable numeric identity.
+pub const SourceLanguageItem = struct {
+    id: u64,
+    module: ModuleId,
+    exported_name: []const u8,
+    type_only: bool,
+};
+
 pub const ImportEdge = struct {
     id: ImportEdgeId,
     project_edge_index: usize,
@@ -129,6 +139,7 @@ pub const ModuleGraph = struct {
     imports: []const ImportEdge,
     linked_imports: []const linker.LinkedImport,
     external_modules: []const ExternalModule = &.{},
+    source_language_items: []const SourceLanguageItem = &.{},
     diagnostics: []const diagnostics.Diagnostic,
 
     pub fn deinit(self: *ModuleGraph) void {

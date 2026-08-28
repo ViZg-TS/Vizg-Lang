@@ -152,12 +152,14 @@ fn lowerLanguageItems(builder: *builder_mod.Builder, project: *const project_mod
     try descriptors.appendSlice(builder.allocator, project.sourceLanguageItems());
     std.mem.sort(project_mod.SourceLanguageItem, descriptors.items, {}, lessLanguageItem);
     for (descriptors.items) |descriptor| {
-        const identity = switch (project_mod.session.resolveLanguageItem(builder.result.semanticResult(), descriptor)) {
+        var identity = switch (project_mod.session.resolveLanguageItem(builder.result.semanticResult(), descriptor)) {
             .resolved => |value| value,
             .missing => return error.MissingLanguageItem,
             .namespace_mismatch => return error.LanguageItemNamespaceMismatch,
             .duplicate => return error.DuplicateLanguageItemTarget,
         };
+        if (builder.result.semanticResult().type_store.canonicalArrayCarrier(identity.declaration)) |carrier|
+            identity.type_id = carrier;
         try builder.appendLanguageItem(.{
             .id = descriptor.id,
             .exported_name = try builder.copyString(descriptor.exported_name),

@@ -369,6 +369,7 @@ pub const SuperExpression = struct {};
 
 pub const NewExpression = struct {
     callee: NodeId,
+    type_arguments: []const TypeNodeId = &.{},
     arguments: []const NodeId,
 };
 

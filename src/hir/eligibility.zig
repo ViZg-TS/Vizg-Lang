@@ -56,11 +56,16 @@ pub fn check(
         if (budget.reserve(.input_ast_nodes, local.frontend.ast.nodes.len)) |violation| {
             try output.append(allocator, diagnosticForModule(module, diagnostics.Diagnostic.fromLimit(violation)));
         }
-        if (module.state != .complete or local.metadata.is_partial) {
+        if (module.state != .complete) {
             try appendUnique(&output, allocator, diagnosticForModule(module, .{ .code = .not_eligible }));
         }
         for (local.diagnostics) |item| {
             if (item.severity != .@"error") continue;
+            // The project semantic pass recomputes checker/CFG diagnostics
+            // after imports, globals and authorized language-item surfaces
+            // are linked. Single-file checker results are stale inputs, not
+            // HIR eligibility authority.
+            if (item.phase == .type_checker or item.phase == .cfg) continue;
             const code: diagnostics.Code = if (isUnsupported(item.code)) .unsupported_executable_syntax else .not_eligible;
             try appendUnique(&output, allocator, .{
                 .code = code,
