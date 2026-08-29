@@ -287,10 +287,23 @@ fn inferNode(
             call.optional,
             tree.node(call.callee).data == .SuperExpression,
             tree.node(call.callee).data == .SuperExpression,
+            &.{},
             entries,
             store,
+            resolved_type_nodes,
         ),
-        .NewExpression => |call| try inferCall(allocator, call.callee, call.arguments, false, true, false, entries, store),
+        .NewExpression => |call| try inferCall(
+            allocator,
+            call.callee,
+            call.arguments,
+            false,
+            true,
+            false,
+            call.type_arguments,
+            entries,
+            store,
+            resolved_type_nodes,
+        ),
         .SpreadElement => |spread| if (findType(entries, spread.argument)) |ty| .{ .type_id = ty } else null,
         .ArrayExpression => |array| .{ .type_id = try inferArray(allocator, node_id, array, tree, entries, store) },
         .ObjectExpression => |object| .{ .type_id = try inferObject(allocator, node_id, object, tree, entries, store) },
@@ -324,8 +337,10 @@ fn inferCall(
     optional: bool,
     construct: bool,
     super_call: bool,
+    explicit_type_arguments: []const ast_mod.TypeNodeId,
     entries: []const node_type_info_mod.NodeTypeInfo,
     store: *types.TypeStore,
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
 ) !?OperatorResult {
     const callee_type = findType(entries, callee_id) orelse return null;
     const callee = store.lookup(callee_type) orelse return .{ .type_id = store.builtins.unknown };
@@ -333,6 +348,27 @@ fn inferCall(
     if (construct) {
         if (callee_type == store.builtins.any or callee_type == store.builtins.unknown)
             return .{ .type_id = callee_type };
+        if (store.isCanonicalArrayConstructor(callee_type)) {
+            const signature = callableSignature(callee_type, store) orelse return .{
+                .type_id = store.builtins.unknown,
+                .valid = false,
+                .issue = .invalid_constructor,
+            };
+            if (explicit_type_arguments.len > 1) return .{
+                .type_id = signature.return_type,
+                .valid = false,
+                .issue = .invalid_argument_type,
+            };
+            const result_type = if (explicit_type_arguments.len == 1) blk: {
+                const element_type = lookupResolvedTypeNode(
+                    explicit_type_arguments[0],
+                    resolved_type_nodes,
+                ) orelse store.builtins.unknown;
+                const surface = try store.canonicalArraySurface(element_type);
+                break :blk surface orelse signature.return_type;
+            } else signature.return_type;
+            return validateCallArguments(signature, result_type, arguments, null, entries, store);
+        }
         const identity = switch (callee.kind) {
             .class_constructor => |constructor| constructor.identity,
             .class => |instance| if (super_call) instance.identity else return .{
@@ -400,6 +436,25 @@ fn inferCall(
     };
     if (optional) try returns.append(allocator, store.builtins.undefined);
     return .{ .type_id = try store.unionOf(returns.items), .receiver_type = receiver };
+}
+
+fn callableSignature(type_id: types.TypeId, store: *const types.TypeStore) ?types.FunctionSignature {
+    if (store.lookupFunction(type_id)) |signature| return signature;
+    const ty = store.lookup(type_id) orelse return null;
+    const members = switch (ty.kind) {
+        .intersection, .union_type => |members| members,
+        else => return null,
+    };
+    for (members) |member| if (store.lookupFunction(member)) |signature| return signature;
+    return null;
+}
+
+fn lookupResolvedTypeNode(
+    node_id: ast_mod.TypeNodeId,
+    resolved: []const node_type_info_mod.ResolvedTypeNode,
+) ?types.TypeId {
+    for (resolved) |entry| if (entry.node_id == node_id) return entry.type_id;
+    return null;
 }
 
 fn validateCallArguments(
@@ -545,6 +600,7 @@ fn lookupAccessSingleWithArraySurface(
             break :blk switch (resolved.kind) {
                 .object => |properties| try lookupObjectProperty(properties, key, tree, store),
                 .class, .class_constructor, .interface => try lookupDeclaredMember(object_type, key, tree, store),
+                .intersection => try lookupAccessSingleWithArraySurface(target, key, tree, store, use_array_surface),
                 else => invalidAccess(key, b.unknown),
             };
         },

@@ -6,6 +6,7 @@ const binder = @import("../frontend/binder.zig");
 const contracts = @import("contracts.zig");
 const diagnostics = @import("../diagnostics/root.zig");
 const frontend = @import("../frontend/frontend.zig");
+const hir = @import("../hir/root.zig");
 const hir_result = @import("../hir/result.zig");
 const tokens = @import("../frontend/tokens.zig");
 const modules_mod = @import("../modules/root.zig");
@@ -499,6 +500,10 @@ pub const Project = struct {
             const result = try reachable.getOrPut(module.id.value());
             if (!result.found_existing) try pending.append(self.allocator, module.id);
         }
+        for (self.source_language_items.items) |item| {
+            const result = try reachable.getOrPut(item.module_id.value());
+            if (!result.found_existing) try pending.append(self.allocator, item.module_id);
+        }
 
         var index: usize = 0;
         while (index < pending.items.len) : (index += 1) {
@@ -769,6 +774,9 @@ pub const Project = struct {
     fn isReachable(self: *const Project, id: contracts.ModuleId) bool {
         const module = self.find(id) orelse return false;
         if (module.is_root) return true;
+        for (self.source_language_items.items) |item| {
+            if (item.module_id == id) return true;
+        }
         for (self.graph.edges.items) |edge| {
             if (edge.state == .resolved and edge.target != null and edge.target.? == id) return true;
         }
@@ -3144,6 +3152,32 @@ test "source language items resolve by module export and namespace without canon
     try std.testing.expect(resolveLanguageItem(semantic, project.sourceLanguageItems()[1]) == .resolved);
 }
 
+test "source language item modules remain reachable without source imports" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{.{
+        .id = .init(1),
+        .module_id = .init(2),
+        .exported_name = "renamedProtocol",
+        .namespace = .value,
+    }});
+    try project.addRoot(.{
+        .id = .init(1),
+        .logical_name = "main.ts",
+        .bytes = "export const value = 1;",
+    });
+    try project.supplySource(.{
+        .id = .init(2),
+        .logical_name = "protocol.ts",
+        .bytes = "export function renamedProtocol(value: any): any { return value; }",
+    });
+    while (try project.step() != .complete) {}
+    const finished = try project.finish();
+    try std.testing.expect(!finished.has_failures);
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+    try std.testing.expect(project.lookup(.init(2)) != null);
+}
+
 test "authorized generic array language item supplies renamed members to plain array syntax" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
@@ -3190,6 +3224,69 @@ test "authorized generic array language item supplies renamed members to plain a
     }
     try std.testing.expect(saw_first);
     try std.testing.expect(saw_size);
+}
+
+test "canonical Array constructor accepts explicit element type arguments" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{
+        .{
+            .id = .init(2),
+            .module_id = .init(33),
+            .exported_name = "SequenceSurface",
+            .namespace = .type,
+        },
+        .{
+            .id = .init(5),
+            .module_id = .init(33),
+            .exported_name = "sequenceConstructor",
+            .namespace = .value,
+        },
+    });
+    try project.addRoot(.{
+        .id = .init(33),
+        .logical_name = "array-constructor-std.ts",
+        .bytes =
+        \\export type SequenceSurface<T> = T[] & { first: T };
+        \\export function sequenceConstructor(length?: number): any[] { return []; }
+        \\const values = new sequenceConstructor<number>(3);
+        \\const first = values.first;
+        ,
+    });
+    while (try project.step() != .complete) {}
+    const finished = try project.finish();
+    try std.testing.expect(!finished.has_failures);
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+
+    const semantic = project.semanticResult().?;
+    try std.testing.expect(semantic.type_store.canonicalArrayDeclaration() != null);
+    const module = semantic.lookupModule(33) orelse return error.TestExpectedConsumerModule;
+    const source = project.find(.init(33)).?.semantic_result.?;
+    var saw_values = false;
+    var saw_first = false;
+    for (source.frontend.bind.symbols) |symbol| {
+        const info = module.type_info.lookupSymbol(symbol.id) orelse continue;
+        if (std.mem.eql(u8, symbol.name, "values")) {
+            const type_id = info.effective() orelse return error.TestExpectedArraySurface;
+            const ty = semantic.type_store.lookup(type_id) orelse return error.TestExpectedArraySurface;
+            try std.testing.expect(ty.kind == .applied_generic);
+            saw_values = true;
+        }
+        if (std.mem.eql(u8, symbol.name, "first")) {
+            const type_id = info.effective() orelse return error.TestExpectedArrayElementType;
+            try std.testing.expectEqual(semantic.type_store.builtins.number, type_id);
+            saw_first = true;
+        }
+    }
+    try std.testing.expect(saw_values);
+    try std.testing.expect(saw_first);
+
+    var lowered = try hir.lowerProjectWithDebug(std.testing.allocator, &project, .{}, .minimal);
+    defer lowered.deinit();
+    switch (lowered) {
+        .result => {},
+        .diagnostics => return error.TestExpectedHirResult,
+    }
 }
 
 test "missing and namespace-incompatible source language items produce stable project diagnostics" {

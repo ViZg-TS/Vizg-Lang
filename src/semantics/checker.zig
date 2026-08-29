@@ -211,10 +211,23 @@ fn callSignature(callee_type: types.TypeId, construct: bool, store: *const types
         for (members) |member| if (store.lookupFunction(member)) |signature| return signature;
         return null;
     }
+    if (store.isCanonicalArrayConstructor(callee_type))
+        return callableSignature(callee_type, store);
     const callee = store.lookup(callee_type) orelse return null;
     if (callee.kind != .class_constructor) return null;
     const class = store.lookupClassSemanticType(callee.kind.class_constructor.identity) orelse return null;
     return store.lookupFunction(class.constructor_signature orelse return null);
+}
+
+fn callableSignature(type_id: types.TypeId, store: *const types.TypeStore) ?types.FunctionSignature {
+    if (store.lookupFunction(type_id)) |signature| return signature;
+    const ty = store.lookup(type_id) orelse return null;
+    const members = switch (ty.kind) {
+        .intersection, .union_type => |members| members,
+        else => return null,
+    };
+    for (members) |member| if (store.lookupFunction(member)) |signature| return signature;
+    return null;
 }
 
 fn emitInferenceIssue(

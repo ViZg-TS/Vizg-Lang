@@ -526,6 +526,16 @@ fn resolveRemainingAnnotations(context: *TypeResolutionContext, bind: binder.Bin
             .Parameter => |parameter| if (parameter.type_annotation) |annotation| {
                 _ = try resolveTypeAnnotation(context, annotation);
             },
+            .NewExpression => |expression| {
+                for (expression.type_arguments) |argument| {
+                    _ = try resolveTypeNode(
+                        context,
+                        argument,
+                        context.tree.typeNode(argument).span,
+                        false,
+                    );
+                }
+            },
             else => {},
         }
     }
