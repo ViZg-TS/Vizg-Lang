@@ -2117,27 +2117,19 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
         return .OK;
     }
     var hir_result: ?vizg.hir.HirResult = null;
-    std.debug.print("vizg finish failures={any} modules={d}\n", .{ finished.has_failures, finished.module_count });
     if (!finished.has_failures) {
         // ABI consumers need source-local provenance for actionable diagnostics;
         // transformation traces remain opt-in through the native Zig API.
-        var lowered = vizg.hir.lowerProjectWithDebug(owned.fba.allocator(), &owned.project, .{}, .minimal) catch |err| {
-            std.debug.print("vizg HIR error: {s}\n", .{@errorName(err)});
+        var lowered = vizg.hir.lowerProjectWithDebug(owned.fba.allocator(), &owned.project, .{}, .minimal) catch |err|
             return statusFromError(owned, err);
-        };
         switch (lowered) {
             .result => |value| {
                 hir_result = value;
                 lowered = undefined;
             },
-            .diagnostics => |*report| {
-                for (report.diagnostics) |diagnostic|
-                    std.debug.print("vizg HIR diagnostic: {any} module={any} path={any}\n", .{ diagnostic.code, diagnostic.module_id, diagnostic.path });
-                report.deinit();
-            },
+            .diagnostics => |*report| report.deinit(),
         }
     }
-    std.debug.print("vizg HIR present={any}\n", .{hir_result != null});
     errdefer if (hir_result) |*value| value.deinit();
     const result = &owned.result_view;
     const semantic_result = owned.project.semanticResult();
