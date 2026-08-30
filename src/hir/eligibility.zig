@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const frontend_diagnostics = @import("../diagnostics/root.zig");
+const ast = @import("../frontend/ast.zig");
 const project_mod = @import("../project/root.zig");
 const semantics = @import("../semantics/root.zig");
 const types = @import("../types/root.zig");
@@ -203,7 +204,12 @@ fn validIdentity(project: *const project_mod.Project, result: *const semantics.B
     if (project.lookup(.init(identity.declaration.module_id))) |module| {
         const local = module.semantic_result orelse return false;
         if (identity.symbol_id) |symbol_id| return hasSymbol(local, symbol_id);
-        return identity.namespace == .type;
+        // Source module namespace identities are synthetic semantic values:
+        // they intentionally have no source symbol and use ast.invalid_node
+        // as their declaration identity. Both value and type namespace
+        // imports are valid; ordinary source declarations still require a
+        // concrete symbol.
+        return identity.declaration.declaration_id == ast.invalid_node;
     }
     return false;
 }

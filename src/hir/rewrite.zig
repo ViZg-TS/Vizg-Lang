@@ -95,7 +95,7 @@ pub fn operation(allocator: std.mem.Allocator, replacements: []const ValueReplac
         .call_super_method => |x| .{ .call_super_method = .{ .callee = if (x.callee) |v| value(replacements, v) else null, .receiver = value(replacements, x.receiver), .key = key(replacements, x.key), .arguments = try arguments(allocator, replacements, x.arguments) } },
         .call_super_constructor => |x| .{ .call_super_constructor = try arguments(allocator, replacements, x) },
         .tagged_template_call => |x| .{ .tagged_template_call = .{ .tag = value(replacements, x.tag), .receiver = if (x.receiver) |v| value(replacements, v) else null, .template_site = value(replacements, x.template_site), .substitutions = try valueSlice(allocator, replacements, x.substitutions) } },
-        .dynamic_import => |x| .{ .dynamic_import = .{ .source = value(replacements, x.source), .options = if (x.options) |v| value(replacements, v) else null, .attributes = x.attributes } },
+        .dynamic_import => |x| .{ .dynamic_import = .{ .source = value(replacements, x.source), .options = if (x.options) |v| value(replacements, v) else null, .attributes = x.attributes, .resolved = x.resolved } },
         .create_class => |x| .{ .create_class = .{ .entity = x.entity, .base = if (x.base) |v| value(replacements, v) else null } },
         .define_property => |x| .{ .define_property = .{ .object = value(replacements, x.object), .key = key(replacements, x.key), .value = value(replacements, x.value) } },
         .define_method => |x| .{ .define_method = .{ .object = value(replacements, x.object), .key = key(replacements, x.key), .function = x.function, .kind = x.kind, .is_static = x.is_static } },

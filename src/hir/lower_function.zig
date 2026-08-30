@@ -12,6 +12,7 @@ const lower_control = @import("lower_control.zig");
 const lower_exceptions = @import("lower_exceptions.zig");
 const lower_place = @import("lower_place.zig");
 const lower_pattern = @import("lower_pattern.zig");
+const lower_project_index = @import("lower_project_index.zig");
 const model = @import("model.zig");
 const project = @import("../project/root.zig");
 const region_validation = @import("region_validation.zig");
@@ -30,6 +31,7 @@ pub const Inputs = struct {
     module: *const project.ProjectModule,
     local: *const semantics.SemanticResult,
     project_module: *const semantics.ProjectSemanticModule,
+    dynamic_imports: []const lower_project_index.DynamicImportResolution,
     entity_ids: ?*std.ArrayList(ids.EntityId) = null,
 };
 
@@ -437,6 +439,13 @@ const Context = struct {
     is_constructor: bool = false,
     derived_constructor: bool = false,
     parameter_properties_emitted: bool = false,
+
+    pub fn dynamicImportResolution(self: *const Context, source_node: ast.NodeId) ?model.HirModuleReference {
+        return lower_project_index.dynamicImportResolution(
+            self.inputs.dynamic_imports,
+            self.inputs.local.frontend.ast.node(source_node).span,
+        );
+    }
 
     pub fn lowerClassExpression(self: *Context, node_id: ast.NodeId) !ids.ValueId {
         const declaration = self.inputs.local.frontend.ast.node(node_id).data.ClassExpression;

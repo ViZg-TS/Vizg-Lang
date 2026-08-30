@@ -7,6 +7,7 @@ const diagnostics = @import("diagnostics.zig");
 const eligibility = @import("eligibility.zig");
 const limits_mod = @import("limits.zig");
 const lower_module = @import("lower_module.zig");
+const lower_project_index = @import("lower_project_index.zig");
 const project_mod = @import("../project/root.zig");
 const provenance = @import("provenance.zig");
 const result_mod = @import("result.zig");
@@ -42,8 +43,12 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
     errdefer result.deinit();
     var builder = builder_mod.Builder.initWithDebug(&result, configured_limits, debug_level);
 
+    var project_index = try lower_project_index.Index.build(allocator, project, result.semanticResult());
+    defer project_index.deinit();
     var reachable: std.ArrayList(project_mod.ModuleId) = .empty;
     defer reachable.deinit(allocator);
+    var reachable_set = std.AutoHashMap(u64, void).init(allocator);
+    defer reachable_set.deinit();
     var has_application_root = false;
     for (project.modules.items) |module| {
         if (module.is_root and module.source != null and !project.isGlobalRoot(module.id)) {
@@ -54,7 +59,7 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
     for (project.modules.items) |module| {
         if (!module.is_root or module.source == null) continue;
         if (has_application_root and project.isGlobalRoot(module.id)) continue;
-        try appendUnique(&reachable, allocator, module.id);
+        try appendReachable(&reachable, &reachable_set, allocator, module.id);
     }
     // Type language items and non-callable value anchors are semantic-only.
     // Source function language items may be invoked by a downstream compiler
@@ -64,27 +69,21 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
     // spelling participates in the decision.
     for (project.sourceLanguageItems()) |item| {
         if (!languageItemHasExecutableSourceFunction(project, item)) continue;
-        try appendUnique(&reachable, allocator, item.module_id);
+        try appendReachable(&reachable, &reachable_set, allocator, item.module_id);
     }
     var cursor: usize = 0;
     while (cursor < reachable.items.len) : (cursor += 1) {
         const current = reachable.items[cursor];
-        for (project.edges()) |edge| {
-            if (edge.importer != current or edge.state != .resolved) continue;
-            if (edge.target) |target| try appendUnique(&reachable, allocator, target);
-        }
-        for (project.semanticResult().?.imports) |item| {
-            if (item.module_id != current.value() or item.type_only or !item.runtime_binding) continue;
-            const target = item.target orelse continue;
-            if (target.external_module_id != null) continue;
-            try appendUnique(&reachable, allocator, .init(target.declaration.module_id));
-        }
+        const inputs = project_index.inputsFor(current) orelse return error.InconsistentProjection;
+        for (inputs.projection_targets) |target|
+            try appendReachable(&reachable, &reachable_set, allocator, target);
     }
     std.mem.sort(project_mod.ModuleId, reachable.items, {}, lessModuleId);
 
     for (reachable.items) |module_id| {
         const module = project.lookup(module_id) orelse unreachable;
-        lower_module.lower(&builder, project, module) catch |err| switch (err) {
+        const inputs = project_index.inputsFor(module_id) orelse return error.InconsistentProjection;
+        lower_module.lower(&builder, module, inputs) catch |err| switch (err) {
             error.ResourceLimit => {
                 const failure = try limitReport(allocator, builder.violation.?);
                 result.deinit();
@@ -254,8 +253,14 @@ fn limitReport(allocator: std.mem.Allocator, violation: limits_mod.Violation) !e
     return .{ .allocator = allocator, .diagnostics = items };
 }
 
-fn appendUnique(items: *std.ArrayList(project_mod.ModuleId), allocator: std.mem.Allocator, id: project_mod.ModuleId) !void {
-    for (items.items) |existing| if (existing == id) return;
+fn appendReachable(
+    items: *std.ArrayList(project_mod.ModuleId),
+    seen: *std.AutoHashMap(u64, void),
+    allocator: std.mem.Allocator,
+    id: project_mod.ModuleId,
+) !void {
+    const entry = try seen.getOrPut(id.value());
+    if (entry.found_existing) return;
     try items.append(allocator, id);
 }
 

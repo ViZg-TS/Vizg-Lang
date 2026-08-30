@@ -1,6 +1,8 @@
 const std = @import("std");
 const ids = @import("ids.zig");
 const model = @import("model.zig");
+const consumer_index = @import("consumer_index.zig");
+const reachability = @import("reachability.zig");
 const semantics = @import("../semantics/root.zig");
 const types = @import("../types/root.zig");
 
@@ -14,6 +16,7 @@ pub const HirResult = struct {
     semantic_result: ?*const semantics.BorrowedProjectSemanticResult,
     type_store: ?types.TypeStore = null,
     project: model.HirProject,
+    consumer_index: ?consumer_index.Index = null,
 
     pub fn initEmpty(
         allocator: std.mem.Allocator,
@@ -33,6 +36,8 @@ pub const HirResult = struct {
     }
 
     pub fn deinit(self: *HirResult) void {
+        if (self.consumer_index) |*index| index.deinit();
+        self.consumer_index = null;
         self.arena.deinit();
         self.allocator.destroy(self.identity_domain);
         self.* = undefined;
@@ -49,7 +54,37 @@ pub const HirResult = struct {
     pub fn seal(self: *HirResult) !void {
         if (self.type_store != null) return error.AlreadySealed;
         self.type_store = try self.semanticResult().type_store.cloneReadOnly(self.ownedAllocator());
+        self.consumer_index = try consumer_index.Index.build(self.allocator, self.identity_domain, self.project);
         self.semantic_result = null;
+    }
+
+    pub fn consumerIndex(self: *const HirResult) *const consumer_index.Index {
+        return if (self.consumer_index) |*index| index else unreachable;
+    }
+
+    pub fn artifactReachabilityScratchSize(self: *const HirResult) !usize {
+        if (self.type_store == null) return error.UnsealedResult;
+        return reachability.scratchSize(self.project, self.consumerIndex());
+    }
+
+    /// Stateless artifact-rooted semantic closure over immutable canonical HIR.
+    /// All root-dependent storage is caller-owned; immutable result views remain
+    /// safe to query in parallel as required by the public C ABI contract.
+    pub fn analyzeArtifactReachability(
+        self: *const HirResult,
+        scratch: []align(@alignOf(u64)) u8,
+        request: reachability.Request,
+        output: reachability.Output,
+    ) !reachability.Summary {
+        const store = if (self.type_store) |*value| value else return error.UnsealedResult;
+        return reachability.analyze(
+            scratch,
+            self.project,
+            store,
+            self.consumerIndex(),
+            request,
+            output,
+        );
     }
 
     pub fn lookupType(self: *const HirResult, id: types.TypeId) ?types.Type {

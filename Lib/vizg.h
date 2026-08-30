@@ -9,7 +9,8 @@
 #define VIZG_ABI_VERSION 1u
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
-#define VIZG_HIR_DETAIL_API_VERSION 7u
+#define VIZG_HIR_DETAIL_API_VERSION 8u
+#define VIZG_HIR_REACHABILITY_API_VERSION 1u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
 #define VIZG_INTRINSIC_CONTRACT_VERSION 3u
 #define VIZG_LANGUAGE_ITEM_CONTRACT_VERSION 1u
@@ -897,6 +898,82 @@ typedef struct Vizg_HirSummary {
     size_t origin_count;
 } Vizg_HirSummary;
 
+#define VIZG_HIR_REACH_TRIGGER_CANONICAL_ARRAY_BASE (1u << 0)
+#define VIZG_HIR_REACH_TRIGGER_PLACE_DELETED (1u << 1)
+
+/* operation_tag is the same versioned HIR operation ordinal reported in
+ * Vizg_HirPayload.tag. Reordering/adding operation tags requires explicit
+ * reachability-ABI review; language_item_id remains opaque host identity. */
+typedef struct Vizg_HirReachabilityTrigger {
+    uint32_t operation_tag;
+    uint32_t flags;
+    uint64_t language_item_id;
+} Vizg_HirReachabilityTrigger;
+
+typedef struct Vizg_HirReachabilityRequest {
+    const uint64_t *public_module_ids_ptr;
+    size_t public_module_count;
+    const uint64_t *application_module_ids_ptr;
+    size_t application_module_count;
+    const Vizg_HirReachabilityTrigger *triggers_ptr;
+    size_t trigger_count;
+} Vizg_HirReachabilityRequest;
+
+/* Caller-owned shape for one stateless reachability query. Bit N uses the
+ * same canonical ordinal as vizg_hir_record_at. The ordinal buffers expose
+ * the reached subset directly in canonical order so consumers do not need to
+ * scan every bit after the closure has already been computed. */
+typedef struct Vizg_HirReachabilityRequirements {
+    size_t scratch_bytes;
+    size_t module_word_count;
+    size_t function_word_count;
+    size_t block_word_count;
+    size_t instruction_word_count;
+    size_t binding_word_count;
+    size_t module_ordinal_capacity;
+    size_t function_ordinal_capacity;
+    size_t block_ordinal_capacity;
+    size_t instruction_ordinal_capacity;
+    size_t binding_ordinal_capacity;
+    size_t external_module_capacity;
+} Vizg_HirReachabilityRequirements;
+
+typedef struct Vizg_HirReachabilityBuffers {
+    uint8_t *scratch_ptr;
+    size_t scratch_len;
+    uint64_t *module_bits_ptr;
+    size_t module_word_count;
+    uint64_t *function_bits_ptr;
+    size_t function_word_count;
+    uint64_t *block_bits_ptr;
+    size_t block_word_count;
+    uint64_t *instruction_bits_ptr;
+    size_t instruction_word_count;
+    uint64_t *binding_bits_ptr;
+    size_t binding_word_count;
+    uint32_t *module_ordinals_ptr;
+    size_t module_ordinal_capacity;
+    uint32_t *function_ordinals_ptr;
+    size_t function_ordinal_capacity;
+    uint32_t *block_ordinals_ptr;
+    size_t block_ordinal_capacity;
+    uint32_t *instruction_ordinals_ptr;
+    size_t instruction_ordinal_capacity;
+    uint32_t *binding_ordinals_ptr;
+    size_t binding_ordinal_capacity;
+    uint64_t *external_module_ids_ptr;
+    size_t external_module_capacity;
+} Vizg_HirReachabilityBuffers;
+
+typedef struct Vizg_HirReachabilitySummary {
+    size_t module_count;
+    size_t function_count;
+    size_t block_count;
+    size_t instruction_count;
+    size_t binding_count;
+    size_t external_module_count;
+} Vizg_HirReachabilitySummary;
+
 /* Generic immutable record. Kind-specific tag and id field meanings are
  * versioned by VIZG_HIR_API_VERSION. For instruction records, HIR API v1
  * stores the parent function id in secondary_id; v2 stores the result ValueId
@@ -1107,7 +1184,9 @@ typedef struct Vizg_HirModuleDetail {
 typedef struct Vizg_HirModuleDependency {
     uint64_t module_id;
     uint8_t initialization_required;
-    uint8_t reserved[7];
+    /* ABI v8+: 1 only for an ESM module-evaluation dependency. */
+    uint8_t module_evaluation;
+    uint8_t reserved[6];
 } Vizg_HirModuleDependency;
 
 typedef struct Vizg_HirModuleImport {
@@ -1118,7 +1197,9 @@ typedef struct Vizg_HirModuleImport {
     Vizg_HirSemanticIdentity target;
     uint32_t source_kind;
     uint8_t type_only;
-    uint8_t reserved[3];
+    /* ABI v8+: 1 when the local binding is a module namespace object. */
+    uint8_t namespace_binding;
+    uint8_t reserved[2];
 } Vizg_HirModuleImport;
 
 typedef struct Vizg_HirModuleExport {
@@ -1268,6 +1349,15 @@ Vizg_ProjectStatus vizg_project_analyze_source(
     const Vizg_ProjectSource *source,
     Vizg_ProjectResult **out_result);
 uint32_t vizg_hir_api_version(void);
+uint32_t vizg_hir_reachability_api_version(void);
+Vizg_ProjectStatus vizg_hir_reachability_requirements(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    Vizg_HirReachabilityRequirements *out_requirements);
+Vizg_ProjectStatus vizg_hir_reachability_analyze(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    const Vizg_HirReachabilityRequest *request,
+    const Vizg_HirReachabilityBuffers *buffers,
+    Vizg_HirReachabilitySummary *out_summary);
 Vizg_ProjectStatus vizg_hir_summary(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     Vizg_HirSummary *out_summary);

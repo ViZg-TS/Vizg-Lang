@@ -3,46 +3,27 @@
 const std = @import("std");
 const builder_mod = @import("builder.zig");
 const lower_body = @import("lower_body.zig");
+const lower_project_index = @import("lower_project_index.zig");
 const model = @import("model.zig");
 const project_mod = @import("../project/root.zig");
 const region_validation = @import("region_validation.zig");
 const semantics = @import("../semantics/root.zig");
 
-pub fn lower(builder: *builder_mod.Builder, project: *const project_mod.Project, module: *const project_mod.ProjectModule) !void {
+pub fn lower(
+    builder: *builder_mod.Builder,
+    module: *const project_mod.ProjectModule,
+    inputs: lower_project_index.ModuleInputs,
+) !void {
     const semantic_result = builder.result.semanticResult();
     const module_id = module.id.value();
     const source = module.source.?;
+    const dependencies = try lowerDependencies(builder, inputs.dependencies);
 
-    var dependency_ids: std.ArrayList(project_mod.ModuleId) = .empty;
-    for (project.edges()) |edge| {
-        if (edge.importer != module.id or edge.state != .resolved) continue;
-        if (edge.operation == .dynamic_import or edge.type_only) continue;
-        const target = edge.target orelse continue;
-        if (!containsModule(dependency_ids.items, target)) try dependency_ids.append(builder.allocator, target);
-    }
-    for (semantic_result.imports) |item| {
-        if (item.module_id != module_id or item.type_only or !item.runtime_binding) continue;
-        const target = item.target orelse continue;
-        if (target.external_module_id != null) continue;
-        const target_id = project_mod.ModuleId.init(target.declaration.module_id);
-        if (target_id != module.id and !containsModule(dependency_ids.items, target_id))
-            try dependency_ids.append(builder.allocator, target_id);
-    }
-    std.mem.sort(project_mod.ModuleId, dependency_ids.items, {}, lessModuleId);
-    const dependencies = try builder.allocator.alloc(model.HirModuleDependency, dependency_ids.items.len);
-    for (dependency_ids.items, 0..) |target, index| dependencies[index] = .{
-        .module_id = target,
-        .initialization_required = true,
-    };
-
-    var semantic_imports: std.ArrayList(semantics.SemanticImport) = .empty;
-    for (semantic_result.imports) |item| if (item.module_id == module_id) try semantic_imports.append(builder.allocator, item);
-    std.mem.sort(semantics.SemanticImport, semantic_imports.items, {}, lessImport);
-
-    const imports = try builder.allocator.alloc(model.HirImportBinding, semantic_imports.items.len);
+    const semantic_imports = inputs.imports;
+    const imports = try builder.allocator.alloc(model.HirImportBinding, semantic_imports.len);
     var bindings: std.ArrayList(model.HirBinding) = .empty;
     var imported_symbols: std.ArrayList(lower_body.SymbolBinding) = .empty;
-    for (semantic_imports.items, 0..) |item, index| {
+    for (semantic_imports, 0..) |item, index| {
         const target = item.target.?;
         const local_id = if (item.runtime_binding) blk: {
             const id = try builder.makeId(@import("ids.zig").BindingId, builder.budget.usage.bindings);
@@ -76,15 +57,21 @@ pub fn lower(builder: *builder_mod.Builder, project: *const project_mod.Project,
             .exported_name = try builder.copyString(item.imported_name),
             .target = semanticIdentity(target),
             .type_only = item.type_only,
+            .namespace = item.state == .namespace,
         };
     }
 
-    var semantic_exports: std.ArrayList(semantics.SemanticExport) = .empty;
-    for (semantic_result.exports) |item| if (item.module_id == module_id) try semantic_exports.append(builder.allocator, item);
-    std.mem.sort(semantics.SemanticExport, semantic_exports.items, {}, lessExport);
-    const body = try lower_body.lower(builder, module, @import("ids.zig").FunctionId.invalid, bindings.items, imported_symbols.items);
-    const exports = try builder.allocator.alloc(model.HirExportBinding, semantic_exports.items.len);
-    for (semantic_exports.items, 0..) |item, index| {
+    const semantic_exports = inputs.exports;
+    const body = try lower_body.lower(
+        builder,
+        module,
+        @import("ids.zig").FunctionId.invalid,
+        bindings.items,
+        imported_symbols.items,
+        inputs.dynamic_imports,
+    );
+    const exports = try builder.allocator.alloc(model.HirExportBinding, semantic_exports.len);
+    for (semantic_exports, 0..) |item, index| {
         const is_local = item.identity.declaration.module_id == module_id;
         const symbol_id = item.identity.symbol_id;
         const binding_id = if (is_local and symbol_id != null) bindingForSymbol(body.symbol_bindings, symbol_id.?) else null;
@@ -175,26 +162,33 @@ fn intrinsicEffects(effect_set: project_mod.ExternalEffectSet) model.EffectSet {
     };
 }
 
-fn containsModule(items: []const project_mod.ModuleId, target: project_mod.ModuleId) bool {
-    for (items) |item| if (item == target) return true;
-    return false;
-}
+fn lowerDependencies(
+    builder: *builder_mod.Builder,
+    seeds: []const lower_project_index.DependencySeed,
+) ![]const model.HirModuleDependency {
+    var unique_count: usize = 0;
+    var cursor: usize = 0;
+    while (cursor < seeds.len) {
+        unique_count += 1;
+        const module_id = seeds[cursor].module_id;
+        cursor += 1;
+        while (cursor < seeds.len and seeds[cursor].module_id == module_id) : (cursor += 1) {}
+    }
 
-fn lessModuleId(_: void, left: project_mod.ModuleId, right: project_mod.ModuleId) bool {
-    return left.value() < right.value();
-}
-
-fn lessImport(_: void, left: semantics.SemanticImport, right: semantics.SemanticImport) bool {
-    const local_order = std.mem.order(u8, left.local_name, right.local_name);
-    if (local_order != .eq) return local_order == .lt;
-    const imported_order = std.mem.order(u8, left.imported_name, right.imported_name);
-    if (imported_order != .eq) return imported_order == .lt;
-    return left.span.start < right.span.start;
-}
-
-fn lessExport(_: void, left: semantics.SemanticExport, right: semantics.SemanticExport) bool {
-    const name_order = std.mem.order(u8, left.name, right.name);
-    if (name_order != .eq) return name_order == .lt;
-    if (left.type_only != right.type_only) return !left.type_only;
-    return left.span.start < right.span.start;
+    const dependencies = try builder.allocator.alloc(model.HirModuleDependency, unique_count);
+    cursor = 0;
+    var output_index: usize = 0;
+    while (cursor < seeds.len) {
+        const module_id = seeds[cursor].module_id;
+        var module_evaluation = false;
+        while (cursor < seeds.len and seeds[cursor].module_id == module_id) : (cursor += 1)
+            module_evaluation = module_evaluation or seeds[cursor].module_evaluation;
+        dependencies[output_index] = .{
+            .module_id = module_id,
+            .initialization_required = true,
+            .module_evaluation = module_evaluation,
+        };
+        output_index += 1;
+    }
+    return dependencies;
 }

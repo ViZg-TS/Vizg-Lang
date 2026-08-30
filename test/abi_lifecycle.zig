@@ -90,6 +90,13 @@ fn expectInvalid(status: c.Vizg_ProjectStatus) !void {
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT), status);
 }
 
+fn bitSet(words: []const u64, ordinal: usize) bool {
+    const word = ordinal / 64;
+    if (word >= words.len) return false;
+    const bit: u6 = @intCast(ordinal % 64);
+    return (words[word] & (@as(u64, 1) << bit)) != 0;
+}
+
 test "official ABI v1 exposes version and a project-owned terminal result" {
     try std.testing.expectEqual(@as(u32, c.VIZG_ABI_VERSION), c.vizg_abi_version());
     try std.testing.expectEqual(@as(u32, c.VIZG_EXTERNAL_MODULE_API_VERSION), c.vizg_external_module_api_version());
@@ -445,6 +452,212 @@ test "missing source language item fails closed with a stable project diagnostic
     try std.testing.expectEqual(@as(u32, 8002), diagnostic.code);
     var count: usize = 0;
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_hir_language_item_count(result, c.VIZG_HIR_DETAIL_API_VERSION, &count));
+}
+
+
+test "C HIR reachability uses caller-owned buffers and canonical ordinals" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    var config = workspace.config();
+    var source = projectSource(
+        1700,
+        "reachability-c-abi.ts",
+        \\function unused(): number { return 123; }
+        \\function used(): number { return 456; }
+        \\used();
+        ,
+        true,
+    );
+    var result: ?*c.Vizg_ProjectResult = null;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_analyze_source(&config, &source, &result),
+    );
+    defer c.vizg_project_result_destroy(result);
+
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_HIR_REACHABILITY_API_VERSION),
+        c.vizg_hir_reachability_api_version(),
+    );
+    var requirements: c.Vizg_HirReachabilityRequirements = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_reachability_requirements(
+            result,
+            c.VIZG_HIR_REACHABILITY_API_VERSION,
+            &requirements,
+        ),
+    );
+
+    const allocator = std.testing.allocator;
+    const scratch_words = try allocator.alloc(u64, (requirements.scratch_bytes + @sizeOf(u64) - 1) / @sizeOf(u64));
+    defer allocator.free(scratch_words);
+    const module_bits = try allocator.alloc(u64, requirements.module_word_count);
+    defer allocator.free(module_bits);
+    const function_bits = try allocator.alloc(u64, requirements.function_word_count);
+    defer allocator.free(function_bits);
+    const block_bits = try allocator.alloc(u64, requirements.block_word_count);
+    defer allocator.free(block_bits);
+    const instruction_bits = try allocator.alloc(u64, requirements.instruction_word_count);
+    defer allocator.free(instruction_bits);
+    const binding_bits = try allocator.alloc(u64, requirements.binding_word_count);
+    defer allocator.free(binding_bits);
+    const module_ordinals = try allocator.alloc(u32, requirements.module_ordinal_capacity);
+    defer allocator.free(module_ordinals);
+    const function_ordinals = try allocator.alloc(u32, requirements.function_ordinal_capacity);
+    defer allocator.free(function_ordinals);
+    const block_ordinals = try allocator.alloc(u32, requirements.block_ordinal_capacity);
+    defer allocator.free(block_ordinals);
+    const instruction_ordinals = try allocator.alloc(u32, requirements.instruction_ordinal_capacity);
+    defer allocator.free(instruction_ordinals);
+    const binding_ordinals = try allocator.alloc(u32, requirements.binding_ordinal_capacity);
+    defer allocator.free(binding_ordinals);
+    const external_ids = try allocator.alloc(u64, requirements.external_module_capacity);
+    defer allocator.free(external_ids);
+
+    const application_modules = [_]u64{1700};
+    var request: c.Vizg_HirReachabilityRequest = .{
+        .public_module_ids_ptr = null,
+        .public_module_count = 0,
+        .application_module_ids_ptr = application_modules[0..].ptr,
+        .application_module_count = application_modules.len,
+        .triggers_ptr = null,
+        .trigger_count = 0,
+    };
+    var buffers: c.Vizg_HirReachabilityBuffers = .{
+        .scratch_ptr = if (scratch_words.len == 0) null else @ptrCast(scratch_words.ptr),
+        .scratch_len = scratch_words.len * @sizeOf(u64),
+        .module_bits_ptr = if (module_bits.len == 0) null else module_bits.ptr,
+        .module_word_count = module_bits.len,
+        .function_bits_ptr = if (function_bits.len == 0) null else function_bits.ptr,
+        .function_word_count = function_bits.len,
+        .block_bits_ptr = if (block_bits.len == 0) null else block_bits.ptr,
+        .block_word_count = block_bits.len,
+        .instruction_bits_ptr = if (instruction_bits.len == 0) null else instruction_bits.ptr,
+        .instruction_word_count = instruction_bits.len,
+        .binding_bits_ptr = if (binding_bits.len == 0) null else binding_bits.ptr,
+        .binding_word_count = binding_bits.len,
+        .module_ordinals_ptr = if (module_ordinals.len == 0) null else module_ordinals.ptr,
+        .module_ordinal_capacity = module_ordinals.len,
+        .function_ordinals_ptr = if (function_ordinals.len == 0) null else function_ordinals.ptr,
+        .function_ordinal_capacity = function_ordinals.len,
+        .block_ordinals_ptr = if (block_ordinals.len == 0) null else block_ordinals.ptr,
+        .block_ordinal_capacity = block_ordinals.len,
+        .instruction_ordinals_ptr = if (instruction_ordinals.len == 0) null else instruction_ordinals.ptr,
+        .instruction_ordinal_capacity = instruction_ordinals.len,
+        .binding_ordinals_ptr = if (binding_ordinals.len == 0) null else binding_ordinals.ptr,
+        .binding_ordinal_capacity = binding_ordinals.len,
+        .external_module_ids_ptr = if (external_ids.len == 0) null else external_ids.ptr,
+        .external_module_capacity = external_ids.len,
+    };
+    var reachability_summary: c.Vizg_HirReachabilitySummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_reachability_analyze(
+            result,
+            c.VIZG_HIR_REACHABILITY_API_VERSION,
+            &request,
+            &buffers,
+            &reachability_summary,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), reachability_summary.external_module_count);
+    try std.testing.expect(reachability_summary.module_count > 0);
+    try std.testing.expect(reachability_summary.function_count > 0);
+    try std.testing.expect(reachability_summary.block_count > 0);
+    try std.testing.expect(reachability_summary.instruction_count > 0);
+    for (module_ordinals[0..reachability_summary.module_count], 0..) |ordinal, index| {
+        const ordinal_index: usize = @intCast(ordinal);
+        try std.testing.expect(bitSet(module_bits, ordinal_index));
+        if (index != 0) try std.testing.expect(module_ordinals[index - 1] < ordinal);
+    }
+    for (function_ordinals[0..reachability_summary.function_count], 0..) |ordinal, index| {
+        const ordinal_index: usize = @intCast(ordinal);
+        try std.testing.expect(bitSet(function_bits, ordinal_index));
+        if (index != 0) try std.testing.expect(function_ordinals[index - 1] < ordinal);
+    }
+    for (block_ordinals[0..reachability_summary.block_count], 0..) |ordinal, index| {
+        const ordinal_index: usize = @intCast(ordinal);
+        try std.testing.expect(bitSet(block_bits, ordinal_index));
+        if (index != 0) try std.testing.expect(block_ordinals[index - 1] < ordinal);
+    }
+    for (instruction_ordinals[0..reachability_summary.instruction_count], 0..) |ordinal, index| {
+        const ordinal_index: usize = @intCast(ordinal);
+        try std.testing.expect(bitSet(instruction_bits, ordinal_index));
+        if (index != 0) try std.testing.expect(instruction_ordinals[index - 1] < ordinal);
+    }
+    for (binding_ordinals[0..reachability_summary.binding_count], 0..) |ordinal, index| {
+        const ordinal_index: usize = @intCast(ordinal);
+        try std.testing.expect(bitSet(binding_bits, ordinal_index));
+        if (index != 0) try std.testing.expect(binding_ordinals[index - 1] < ordinal);
+    }
+
+    var hir_summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &hir_summary),
+    );
+    var unused_ordinal: ?usize = null;
+    var used_ordinal: ?usize = null;
+    for (0..hir_summary.function_count) |ordinal| {
+        var record: c.Vizg_HirRecord = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_FUNCTION, ordinal, &record),
+        );
+        const name = if (record.name_len == 0) "" else record.name_ptr[0..record.name_len];
+        if (std.mem.eql(u8, name, "unused")) unused_ordinal = ordinal;
+        if (std.mem.eql(u8, name, "used")) used_ordinal = ordinal;
+    }
+    try std.testing.expect(unused_ordinal != null);
+    try std.testing.expect(used_ordinal != null);
+    try std.testing.expect(!bitSet(function_bits, unused_ordinal.?));
+    try std.testing.expect(bitSet(function_bits, used_ordinal.?));
+    var saw_used_ordinal = false;
+    for (function_ordinals[0..reachability_summary.function_count]) |ordinal| {
+        const ordinal_index: usize = @intCast(ordinal);
+        try std.testing.expect(ordinal_index != unused_ordinal.?);
+        if (ordinal_index == used_ordinal.?) saw_used_ordinal = true;
+    }
+    try std.testing.expect(saw_used_ordinal);
+
+    // A bad root is rejected by the stateless query without invalidating the
+    // immutable result. A subsequent valid query must reproduce membership.
+    const unknown_modules = [_]u64{999_999};
+    request.application_module_ids_ptr = unknown_modules[0..].ptr;
+    request.application_module_count = unknown_modules.len;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_INVALID_ARGUMENT),
+        c.vizg_hir_reachability_analyze(
+            result,
+            c.VIZG_HIR_REACHABILITY_API_VERSION,
+            &request,
+            &buffers,
+            &reachability_summary,
+        ),
+    );
+
+    request.application_module_ids_ptr = application_modules[0..].ptr;
+    request.application_module_count = application_modules.len;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_reachability_analyze(
+            result,
+            c.VIZG_HIR_REACHABILITY_API_VERSION,
+            &request,
+            &buffers,
+            &reachability_summary,
+        ),
+    );
+    try std.testing.expect(!bitSet(function_bits, unused_ordinal.?));
+    try std.testing.expect(bitSet(function_bits, used_ordinal.?));
+    saw_used_ordinal = false;
+    for (function_ordinals[0..reachability_summary.function_count]) |ordinal| {
+        const ordinal_index: usize = @intCast(ordinal);
+        try std.testing.expect(ordinal_index != unused_ordinal.?);
+        if (ordinal_index == used_ordinal.?) saw_used_ordinal = true;
+    }
+    try std.testing.expect(saw_used_ordinal);
 }
 
 test "versioned C HIR consumer reads immutable result records" {
@@ -1459,6 +1672,83 @@ test "HIR detail ABI preserves source module initialization and live imports" {
     try std.testing.expect(saw_source_import);
     try std.testing.expect(saw_initialization_dependency);
     try std.testing.expect(saw_live_import);
+}
+
+test "HIR detail ABI v8 preserves ESM dependency and namespace semantics without breaking v7 reserved fields" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(1, "root.ts", "import * as ns from './dep'; export const answer = ns.value;", true);
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(project, &root));
+
+    var step: c.Vizg_ProjectStep = undefined;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(project, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STEP_REQUEST), step.kind);
+    try std.testing.expectEqualStrings("./dep", stepSpecifier(&step));
+    var dependency_source = projectSource(2, "dep.ts", "export const value: number = 1;", false);
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_respond_source(project, step.request_id, &dependency_source),
+    );
+
+    const result = try finishProject(project);
+    var hir_summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &hir_summary),
+    );
+
+    var saw_dependency = false;
+    var saw_namespace_import = false;
+    for (0..hir_summary.module_count) |module_index| {
+        var detail: c.Vizg_HirModuleDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_module_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, module_index, &detail),
+        );
+        if (detail.module_id != 1) continue;
+
+        for (0..detail.dependency_count) |dependency_index| {
+            var current: c.Vizg_HirModuleDependency = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_module_dependency_at(result, c.VIZG_HIR_DETAIL_API_VERSION, module_index, dependency_index, &current),
+            );
+            if (current.module_id != 2) continue;
+            try std.testing.expectEqual(@as(u8, 1), current.initialization_required);
+            try std.testing.expectEqual(@as(u8, 1), current.module_evaluation);
+
+            var legacy: c.Vizg_HirModuleDependency = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_module_dependency_at(result, 7, module_index, dependency_index, &legacy),
+            );
+            try std.testing.expectEqual(@as(u8, 0), legacy.module_evaluation);
+            saw_dependency = true;
+        }
+
+        for (0..detail.import_count) |import_index| {
+            var current: c.Vizg_HirModuleImport = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_module_import_at(result, c.VIZG_HIR_DETAIL_API_VERSION, module_index, import_index, &current),
+            );
+            if (current.source_kind != c.VIZG_HIR_MODULE_REFERENCE_SOURCE or current.source_id != 2) continue;
+            try std.testing.expectEqual(@as(u8, 1), current.namespace_binding);
+
+            var legacy: c.Vizg_HirModuleImport = undefined;
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_OK),
+                c.vizg_hir_module_import_at(result, 7, module_index, import_index, &legacy),
+            );
+            try std.testing.expectEqual(@as(u8, 0), legacy.namespace_binding);
+            saw_namespace_import = true;
+        }
+    }
+    try std.testing.expect(saw_dependency);
+    try std.testing.expect(saw_namespace_import);
 }
 
 test "external-module API v2 accepts null pointers for empty arrays" {

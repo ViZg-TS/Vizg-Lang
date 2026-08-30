@@ -12,12 +12,14 @@ pub const Phase = enum { raw, canonical };
 pub const Error = std.mem.Allocator.Error;
 
 const Definition = struct { block: usize, position: usize };
+const ModuleSet = std.AutoHashMap(u64, void);
 
 const Context = struct {
     builder: *const builder_mod.Builder,
     function: *const model.HirFunction,
     definitions: []const ?Definition,
     dominators: []const bool,
+    modules: *const ModuleSet,
 
     fn validValue(self: Context, value: ids.ValueId, block: usize, position: usize) bool {
         if (!ownedInRange(self.builder, value, self.builder.budget.usage.values)) return false;
@@ -32,7 +34,14 @@ const Context = struct {
 pub fn verifyBuilder(allocator: std.mem.Allocator, builder: *const builder_mod.Builder, phase: Phase) Error!?diagnostics.Code {
     if (builder.result.project.version != model.schema_version) return .internal_invariant;
     if (builder.modules.items.len > builder.result.semanticResult().modules.len) return .invalid_semantic_reference;
-    if (!validMetadata(builder)) return .invalid_semantic_reference;
+
+    var modules = ModuleSet.init(allocator);
+    defer modules.deinit();
+    for (builder.modules.items) |module| {
+        const entry = try modules.getOrPut(module.module_id.value());
+        if (entry.found_existing) return .internal_invariant;
+    }
+    if (!validMetadata(builder, &modules)) return .invalid_semantic_reference;
 
     for (builder.language_items.items, 0..) |item, index| {
         if (item.id.value() == 0 or item.exported_name.len == 0 or
@@ -50,12 +59,11 @@ pub fn verifyBuilder(allocator: std.mem.Allocator, builder: *const builder_mod.B
         for (builder.language_items.items[0..index]) |previous| if (previous.id == item.id) return .internal_invariant;
     }
 
-    for (builder.modules.items, 0..) |module, module_index| {
+    for (builder.modules.items) |module| {
         if (builder.result.semanticResult().lookupModule(module.module_id.value()) == null) return .invalid_semantic_reference;
-        for (builder.modules.items[0..module_index]) |prior| if (prior.module_id.value() == module.module_id.value()) return .internal_invariant;
         if (!validOrigin(builder, module.origin)) return .invalid_semantic_reference;
         if (!validFunction(builder, module.initialization)) return .internal_invariant;
-        for (module.dependencies) |dependency| if (!hasModule(builder, dependency.module_id)) return .invalid_semantic_reference;
+        for (module.dependencies) |dependency| if (!hasModule(&modules, dependency.module_id)) return .invalid_semantic_reference;
         for (module.entities) |entity| if (!validEntity(builder, entity)) return .internal_invariant;
         for (module.imports) |item| if (item.local) |binding| if (!ownedInRange(builder, binding, builder.budget.usage.bindings)) return .invalid_value_binding_or_place;
         for (module.exports) |item| {
@@ -65,7 +73,7 @@ pub fn verifyBuilder(allocator: std.mem.Allocator, builder: *const builder_mod.B
     }
 
     for (builder.entities.items, 0..) |entity, index| {
-        if (!ownedAt(builder, entity.id, index) or !hasModule(builder, entity.module_id)) return .internal_invariant;
+        if (!ownedAt(builder, entity.id, index) or !hasModule(&modules, entity.module_id)) return .internal_invariant;
         if (!validOrigin(builder, entity.origin)) return .invalid_semantic_reference;
         switch (entity.kind) {
             .function => |item| if (!validFunction(builder, item.function)) return .internal_invariant,
@@ -83,17 +91,17 @@ pub fn verifyBuilder(allocator: std.mem.Allocator, builder: *const builder_mod.B
         if (!ownedAt(builder, region.id, index) or !validFunction(builder, region.function) or !validOrigin(builder, region.origin)) return .invalid_region;
     }
     for (builder.functions.items, 0..) |*function, index| {
-        if (!ownedAt(builder, function.id, index) or !hasModule(builder, function.module_id)) return .internal_invariant;
-        if (try verifyFunction(allocator, builder, function, phase)) |code| return code;
+        if (!ownedAt(builder, function.id, index) or !hasModule(&modules, function.module_id)) return .internal_invariant;
+        if (try verifyFunction(allocator, builder, &modules, function, phase)) |code| return code;
     }
     return null;
 }
 
-fn validMetadata(builder: *const builder_mod.Builder) bool {
+fn validMetadata(builder: *const builder_mod.Builder, modules: *const ModuleSet) bool {
     if (builder.debug_level == .none and (builder.origins.items.len != 0 or builder.trace_events.items.len != 0)) return false;
     if (builder.debug_level == .minimal and builder.trace_events.items.len != 0) return false;
     for (builder.origins.items, 0..) |record, index| {
-        if (!hasModule(builder, record.module_id) or record.primary_span.start > record.primary_span.end or record.ast_nodes.len == 0) return false;
+        if (!hasModule(modules, record.module_id) or record.primary_span.start > record.primary_span.end or record.ast_nodes.len == 0) return false;
         if (record.type_id) |type_id| if (!validType(builder, type_id)) return false;
         if (record.symbol) |symbol| if (symbol.module_id != record.module_id.value()) return false;
         if (record.parent) |parent| {
@@ -109,7 +117,7 @@ fn validMetadata(builder: *const builder_mod.Builder) bool {
     return true;
 }
 
-fn verifyFunction(allocator: std.mem.Allocator, builder: *const builder_mod.Builder, function: *const model.HirFunction, phase: Phase) Error!?diagnostics.Code {
+fn verifyFunction(allocator: std.mem.Allocator, builder: *const builder_mod.Builder, modules: *const ModuleSet, function: *const model.HirFunction, phase: Phase) Error!?diagnostics.Code {
     if (!validType(builder, function.signature_type) or function.blocks.len == 0 or findBlock(function, function.entry) == null) return .invalid_cfg;
     if (!validOrigin(builder, function.origin)) return .invalid_semantic_reference;
     if (function.kind == .constructor and !function.flags.constructor) return .illegal_operation;
@@ -163,7 +171,7 @@ fn verifyFunction(allocator: std.mem.Allocator, builder: *const builder_mod.Buil
     const matrix_size = std.math.mul(usize, function.blocks.len, function.blocks.len) catch return .internal_invariant;
     const dominators = try computeDominators(allocator, function, builder.regions.items, matrix_size);
     defer allocator.free(dominators);
-    const context = Context{ .builder = builder, .function = function, .definitions = definitions, .dominators = dominators };
+    const context = Context{ .builder = builder, .function = function, .definitions = definitions, .dominators = dominators, .modules = modules };
 
     const seen_places = try allocator.alloc(bool, builder.budget.usage.places);
     defer allocator.free(seen_places);
@@ -215,6 +223,10 @@ fn verifyOperation(context: Context, instruction: model.HirInstruction, block: u
                 const binding = findBinding(context.function, place.kind.binding) orelse return .invalid_value_binding_or_place;
                 if (!binding.mutable or binding.initial_state == .live_import) return .invalid_value_binding_or_place;
             }
+        },
+        .dynamic_import => |item| if (item.resolved) |resolved| switch (resolved) {
+            .source => |module_id| if (!hasModule(context.modules, module_id)) return .invalid_semantic_reference,
+            .external => {},
         },
         .create_closure => |id| if (!validFunction(context.builder, id)) return .internal_invariant,
         .create_class => |item| if (!validEntity(context.builder, item.entity)) return .internal_invariant,
@@ -438,9 +450,8 @@ fn validOrigin(builder: *const builder_mod.Builder, id: ids.OriginId) bool {
     if (builder.debug_level == .none) return id.eql(.invalid);
     return ownedInRange(builder, id, builder.origins.items.len);
 }
-fn hasModule(builder: *const builder_mod.Builder, id: model.ModuleId) bool {
-    for (builder.modules.items) |module| if (module.module_id.value() == id.value()) return true;
-    return false;
+fn hasModule(modules: *const ModuleSet, id: model.ModuleId) bool {
+    return modules.contains(id.value());
 }
 fn validFunction(builder: *const builder_mod.Builder, id: ids.FunctionId) bool {
     return ownedInRange(builder, id, builder.functions.items.len) and builder.functions.items[id.index().?].id.eql(id);

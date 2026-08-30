@@ -25,14 +25,19 @@ The additive `VIZG_HIR_DETAIL_API_VERSION` surface now includes:
 
 Module references explicitly identify source and external providers. Imported
 bindings retain their local binding ID and canonical target. Dependency records
-state whether initialization ordering is required. Capture records describe
+state whether initialization ordering is required. HIR detail API v8 additionally
+states whether that dependency is an unconditional ESM module-evaluation edge;
+source-backed provider provenance remains lazy until semantic use. Import records
+also expose whether the local binding is a module namespace object, so consumers
+never need to infer namespace semantics from the exported-name spelling. Capture records describe
 semantic storage only: no byte offsets, frame layouts, environment layouts, or
 target-specific representation are exposed.
 
 ## Compatibility and validation
 
 This extension does not change `VIZG_ABI_VERSION`, frozen HIR v1, or any
-existing public struct layout. It adds constants, structs, and read-only
+existing public struct size/alignment. Detail API v8 consumes bytes that were
+reserved by v7; when v7 is requested those bytes remain zero. It adds constants, structs, and read-only
 symbols. Native and WebAssembly symbol allowlists, C/Zig layout probes, the C
 HIR consumer, and lifecycle tests cover the extension, including source and
 external imports, live binding state, initialization dependencies, and closure

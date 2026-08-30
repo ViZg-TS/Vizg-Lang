@@ -7,7 +7,8 @@ const vizg = @import("vizg-impl");
 pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
-pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 7;
+pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 8;
+pub const VIZG_HIR_REACHABILITY_API_VERSION: u32 = 1;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
 pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION: u32 = vizg.language_item_contract_version;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
@@ -530,6 +531,77 @@ pub const Vizg_HirSummary = extern struct {
     origin_count: usize,
 };
 
+/// One host-supplied opaque language-item dependency edge used by artifact
+/// reachability. `operation_tag` is the same versioned ordinal exposed by
+/// `Vizg_HirPayload.tag`; ViZG interprets only structural conditions plus the
+/// opaque language-item identity.
+pub const Vizg_HirReachabilityTrigger = vizg.hir.reachability.LanguageItemTrigger;
+
+pub const VIZG_HIR_REACH_TRIGGER_CANONICAL_ARRAY_BASE: u32 = 1 << 0;
+pub const VIZG_HIR_REACH_TRIGGER_PLACE_DELETED: u32 = 1 << 1;
+
+pub const Vizg_HirReachabilityRequest = extern struct {
+    public_module_ids_ptr: [*c]const u64,
+    public_module_count: usize,
+    application_module_ids_ptr: [*c]const u64,
+    application_module_count: usize,
+    triggers_ptr: [*c]const Vizg_HirReachabilityTrigger,
+    trigger_count: usize,
+};
+
+/// Caller-owned storage requirements for one immutable artifact reachability
+/// query. Bit N uses the same canonical ordinal as vizg_hir_record_at.
+pub const Vizg_HirReachabilityRequirements = extern struct {
+    scratch_bytes: usize,
+    module_word_count: usize,
+    function_word_count: usize,
+    block_word_count: usize,
+    instruction_word_count: usize,
+    binding_word_count: usize,
+    module_ordinal_capacity: usize,
+    function_ordinal_capacity: usize,
+    block_ordinal_capacity: usize,
+    instruction_ordinal_capacity: usize,
+    binding_ordinal_capacity: usize,
+    external_module_capacity: usize,
+};
+
+pub const Vizg_HirReachabilityBuffers = extern struct {
+    scratch_ptr: [*c]u8,
+    scratch_len: usize,
+    module_bits_ptr: [*c]u64,
+    module_word_count: usize,
+    function_bits_ptr: [*c]u64,
+    function_word_count: usize,
+    block_bits_ptr: [*c]u64,
+    block_word_count: usize,
+    instruction_bits_ptr: [*c]u64,
+    instruction_word_count: usize,
+    binding_bits_ptr: [*c]u64,
+    binding_word_count: usize,
+    module_ordinals_ptr: [*c]u32,
+    module_ordinal_capacity: usize,
+    function_ordinals_ptr: [*c]u32,
+    function_ordinal_capacity: usize,
+    block_ordinals_ptr: [*c]u32,
+    block_ordinal_capacity: usize,
+    instruction_ordinals_ptr: [*c]u32,
+    instruction_ordinal_capacity: usize,
+    binding_ordinals_ptr: [*c]u32,
+    binding_ordinal_capacity: usize,
+    external_module_ids_ptr: [*c]u64,
+    external_module_capacity: usize,
+};
+
+pub const Vizg_HirReachabilitySummary = extern struct {
+    module_count: usize,
+    function_count: usize,
+    block_count: usize,
+    instruction_count: usize,
+    binding_count: usize,
+    external_module_count: usize,
+};
+
 /// Kind-neutral immutable record. `tag`, `parent_id`, `secondary_id`, and
 /// `flags` are interpreted according to `kind` and the requested HIR API
 /// version; unknown fields are zero. For instruction records, v1 reports the
@@ -735,7 +807,9 @@ pub const Vizg_HirModuleDetail = extern struct {
 pub const Vizg_HirModuleDependency = extern struct {
     module_id: u64,
     initialization_required: u8,
-    reserved: [7]u8,
+    /// ABI v8+: distinguishes ESM evaluation edges from source-backed provider provenance.
+    module_evaluation: u8,
+    reserved: [6]u8,
 };
 
 pub const Vizg_HirModuleImport = extern struct {
@@ -746,7 +820,9 @@ pub const Vizg_HirModuleImport = extern struct {
     target: Vizg_HirSemanticIdentity,
     source_kind: u32,
     type_only: u8,
-    reserved: [3]u8,
+    /// ABI v8+: true when the local binding is a semantic module namespace object.
+    namespace_binding: u8,
+    reserved: [2]u8,
 };
 
 pub const Vizg_HirModuleExport = extern struct {
@@ -2331,6 +2407,188 @@ pub fn hirApiVersion() callconv(.c) u32 {
     return VIZG_HIR_API_VERSION;
 }
 
+pub fn hirReachabilityApiVersion() callconv(.c) u32 {
+    return VIZG_HIR_REACHABILITY_API_VERSION;
+}
+
+pub fn hirReachabilityRequirements(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    out_requirements: ?*Vizg_HirReachabilityRequirements,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version != VIZG_HIR_REACHABILITY_API_VERSION) return .INVALID_ARGUMENT;
+    const owned = hirOwned(result, VIZG_HIR_API_VERSION) orelse return .INVALID_STATE;
+    const output = out_requirements orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirReachabilityRequirements, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirReachabilityRequirements)))
+        return .INVALID_ARGUMENT;
+    const hir_result = &owned.hir_result.?;
+    const index = hir_result.consumerIndex();
+    const scratch_bytes = hir_result.artifactReachabilityScratchSize() catch return .INTERNAL_ERROR;
+    output.* = .{
+        .scratch_bytes = scratch_bytes,
+        .module_word_count = vizg.hir.reachability.wordCount(hir_result.project.modules.len),
+        .function_word_count = vizg.hir.reachability.wordCount(hir_result.project.functions.len),
+        .block_word_count = vizg.hir.reachability.wordCount(index.blocks.len),
+        .instruction_word_count = vizg.hir.reachability.wordCount(index.instructions.len),
+        .binding_word_count = vizg.hir.reachability.wordCount(index.bindings.len),
+        .module_ordinal_capacity = hir_result.project.modules.len,
+        .function_ordinal_capacity = hir_result.project.functions.len,
+        .block_ordinal_capacity = index.blocks.len,
+        .instruction_ordinal_capacity = index.instructions.len,
+        .binding_ordinal_capacity = index.bindings.len,
+        .external_module_capacity = index.external_module_ids.len,
+    };
+    return .OK;
+}
+
+pub fn hirReachabilityAnalyze(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    request_ptr: ?*const Vizg_HirReachabilityRequest,
+    buffers_ptr: ?*const Vizg_HirReachabilityBuffers,
+    out_summary: ?*Vizg_HirReachabilitySummary,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version != VIZG_HIR_REACHABILITY_API_VERSION) return .INVALID_ARGUMENT;
+    const owned = hirOwned(result, VIZG_HIR_API_VERSION) orelse return .INVALID_STATE;
+    const request = request_ptr orelse return .INVALID_ARGUMENT;
+    const buffers = buffers_ptr orelse return .INVALID_ARGUMENT;
+    const summary = out_summary orelse return .INVALID_ARGUMENT;
+    if (!validAlignedHostObject(Vizg_HirReachabilityRequest, request) or
+        !inputOutsideWorkspace(owned.owner, request, @sizeOf(Vizg_HirReachabilityRequest)) or
+        !validAlignedHostObject(Vizg_HirReachabilityBuffers, buffers) or
+        !inputOutsideWorkspace(owned.owner, buffers, @sizeOf(Vizg_HirReachabilityBuffers)) or
+        !validAlignedMutableHostArray(Vizg_HirReachabilitySummary, summary, 1) or
+        !outputOutsideWorkspace(owned, summary, @sizeOf(Vizg_HirReachabilitySummary)))
+        return .INVALID_ARGUMENT;
+    if (!validAlignedHostArray(u64, request.public_module_ids_ptr, request.public_module_count) or
+        !validAlignedHostArray(u64, request.application_module_ids_ptr, request.application_module_count) or
+        !validAlignedHostArray(Vizg_HirReachabilityTrigger, request.triggers_ptr, request.trigger_count))
+        return .INVALID_ARGUMENT;
+    const public_modules_bytes = checkedByteLen(u64, request.public_module_count) orelse return .INVALID_ARGUMENT;
+    const application_modules_bytes = checkedByteLen(u64, request.application_module_count) orelse return .INVALID_ARGUMENT;
+    const triggers_bytes = checkedByteLen(Vizg_HirReachabilityTrigger, request.trigger_count) orelse return .INVALID_ARGUMENT;
+    if (!inputOutsideWorkspace(owned.owner, request.public_module_ids_ptr, public_modules_bytes) or
+        !inputOutsideWorkspace(owned.owner, request.application_module_ids_ptr, application_modules_bytes) or
+        !inputOutsideWorkspace(owned.owner, request.triggers_ptr, triggers_bytes))
+        return .INVALID_ARGUMENT;
+
+    const hir_result = &owned.hir_result.?;
+    const index = hir_result.consumerIndex();
+    const required_scratch = hir_result.artifactReachabilityScratchSize() catch return .INTERNAL_ERROR;
+    const required_module_words = vizg.hir.reachability.wordCount(hir_result.project.modules.len);
+    const required_function_words = vizg.hir.reachability.wordCount(hir_result.project.functions.len);
+    const required_block_words = vizg.hir.reachability.wordCount(index.blocks.len);
+    const required_instruction_words = vizg.hir.reachability.wordCount(index.instructions.len);
+    const required_binding_words = vizg.hir.reachability.wordCount(index.bindings.len);
+    if (buffers.scratch_len < required_scratch or
+        buffers.module_word_count < required_module_words or
+        buffers.function_word_count < required_function_words or
+        buffers.block_word_count < required_block_words or
+        buffers.instruction_word_count < required_instruction_words or
+        buffers.binding_word_count < required_binding_words or
+        buffers.module_ordinal_capacity < hir_result.project.modules.len or
+        buffers.function_ordinal_capacity < hir_result.project.functions.len or
+        buffers.block_ordinal_capacity < index.blocks.len or
+        buffers.instruction_ordinal_capacity < index.instructions.len or
+        buffers.binding_ordinal_capacity < index.bindings.len or
+        buffers.external_module_capacity < index.external_module_ids.len)
+        return .INVALID_ARGUMENT;
+
+    if (buffers.scratch_len != 0) {
+        if (buffers.scratch_ptr == null or @intFromPtr(buffers.scratch_ptr) % @alignOf(u64) != 0 or
+            !outputOutsideWorkspace(owned, buffers.scratch_ptr, buffers.scratch_len)) return .INVALID_ARGUMENT;
+    }
+    if (!validAlignedMutableHostArray(u64, buffers.module_bits_ptr, buffers.module_word_count) or
+        !validAlignedMutableHostArray(u64, buffers.function_bits_ptr, buffers.function_word_count) or
+        !validAlignedMutableHostArray(u64, buffers.block_bits_ptr, buffers.block_word_count) or
+        !validAlignedMutableHostArray(u64, buffers.instruction_bits_ptr, buffers.instruction_word_count) or
+        !validAlignedMutableHostArray(u64, buffers.binding_bits_ptr, buffers.binding_word_count) or
+        !validAlignedMutableHostArray(u32, buffers.module_ordinals_ptr, buffers.module_ordinal_capacity) or
+        !validAlignedMutableHostArray(u32, buffers.function_ordinals_ptr, buffers.function_ordinal_capacity) or
+        !validAlignedMutableHostArray(u32, buffers.block_ordinals_ptr, buffers.block_ordinal_capacity) or
+        !validAlignedMutableHostArray(u32, buffers.instruction_ordinals_ptr, buffers.instruction_ordinal_capacity) or
+        !validAlignedMutableHostArray(u32, buffers.binding_ordinals_ptr, buffers.binding_ordinal_capacity) or
+        !validAlignedMutableHostArray(u64, buffers.external_module_ids_ptr, buffers.external_module_capacity))
+        return .INVALID_ARGUMENT;
+
+    const output_ranges = [_]struct { ptr: [*c]u8, len: usize }{
+        .{ .ptr = @ptrCast(buffers.module_bits_ptr), .len = checkedByteLen(u64, buffers.module_word_count) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.function_bits_ptr), .len = checkedByteLen(u64, buffers.function_word_count) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.block_bits_ptr), .len = checkedByteLen(u64, buffers.block_word_count) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.instruction_bits_ptr), .len = checkedByteLen(u64, buffers.instruction_word_count) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.binding_bits_ptr), .len = checkedByteLen(u64, buffers.binding_word_count) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.module_ordinals_ptr), .len = checkedByteLen(u32, buffers.module_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.function_ordinals_ptr), .len = checkedByteLen(u32, buffers.function_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.block_ordinals_ptr), .len = checkedByteLen(u32, buffers.block_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.instruction_ordinals_ptr), .len = checkedByteLen(u32, buffers.instruction_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.binding_ordinals_ptr), .len = checkedByteLen(u32, buffers.binding_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.external_module_ids_ptr), .len = checkedByteLen(u64, buffers.external_module_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(summary), .len = @sizeOf(Vizg_HirReachabilitySummary) },
+    };
+    const input_ranges = [_]struct { ptr: [*c]const u8, len: usize }{
+        .{ .ptr = @ptrCast(request), .len = @sizeOf(Vizg_HirReachabilityRequest) },
+        .{ .ptr = @ptrCast(buffers), .len = @sizeOf(Vizg_HirReachabilityBuffers) },
+        .{ .ptr = @ptrCast(request.public_module_ids_ptr), .len = public_modules_bytes },
+        .{ .ptr = @ptrCast(request.application_module_ids_ptr), .len = application_modules_bytes },
+        .{ .ptr = @ptrCast(request.triggers_ptr), .len = triggers_bytes },
+    };
+    for (output_ranges, 0..) |left, left_index| {
+        if (left.len != 0 and !outputOutsideWorkspace(owned, left.ptr, left.len)) return .INVALID_ARGUMENT;
+        if (buffers.scratch_len != 0 and rangesOverlap(left.ptr, left.len, buffers.scratch_ptr, buffers.scratch_len))
+            return .INVALID_ARGUMENT;
+        for (output_ranges[left_index + 1 ..]) |right|
+            if (rangesOverlap(left.ptr, left.len, right.ptr, right.len)) return .INVALID_ARGUMENT;
+        for (input_ranges) |input|
+            if (rangesOverlap(left.ptr, left.len, input.ptr, input.len)) return .INVALID_ARGUMENT;
+    }
+    if (buffers.scratch_len != 0) {
+        for (input_ranges) |input|
+            if (rangesOverlap(buffers.scratch_ptr, buffers.scratch_len, input.ptr, input.len)) return .INVALID_ARGUMENT;
+    }
+
+    const public_modules: []const u64 = if (request.public_module_count == 0) &.{} else request.public_module_ids_ptr[0..request.public_module_count];
+    const application_modules: []const u64 = if (request.application_module_count == 0) &.{} else request.application_module_ids_ptr[0..request.application_module_count];
+    const triggers: []const Vizg_HirReachabilityTrigger = if (request.trigger_count == 0) &.{} else request.triggers_ptr[0..request.trigger_count];
+    const scratch_raw: []u8 = if (buffers.scratch_len == 0) &.{} else buffers.scratch_ptr[0..buffers.scratch_len];
+    const scratch: []align(@alignOf(u64)) u8 = @alignCast(scratch_raw);
+
+    const reachability_summary = hir_result.analyzeArtifactReachability(
+        scratch,
+        .{
+            .public_modules = public_modules,
+            .application_modules = application_modules,
+            .language_item_triggers = triggers,
+        },
+        .{
+            .module_bits = if (buffers.module_word_count == 0) &.{} else buffers.module_bits_ptr[0..buffers.module_word_count],
+            .function_bits = if (buffers.function_word_count == 0) &.{} else buffers.function_bits_ptr[0..buffers.function_word_count],
+            .block_bits = if (buffers.block_word_count == 0) &.{} else buffers.block_bits_ptr[0..buffers.block_word_count],
+            .instruction_bits = if (buffers.instruction_word_count == 0) &.{} else buffers.instruction_bits_ptr[0..buffers.instruction_word_count],
+            .binding_bits = if (buffers.binding_word_count == 0) &.{} else buffers.binding_bits_ptr[0..buffers.binding_word_count],
+            .module_ordinals = if (buffers.module_ordinal_capacity == 0) &.{} else buffers.module_ordinals_ptr[0..buffers.module_ordinal_capacity],
+            .function_ordinals = if (buffers.function_ordinal_capacity == 0) &.{} else buffers.function_ordinals_ptr[0..buffers.function_ordinal_capacity],
+            .block_ordinals = if (buffers.block_ordinal_capacity == 0) &.{} else buffers.block_ordinals_ptr[0..buffers.block_ordinal_capacity],
+            .instruction_ordinals = if (buffers.instruction_ordinal_capacity == 0) &.{} else buffers.instruction_ordinals_ptr[0..buffers.instruction_ordinal_capacity],
+            .binding_ordinals = if (buffers.binding_ordinal_capacity == 0) &.{} else buffers.binding_ordinals_ptr[0..buffers.binding_ordinal_capacity],
+            .external_module_ids = if (buffers.external_module_capacity == 0) &.{} else buffers.external_module_ids_ptr[0..buffers.external_module_capacity],
+        },
+    ) catch |err| return switch (err) {
+        error.OutOfMemory => .OUT_OF_MEMORY,
+        error.UnknownArtifactRoot, error.InvalidTrigger, error.OutputTooSmall => .INVALID_ARGUMENT,
+        else => .INTERNAL_ERROR,
+    };
+    summary.* = .{
+        .module_count = reachability_summary.module_count,
+        .function_count = reachability_summary.function_count,
+        .block_count = reachability_summary.block_count,
+        .instruction_count = reachability_summary.instruction_count,
+        .binding_count = reachability_summary.binding_count,
+        .external_module_count = reachability_summary.external_module_count,
+    };
+    return .OK;
+}
+
 fn hirOwned(result: ?*const Vizg_ProjectResult, requested_version: u32) ?*const OwnedProjectResult {
     if (requested_version == 0 or requested_version > VIZG_HIR_API_VERSION) return null;
     const owned = ownedResult(result) orelse return null;
@@ -2366,21 +2624,14 @@ pub fn hirSummary(
     if (!validAlignedMutableHostArray(Vizg_HirSummary, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirSummary))) return .INVALID_ARGUMENT;
     const project = owned.hir_result.?.project;
-    var block_count: usize = 0;
-    var instruction_count: usize = 0;
-    var binding_count: usize = 0;
-    for (project.functions) |function| {
-        block_count += function.blocks.len;
-        binding_count += function.bindings.len;
-        for (function.blocks) |block| instruction_count += block.instructions.len;
-    }
+    const index = owned.hir_result.?.consumerIndex();
     output.* = .{
         .module_count = project.modules.len,
         .external_declaration_count = project.external_declarations.len,
         .function_count = project.functions.len,
-        .block_count = block_count,
-        .instruction_count = instruction_count,
-        .binding_count = binding_count,
+        .block_count = index.blocks.len,
+        .instruction_count = index.instructions.len,
+        .binding_count = index.bindings.len,
         .type_count = owned.hir_result.?.typeCount(),
         .origin_count = project.origins.records.len,
     };
@@ -2395,15 +2646,10 @@ fn hirOriginFlags(requested_version: u32, type_id: ?u32) u8 {
     return if (requested_version >= 2 and type_id != null) 1 else 0;
 }
 
-fn hirFunctionName(project: vizg.hir.HirProject, function: vizg.hir.HirFunction) []const u8 {
-    const symbol = function.symbol orelse return "";
-    for (project.functions) |owner| {
-        for (owner.bindings) |binding| {
-            if (binding.kind == .function and binding.declaration != null and binding.declaration.?.eql(symbol))
-                return binding.name;
-        }
-    }
-    return "";
+fn hirFunctionName(result: *const vizg.hir.HirResult, function_index: usize) []const u8 {
+    const index = result.consumerIndex();
+    if (function_index >= index.function_names.len) return "";
+    return index.function_names[function_index];
 }
 
 pub fn hirRecordAt(
@@ -2451,62 +2697,50 @@ pub fn hirRecordAt(
             output.tag = @intFromEnum(item.kind);
             output.type_id = item.signature_type;
             output.origin_id = @intCast(idIndex(item.origin));
-            const name = hirFunctionName(project, item);
+            const name = hirFunctionName(hir_result, index);
             output.name_ptr = name.ptr;
             output.name_len = name.len;
             output.child_count = item.blocks.len;
         },
-        .BLOCK, .INSTRUCTION, .BINDING => {
-            var current: usize = 0;
-            for (project.functions) |function| {
-                if (kind == .BINDING) for (function.bindings) |item| {
-                    if (current == index) {
-                        output.id = idIndex(item.id);
-                        output.parent_id = idIndex(function.id);
-                        output.module_id = function.module_id.value();
-                        output.tag = hirBindingKind(item.kind);
-                        output.type_id = item.type_id;
-                        output.flags = @intFromBool(item.mutable);
-                        output.origin_id = @intCast(idIndex(item.origin));
-                        output.name_ptr = item.name.ptr;
-                        output.name_len = item.name.len;
-                        return .OK;
-                    }
-                    current += 1;
-                };
-                for (function.blocks) |block| {
-                    if (kind == .BLOCK) {
-                        if (current == index) {
-                            output.id = idIndex(block.id);
-                            output.parent_id = idIndex(function.id);
-                            output.module_id = function.module_id.value();
-                            output.tag = @intFromEnum(std.meta.activeTag(block.terminator));
-                            output.origin_id = @intCast(idIndex(block.origin));
-                            output.child_count = block.instructions.len;
-                            return .OK;
-                        }
-                        current += 1;
-                    } else if (kind == .INSTRUCTION) for (block.instructions) |item| {
-                        if (current == index) {
-                            output.id = idIndex(item.id);
-                            output.parent_id = idIndex(block.id);
-                            output.secondary_id = if (requested_version == 1)
-                                idIndex(function.id)
-                            else
-                                optionalId(item.result);
-                            output.module_id = function.module_id.value();
-                            output.tag = @intFromEnum(std.meta.activeTag(item.operation));
-                            output.type_id = item.result_type orelse 0;
-                            output.effect_bits = effectBits(item.effects);
-                            output.flags = @intFromBool(item.result != null);
-                            output.origin_id = @intCast(idIndex(item.origin));
-                            return .OK;
-                        }
-                        current += 1;
-                    };
-                }
-            }
-            return .INVALID_ARGUMENT;
+        .BLOCK => {
+            const consumer = hir_result.consumerIndex();
+            const block = consumer.block(project, index) orelse return .INVALID_ARGUMENT;
+            const function = consumer.blockFunction(project, index) orelse return .INVALID_ARGUMENT;
+            output.id = idIndex(block.id);
+            output.parent_id = idIndex(function.id);
+            output.module_id = function.module_id.value();
+            output.tag = @intFromEnum(std.meta.activeTag(block.terminator));
+            output.origin_id = @intCast(idIndex(block.origin));
+            output.child_count = block.instructions.len;
+        },
+        .INSTRUCTION => {
+            const consumer = hir_result.consumerIndex();
+            const item = consumer.instruction(project, index) orelse return .INVALID_ARGUMENT;
+            const block = consumer.instructionBlock(project, index) orelse return .INVALID_ARGUMENT;
+            const function = consumer.instructionFunction(project, index) orelse return .INVALID_ARGUMENT;
+            output.id = idIndex(item.id);
+            output.parent_id = idIndex(block.id);
+            output.secondary_id = if (requested_version == 1) idIndex(function.id) else optionalId(item.result);
+            output.module_id = function.module_id.value();
+            output.tag = @intFromEnum(std.meta.activeTag(item.operation));
+            output.type_id = item.result_type orelse 0;
+            output.effect_bits = effectBits(item.effects);
+            output.flags = @intFromBool(item.result != null);
+            output.origin_id = @intCast(idIndex(item.origin));
+        },
+        .BINDING => {
+            const consumer = hir_result.consumerIndex();
+            const item = consumer.binding(project, index) orelse return .INVALID_ARGUMENT;
+            const function = consumer.bindingFunction(project, index) orelse return .INVALID_ARGUMENT;
+            output.id = idIndex(item.id);
+            output.parent_id = idIndex(function.id);
+            output.module_id = function.module_id.value();
+            output.tag = hirBindingKind(item.kind);
+            output.type_id = item.type_id;
+            output.flags = @intFromBool(item.mutable);
+            output.origin_id = @intCast(idIndex(item.origin));
+            output.name_ptr = item.name.ptr;
+            output.name_len = item.name.len;
         },
         .TYPE => {
             const item = hir_result.typeAt(index) orelse return .INVALID_ARGUMENT;
@@ -2680,26 +2914,12 @@ fn hirParameterFlags(optional: bool, has_default: bool, rest: bool, parameter_pr
         (@as(u8, @intFromBool(parameter_property)) << 3);
 }
 
-fn hirBlockAtIndex(project: vizg.hir.HirProject, index: usize) ?vizg.hir.HirBlock {
-    var current: usize = 0;
-    for (project.functions) |function| {
-        for (function.blocks) |block| {
-            if (current == index) return block;
-            current += 1;
-        }
-    }
-    return null;
+fn hirBlockAtIndex(result: *const vizg.hir.HirResult, index: usize) ?*const vizg.hir.HirBlock {
+    return result.consumerIndex().block(result.project, index);
 }
 
-fn hirBindingAtIndex(project: vizg.hir.HirProject, index: usize) ?vizg.hir.HirBinding {
-    var current: usize = 0;
-    for (project.functions) |function| {
-        for (function.bindings) |binding| {
-            if (current == index) return binding;
-            current += 1;
-        }
-    }
-    return null;
+fn hirBindingAtIndex(result: *const vizg.hir.HirResult, index: usize) ?*const vizg.hir.HirBinding {
+    return result.consumerIndex().binding(result.project, index);
 }
 
 fn hirSemanticIdentity(identity: vizg.hir.model.HirSemanticIdentity) Vizg_HirSemanticIdentity {
@@ -3042,24 +3262,19 @@ pub fn hirFunctionParameterAt(
 }
 
 fn hirClassEntity(
-    project: vizg.hir.HirProject,
+    result: *const vizg.hir.HirResult,
     entity_id: u64,
-) ?vizg.hir.model.HirEntity {
-    for (project.entities) |entity| {
-        if (idIndex(entity.id) != entity_id) continue;
-        if (entity.kind != .class) return null;
-        return entity;
-    }
-    return null;
+) ?*const vizg.hir.model.HirEntity {
+    const entity = result.consumerIndex().entityByRaw(result.project, entity_id) orelse return null;
+    if (entity.kind != .class) return null;
+    return entity;
 }
 
 fn hirFunctionById(
-    project: vizg.hir.HirProject,
+    result: *const vizg.hir.HirResult,
     function_id: vizg.hir.ids.FunctionId,
-) ?vizg.hir.model.HirFunction {
-    for (project.functions) |function|
-        if (function.id.eql(function_id)) return function;
-    return null;
+) ?*const vizg.hir.model.HirFunction {
+    return result.consumerIndex().functionById(result.project, function_id);
 }
 
 pub fn hirClassDetail(
@@ -3073,8 +3288,8 @@ pub fn hirClassDetail(
     const output = out_detail orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_HirClassDetail, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirClassDetail))) return .INVALID_ARGUMENT;
-    const project = owned.hir_result.?.project;
-    const entity = hirClassEntity(project, entity_id) orelse return .INVALID_ARGUMENT;
+    const hir_result = &owned.hir_result.?;
+    const entity = hirClassEntity(hir_result, entity_id) orelse return .INVALID_ARGUMENT;
     const class = entity.kind.class;
     output.* = .{
         .entity_id = entity_id,
@@ -3099,12 +3314,12 @@ pub fn hirClassMethodAt(
     const output = out_method orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_HirClassMethod, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirClassMethod))) return .INVALID_ARGUMENT;
-    const project = owned.hir_result.?.project;
-    const entity = hirClassEntity(project, entity_id) orelse return .INVALID_ARGUMENT;
+    const hir_result = &owned.hir_result.?;
+    const entity = hirClassEntity(hir_result, entity_id) orelse return .INVALID_ARGUMENT;
     const methods = entity.kind.class.methods;
     if (method_index >= methods.len) return .INVALID_ARGUMENT;
     const method = methods[method_index];
-    const function = hirFunctionById(project, method.function) orelse return .INVALID_STATE;
+    const function = hirFunctionById(hir_result, method.function) orelse return .INVALID_STATE;
     const name = switch (method.name) {
         .static => |value| value,
         .computed, .private => return .INVALID_STATE,
@@ -3130,7 +3345,7 @@ pub fn hirBlockDetailAt(
     const output = out_detail orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_HirBlockDetail, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirBlockDetail))) return .INVALID_ARGUMENT;
-    const block = hirBlockAtIndex(owned.hir_result.?.project, block_index) orelse return .INVALID_ARGUMENT;
+    const block = hirBlockAtIndex(&owned.hir_result.?, block_index) orelse return .INVALID_ARGUMENT;
     output.* = .{ .id = idIndex(block.id), .parameter_count = block.parameters.len };
     return .OK;
 }
@@ -3146,7 +3361,7 @@ pub fn hirBlockParameterAt(
     const output = out_parameter orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_HirBlockParameter, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirBlockParameter))) return .INVALID_ARGUMENT;
-    const block = hirBlockAtIndex(owned.hir_result.?.project, block_index) orelse return .INVALID_ARGUMENT;
+    const block = hirBlockAtIndex(&owned.hir_result.?, block_index) orelse return .INVALID_ARGUMENT;
     if (parameter_index >= block.parameters.len) return .INVALID_ARGUMENT;
     const parameter = block.parameters[parameter_index];
     output.* = .{
@@ -3241,7 +3456,8 @@ pub fn hirModuleDependencyAt(
     output.* = .{
         .module_id = dependency.module_id.value(),
         .initialization_required = @intFromBool(dependency.initialization_required),
-        .reserved = .{ 0, 0, 0, 0, 0, 0, 0 },
+        .module_evaluation = if (requested_version >= 8) @intFromBool(dependency.module_evaluation) else 0,
+        .reserved = .{ 0, 0, 0, 0, 0, 0 },
     };
     return .OK;
 }
@@ -3274,7 +3490,8 @@ pub fn hirModuleImportAt(
         .target = hirSemanticIdentity(item.target),
         .source_kind = source_kind,
         .type_only = @intFromBool(item.type_only),
-        .reserved = .{ 0, 0, 0 },
+        .namespace_binding = if (requested_version >= 8) @intFromBool(item.namespace) else 0,
+        .reserved = .{ 0, 0 },
     };
     return .OK;
 }
@@ -3376,7 +3593,7 @@ pub fn hirBindingDetailAt(
     const output = out_detail orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_HirBindingDetail, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirBindingDetail))) return .INVALID_ARGUMENT;
-    const binding = hirBindingAtIndex(owned.hir_result.?.project, binding_index) orelse return .INVALID_ARGUMENT;
+    const binding = hirBindingAtIndex(&owned.hir_result.?, binding_index) orelse return .INVALID_ARGUMENT;
     var detail = std.mem.zeroes(Vizg_HirBindingDetail);
     detail.id = idIndex(binding.id);
     detail.declaration_id = VIZG_HIR_U32_NONE;
@@ -3509,28 +3726,13 @@ fn hirPayloadOwned(result: ?*const Vizg_ProjectResult, requested_version: u32) ?
     return owned;
 }
 
-fn hirInstructionAt(project: vizg.hir.HirProject, index: usize) ?vizg.hir.HirInstruction {
-    var current: usize = 0;
-    for (project.functions) |function| {
-        for (function.blocks) |block| {
-            for (block.instructions) |instruction| {
-                if (current == index) return instruction;
-                current += 1;
-            }
-        }
-    }
-    return null;
+fn hirInstructionAt(result: *const vizg.hir.HirResult, index: usize) ?*const vizg.hir.HirInstruction {
+    return result.consumerIndex().instruction(result.project, index);
 }
 
-fn hirTerminatorAtIndex(project: vizg.hir.HirProject, index: usize) ?vizg.hir.HirTerminator {
-    var current: usize = 0;
-    for (project.functions) |function| {
-        for (function.blocks) |block| {
-            if (current == index) return block.terminator;
-            current += 1;
-        }
-    }
-    return null;
+fn hirTerminatorAtIndex(result: *const vizg.hir.HirResult, index: usize) ?*const vizg.hir.HirTerminator {
+    const block = result.consumerIndex().block(result.project, index) orelse return null;
+    return &block.terminator;
 }
 
 fn setString0(output: anytype, value: []const u8) void {
@@ -3851,7 +4053,7 @@ pub fn hirOperationAt(
     const output = out_payload orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_HirPayload, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirPayload))) return .INVALID_ARGUMENT;
-    const instruction = hirInstructionAt(owned.hir_result.?.project, index) orelse return .INVALID_ARGUMENT;
+    const instruction = hirInstructionAt(&owned.hir_result.?, index) orelse return .INVALID_ARGUMENT;
     output.* = operationPayload(instruction.operation);
     return .OK;
 }
@@ -3867,7 +4069,7 @@ pub fn hirOperationItemAt(
     const output = out_item orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_HirPayloadItem, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirPayloadItem))) return .INVALID_ARGUMENT;
-    const instruction = hirInstructionAt(owned.hir_result.?.project, operation_index) orelse return .INVALID_ARGUMENT;
+    const instruction = hirInstructionAt(&owned.hir_result.?, operation_index) orelse return .INVALID_ARGUMENT;
     output.* = operationPayloadItem(instruction.operation, item_index) orelse return .INVALID_ARGUMENT;
     return .OK;
 }
@@ -3882,8 +4084,8 @@ pub fn hirTerminatorAt(
     const output = out_payload orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_HirPayload, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirPayload))) return .INVALID_ARGUMENT;
-    const terminator = hirTerminatorAtIndex(owned.hir_result.?.project, index) orelse return .INVALID_ARGUMENT;
-    output.* = terminatorPayload(terminator);
+    const terminator = hirTerminatorAtIndex(&owned.hir_result.?, index) orelse return .INVALID_ARGUMENT;
+    output.* = terminatorPayload(terminator.*);
     return .OK;
 }
 
@@ -3898,8 +4100,8 @@ pub fn hirTerminatorItemAt(
     const output = out_item orelse return .INVALID_ARGUMENT;
     if (!validAlignedMutableHostArray(Vizg_HirPayloadItem, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirPayloadItem))) return .INVALID_ARGUMENT;
-    const terminator = hirTerminatorAtIndex(owned.hir_result.?.project, terminator_index) orelse return .INVALID_ARGUMENT;
-    output.* = terminatorPayloadItem(terminator, item_index) orelse return .INVALID_ARGUMENT;
+    const terminator = hirTerminatorAtIndex(&owned.hir_result.?, terminator_index) orelse return .INVALID_ARGUMENT;
+    output.* = terminatorPayloadItem(terminator.*, item_index) orelse return .INVALID_ARGUMENT;
     return .OK;
 }
 
@@ -3974,6 +4176,9 @@ comptime {
     @export(&projectResultDestroy, .{ .name = "vizg_project_result_destroy" });
     @export(&projectAnalyzeSource, .{ .name = "vizg_project_analyze_source" });
     @export(&hirApiVersion, .{ .name = "vizg_hir_api_version" });
+    @export(&hirReachabilityApiVersion, .{ .name = "vizg_hir_reachability_api_version" });
+    @export(&hirReachabilityRequirements, .{ .name = "vizg_hir_reachability_requirements" });
+    @export(&hirReachabilityAnalyze, .{ .name = "vizg_hir_reachability_analyze" });
     @export(&hirSummary, .{ .name = "vizg_hir_summary" });
     @export(&hirRecordAt, .{ .name = "vizg_hir_record_at" });
     @export(&hirDetailApiVersion, .{ .name = "vizg_hir_detail_api_version" });

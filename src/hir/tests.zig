@@ -1171,6 +1171,7 @@ test "HIR project lowering builds deterministic linked multi-module shells" {
     try std.testing.expectEqual(@as(usize, 1), first_result.project.modules[1].dependencies.len);
     try std.testing.expectEqual(@as(u64, 7), first_result.project.modules[1].dependencies[0].module_id.value());
     try std.testing.expect(first_result.project.modules[1].dependencies[0].initialization_required);
+    try std.testing.expect(first_result.project.modules[1].dependencies[0].module_evaluation);
     try std.testing.expectEqual(@as(usize, 2), first_result.project.functions.len);
     for (first_result.project.functions) |function| {
         try std.testing.expectEqual(hir.model.HirFunctionKind.module_initialization, function.kind);

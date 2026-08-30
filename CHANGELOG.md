@@ -8,6 +8,12 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Added stateless artifact-rooted HIR reachability API v1 with caller-owned scratch,
+  canonical membership bitsets, reached-ordinal lists, and reached external-module
+  identities. Canonical HIR now seals an immutable consumer index so flattened
+  block/instruction/binding ABI lookup is O(1). HIR detail API v8 additively
+  exposes ESM module-evaluation dependencies and namespace-import binding kind
+  using bytes reserved by v7; callers requesting v7 continue to observe zeros.
 - HIR detail API v7 now exposes the optional executable HIR `FunctionId` for
   source-defined value language items through an additive accessor while
   preserving the v5 language-item record layout. Source-function value language-item modules

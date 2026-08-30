@@ -416,6 +416,9 @@ pub fn build(b: *std.Build) void {
         \\vizg_hir_operation_item_at
         \\vizg_hir_origin_detail_at
         \\vizg_hir_payload_api_version
+        \\vizg_hir_reachability_analyze
+        \\vizg_hir_reachability_api_version
+        \\vizg_hir_reachability_requirements
         \\vizg_hir_record_at
         \\vizg_hir_region_count
         \\vizg_hir_region_detail_at

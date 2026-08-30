@@ -13,6 +13,7 @@ const lower_exceptions = @import("lower_exceptions.zig");
 const lower_assignment = @import("lower_assignment.zig");
 const lower_place = @import("lower_place.zig");
 const lower_pattern = @import("lower_pattern.zig");
+const lower_project_index = @import("lower_project_index.zig");
 const model = @import("model.zig");
 const project = @import("../project/root.zig");
 const semantics = @import("../semantics/root.zig");
@@ -60,6 +61,7 @@ const Lowerer = struct {
     module: *const project.ProjectModule,
     local: *const semantics.SemanticResult,
     project_module: *const semantics.ProjectSemanticModule,
+    dynamic_imports: []const lower_project_index.DynamicImportResolution,
     bindings: std.ArrayList(model.HirBinding) = .empty,
     entity_ids: std.ArrayList(ids.EntityId) = .empty,
     symbol_bindings: std.ArrayList(SymbolBinding) = .empty,
@@ -584,7 +586,21 @@ const Lowerer = struct {
     }
 
     fn functionInputs(self: *Lowerer) lower_function.Inputs {
-        return .{ .builder = self.builder, .module = self.module, .local = self.local, .project_module = self.project_module, .entity_ids = &self.entity_ids };
+        return .{
+            .builder = self.builder,
+            .module = self.module,
+            .local = self.local,
+            .project_module = self.project_module,
+            .dynamic_imports = self.dynamic_imports,
+            .entity_ids = &self.entity_ids,
+        };
+    }
+
+    pub fn dynamicImportResolution(self: *const Lowerer, source_node: ast.NodeId) ?model.HirModuleReference {
+        return lower_project_index.dynamicImportResolution(
+            self.dynamic_imports,
+            self.local.frontend.ast.node(source_node).span,
+        );
     }
 
     fn appendLexicalBinding(
@@ -768,11 +784,20 @@ pub fn lower(
     function_id: ids.FunctionId,
     imported_bindings: []const model.HirBinding,
     imported_symbols: []const SymbolBinding,
+    dynamic_imports: []const lower_project_index.DynamicImportResolution,
 ) !Output {
     const local = module.semantic_result orelse return error.ModuleNotAnalyzed;
     const project_module = builder.result.semanticResult().lookupModule(module.id.value()) orelse return error.ModuleNotAnalyzed;
     var anf = try anf_builder.AnfBuilder.init(builder);
-    var lowerer: Lowerer = .{ .builder = builder, .anf = &anf, .module = module, .local = local, .project_module = project_module, .function_id = function_id };
+    var lowerer: Lowerer = .{
+        .builder = builder,
+        .anf = &anf,
+        .module = module,
+        .local = local,
+        .project_module = project_module,
+        .dynamic_imports = dynamic_imports,
+        .function_id = function_id,
+    };
     try lowerer.bindings.appendSlice(builder.allocator, imported_bindings);
     try lowerer.symbol_bindings.appendSlice(builder.allocator, imported_symbols);
     try lowerer.predeclareHostBindings();

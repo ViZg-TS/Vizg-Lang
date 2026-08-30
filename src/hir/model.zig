@@ -64,6 +64,11 @@ pub const HirModule = struct {
 pub const HirModuleDependency = struct {
     module_id: ModuleId,
     initialization_required: bool,
+    /// True only for a source-module execution edge that follows directly
+    /// from ESM evaluation (static import/re-export). Source-backed globals
+    /// retain provider provenance as a dependency but become artifact roots
+    /// only when their semantic binding/value is reached.
+    module_evaluation: bool = false,
 };
 
 pub const HirModuleReference = union(enum) {
@@ -94,6 +99,9 @@ pub const HirImportBinding = struct {
     exported_name: []const u8,
     target: HirSemanticIdentity,
     type_only: bool,
+    /// Semantic namespace-object binding. This is retained from semantic link
+    /// state; consumers must never infer it from exported-name/source spelling.
+    namespace: bool = false,
 };
 
 pub const HirExportBinding = struct {
@@ -460,6 +468,10 @@ pub const DynamicImport = struct {
     source: ids.ValueId,
     options: ?ids.ValueId = null,
     attributes: []const DynamicImportAttribute = &.{},
+    /// Exact project-host resolution for a literal dynamic import. Runtime-
+    /// computed sources remain null; consumers must never reconstruct this
+    /// identity from source spelling.
+    resolved: ?HirModuleReference = null,
 };
 pub const TaggedTemplateCall = struct {
     tag: ids.ValueId,

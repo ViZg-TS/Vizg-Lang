@@ -23,6 +23,8 @@ pub const lower_project = @import("lower_project.zig");
 pub const project_session = @import("project_session.zig");
 pub const lower_module = @import("lower_module.zig");
 pub const consumer = @import("consumer.zig");
+pub const consumer_index = @import("consumer_index.zig");
+pub const reachability = @import("reachability.zig");
 
 pub const ModuleId = @import("../project/contracts.zig").ModuleId;
 pub const SemanticDeclId = @import("../types/root.zig").SemanticDeclId;
@@ -87,6 +89,7 @@ pub const hir_api_version = consumer.api_version;
 test {
     _ = project_session;
     _ = @import("tests.zig");
+    _ = @import("reachability_test.zig");
     _ = @import("snapshot_test.zig");
     _ = @import("adversarial_test.zig");
 }

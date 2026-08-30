@@ -135,7 +135,12 @@ fn lowerImport(context: anytype, node_id: ast.NodeId, expression: ast.ImportExpr
         try lowerImportAttributes(context, attributes)
     else
         &.{};
-    return context.emitValue(.{ .dynamic_import = .{ .source = source, .options = options, .attributes = attributes } }, context.nodeType(node_id));
+    return context.emitValue(.{ .dynamic_import = .{
+        .source = source,
+        .options = options,
+        .attributes = attributes,
+        .resolved = context.dynamicImportResolution(expression.source),
+    } }, context.nodeType(node_id));
 }
 
 fn lowerImportAttributes(context: anytype, attributes: ast.ImportAttributes) anyerror![]const model.DynamicImportAttribute {

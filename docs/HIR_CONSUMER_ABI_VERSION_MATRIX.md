@@ -16,14 +16,16 @@ accessor. Records and strings are borrowed from the immutable
 | HIR detail | 5 | Resolved source language-item count and immutable identity records. |
 | HIR detail | 6 | Additive class/interface semantic composition detail. |
 | HIR detail | 7 | Executable value-language-item `FunctionId` lookup and immutable applied-generic resolved-target lookup; earlier record layouts remain frozen. |
+| HIR detail | 8 | Reuses reserved bytes without changing size/alignment to expose `module_evaluation` on module dependencies and `namespace_binding` on imports. Requests for v7 keep those bytes zero. |
+| HIR reachability | 1 | Stateless artifact-rooted semantic closure with caller-owned scratch, membership bitsets, canonical reached-ordinal lists and reached external-module IDs. |
 | External module producer | 3 | Ordered structural types and signature references supplied by the host. |
 | External module producer | 4 | Stable opaque intrinsic identity on source-less exports. |
 
-Unchanged detail accessors accept requested versions 2 through 7. The external
+Unchanged detail accessors accept requested versions 2 through 8. The external
 declaration detail accessor requires version 3, external type identity requires
 version 4, language-item enumeration requires version 5, class composition
 requires version 6, and executable-language-item/applied-generic-target queries
-require version 7. Unsupported older or future versions return
+require version 7. Detail v8 additionally exposes ESM-evaluation and namespace-binding metadata through bytes reserved by v7. Unsupported older or future versions return
 `VIZG_PROJECT_STATUS_INVALID_STATE`; null, misaligned, workspace-overlapping and
 out-of-bounds outputs return `VIZG_PROJECT_STATUS_INVALID_ARGUMENT`.
 

@@ -193,6 +193,9 @@ test "goal012: referencing module depends on global source module initialization
     for (app_module.?.dependencies) |dependency| {
         if (dependency.module_id.value() == 0) {
             try std.testing.expect(dependency.initialization_required);
+            // This edge records source-backed provider provenance. It is not
+            // an unconditional ESM module-evaluation edge.
+            try std.testing.expect(!dependency.module_evaluation);
             found_dependency = true;
         }
     }

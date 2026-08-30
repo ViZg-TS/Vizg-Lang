@@ -7,6 +7,7 @@ pub const VIZG_ABI_VERSION = abi.VIZG_ABI_VERSION;
 pub const VIZG_HIR_API_VERSION = abi.VIZG_HIR_API_VERSION;
 pub const VIZG_HIR_PAYLOAD_API_VERSION = abi.VIZG_HIR_PAYLOAD_API_VERSION;
 pub const VIZG_HIR_DETAIL_API_VERSION = abi.VIZG_HIR_DETAIL_API_VERSION;
+pub const VIZG_HIR_REACHABILITY_API_VERSION = abi.VIZG_HIR_REACHABILITY_API_VERSION;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION = abi.VIZG_EXTERNAL_MODULE_API_VERSION;
 pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION = abi.VIZG_LANGUAGE_ITEM_CONTRACT_VERSION;
 pub const VIZG_HIR_ID_NONE = abi.VIZG_HIR_ID_NONE;
@@ -116,6 +117,13 @@ pub const Vizg_SourceLanguageItem = abi.Vizg_SourceLanguageItem;
 
 /// Result introspection types — summary plus per-item iterators.
 pub const Vizg_ProjectResultSummary = abi.Vizg_ProjectResultSummary;
+pub const Vizg_HirReachabilityTrigger = abi.Vizg_HirReachabilityTrigger;
+pub const Vizg_HirReachabilityRequest = abi.Vizg_HirReachabilityRequest;
+pub const Vizg_HirReachabilityRequirements = abi.Vizg_HirReachabilityRequirements;
+pub const Vizg_HirReachabilityBuffers = abi.Vizg_HirReachabilityBuffers;
+pub const Vizg_HirReachabilitySummary = abi.Vizg_HirReachabilitySummary;
+pub const VIZG_HIR_REACH_TRIGGER_CANONICAL_ARRAY_BASE = abi.VIZG_HIR_REACH_TRIGGER_CANONICAL_ARRAY_BASE;
+pub const VIZG_HIR_REACH_TRIGGER_PLACE_DELETED = abi.VIZG_HIR_REACH_TRIGGER_PLACE_DELETED;
 pub const Vizg_ProjectModuleInfo = abi.Vizg_ProjectModuleInfo;
 pub const Vizg_ProjectDiagnostic = abi.Vizg_ProjectDiagnostic;
 pub const Vizg_ProjectEdgeInfo = abi.Vizg_ProjectEdgeInfo;
