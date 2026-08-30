@@ -141,9 +141,12 @@ pub const Index = struct {
         const capture_sources = try allocator.alloc(?ids.BindingId, binding_count);
         result.capture_sources = capture_sources;
         @memset(capture_sources, null);
-        const writer_offsets = try allocator.alloc(u32, binding_count + 1);
-        result.binding_writer_offsets = writer_offsets;
-        @memset(writer_offsets, 0);
+        const writer_lists = try allocator.alloc(std.ArrayList(u32), binding_count);
+        defer {
+            for (writer_lists) |*list| list.deinit(allocator);
+            allocator.free(writer_lists);
+        }
+        for (writer_lists) |*list| list.* = .empty;
 
         for (project.modules, 0..) |module, ordinal| {
             try putUnique(&result.module_ordinals, module.module_id.value(), @as(u32, @intCast(ordinal)));
@@ -259,13 +262,13 @@ pub const Index = struct {
                             .external => |external| try indexExternalModule(&result, external.value()),
                             .source => {},
                         },
-                        .initialize_binding => |payload| try incrementWriterCount(&result, writer_offsets, payload.binding),
-                        .store_binding => |payload| try incrementWriterCount(&result, writer_offsets, payload.binding),
+                        .initialize_binding => |payload| try appendWriterList(&result, writer_lists, payload.binding, @intCast(instruction_ordinal)),
+                        .store_binding => |payload| try appendWriterList(&result, writer_lists, payload.binding, @intCast(instruction_ordinal)),
                         .load_place => |place| try result.consumed_places.put(try rawIdOwned(identity_domain, place), {}),
                         .store_place => |payload| {
                             try result.consumed_places.put(try rawIdOwned(identity_domain, payload.place), {});
                             if (result.bindingForPlace(payload.place)) |binding_id|
-                                try incrementWriterCount(&result, writer_offsets, binding_id);
+                                try appendWriterList(&result, writer_lists, binding_id, @intCast(instruction_ordinal));
                         },
                         .delete_place => |place| {
                             const raw = try rawIdOwned(identity_domain, place);
@@ -273,11 +276,11 @@ pub const Index = struct {
                             try result.deleted_places.put(raw, {});
                         },
                         .apply_pattern => |plan| for (plan.items) |item| switch (item) {
-                            .binding_target => |binding_id| try incrementWriterCount(&result, writer_offsets, binding_id),
+                            .binding_target => |binding_id| try appendWriterList(&result, writer_lists, binding_id, @intCast(instruction_ordinal)),
                             .place_target => |place| {
                                 try result.consumed_places.put(try rawIdOwned(identity_domain, place), {});
                                 if (result.bindingForPlace(place)) |binding_id|
-                                    try incrementWriterCount(&result, writer_offsets, binding_id);
+                                    try appendWriterList(&result, writer_lists, binding_id, @intCast(instruction_ordinal));
                             },
                             else => {},
                         },
@@ -311,37 +314,23 @@ pub const Index = struct {
             }
         }
 
-        for (0..binding_count) |ordinal|
-            writer_offsets[ordinal + 1] = std.math.add(u32, writer_offsets[ordinal], writer_offsets[ordinal + 1]) catch return error.IndexOverflow;
-        const writer_instructions = try allocator.alloc(u32, writer_offsets[binding_count]);
-        const cursors = try allocator.dupe(u32, writer_offsets[0..binding_count]);
-        result.binding_writer_instructions = writer_instructions;
-
-        for (project.functions) |hir_function| {
-            for (hir_function.blocks) |hir_block| {
-                for (hir_block.instructions) |hir_instruction| {
-                    const instruction_ord = result.instructionOrdinal(hir_instruction.id) orelse return error.InconsistentProjection;
-                    switch (hir_instruction.operation) {
-                        .initialize_binding => |payload| try appendWriter(&result, writer_instructions, cursors, payload.binding, instruction_ord),
-                        .store_binding => |payload| try appendWriter(&result, writer_instructions, cursors, payload.binding, instruction_ord),
-                        .store_place => |payload| if (result.bindingForPlace(payload.place)) |binding_id|
-                            try appendWriter(&result, writer_instructions, cursors, binding_id, instruction_ord),
-                        .apply_pattern => |plan| for (plan.items) |item| switch (item) {
-                            .binding_target => |binding_id| try appendWriter(&result, writer_instructions, cursors, binding_id, instruction_ord),
-                            .place_target => |place| if (result.bindingForPlace(place)) |binding_id|
-                                try appendWriter(&result, writer_instructions, cursors, binding_id, instruction_ord),
-                            else => {},
-                        },
-                        else => {},
-                    }
-                }
-            }
+        const writer_offsets = try allocator.alloc(u32, binding_count + 1);
+        result.binding_writer_offsets = writer_offsets;
+        writer_offsets[0] = 0;
+        for (writer_lists, 0..) |list, ordinal| {
+            writer_offsets[ordinal + 1] = std.math.add(
+                u32,
+                writer_offsets[ordinal],
+                @as(u32, @intCast(list.items.len)),
+            ) catch return error.IndexOverflow;
         }
-
-        // `cursors` is temporary construction scratch. It is the most recent
-        // arena allocation here, so releasing it now avoids retaining it in the
-        // sealed HIR result on allocators that can reclaim the last allocation.
-        allocator.free(cursors);
+        const writer_instructions = try allocator.alloc(u32, writer_offsets[binding_count]);
+        result.binding_writer_instructions = writer_instructions;
+        for (writer_lists, 0..) |list, ordinal| {
+            const start = writer_offsets[ordinal];
+            const end = writer_offsets[ordinal + 1];
+            @memcpy(writer_instructions[start..end], list.items);
+        }
 
         // Names are projection metadata only. Resolve them once by stable
         // declaration identity instead of rescanning every binding per query.
@@ -504,6 +493,24 @@ pub const Index = struct {
         return self.capture_sources[ordinal];
     }
 
+    /// Return the immediate semantic source binding for an alias binding.
+    /// Capture-local bindings point at their captured source. Import bindings
+    /// point at the exact source declaration provider when that provider is a
+    /// projected HIR binding. This relation is root-independent and lets hosts
+    /// follow capture/import/re-export chains without rebuilding module graphs.
+    pub fn bindingSource(
+        self: *const Index,
+        project: model.HirProject,
+        binding_id: ids.BindingId,
+    ) ?ids.BindingId {
+        if (self.captureSource(binding_id)) |source| return source;
+        const import_binding = self.importForBinding(project, binding_id) orelse return null;
+        const provider = self.semanticProvider(import_binding.target.declaration) orelse return null;
+        const provider_ordinal = provider.binding_ordinal orelse return null;
+        const hir_binding = self.binding(project, provider_ordinal) orelse return null;
+        return hir_binding.id;
+    }
+
     pub fn writersForBinding(self: *const Index, binding_id: ids.BindingId) []const u32 {
         const ordinal = self.bindingOrdinal(binding_id) orelse return &.{};
         const start = self.binding_writer_offsets[ordinal];
@@ -550,23 +557,15 @@ fn indexExternalModule(index: *Index, raw_id: u64) !void {
     try index.external_module_ordinals.put(raw_id, @as(u32, @intCast(index.external_module_ordinals.count())));
 }
 
-fn incrementWriterCount(index: *const Index, offsets: []u32, binding: ids.BindingId) !void {
-    const ordinal = index.bindingOrdinal(binding) orelse return error.InconsistentProjection;
-    offsets[ordinal + 1] = std.math.add(u32, offsets[ordinal + 1], 1) catch return error.IndexOverflow;
-}
-
-fn appendWriter(
+fn appendWriterList(
     index: *const Index,
-    writer_instructions: []u32,
-    cursors: []u32,
+    writer_lists: []std.ArrayList(u32),
     binding: ids.BindingId,
     instruction_ordinal: u32,
 ) !void {
     const ordinal = index.bindingOrdinal(binding) orelse return error.InconsistentProjection;
-    const cursor = cursors[ordinal];
-    if (cursor >= writer_instructions.len) return error.InconsistentProjection;
-    writer_instructions[cursor] = instruction_ordinal;
-    cursors[ordinal] = cursor + 1;
+    if (ordinal >= writer_lists.len) return error.InconsistentProjection;
+    try writer_lists[ordinal].append(index.allocator, instruction_ordinal);
 }
 
 fn freeSlice(allocator: std.mem.Allocator, slice: anytype) void {

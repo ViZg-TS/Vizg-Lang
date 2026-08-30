@@ -9,6 +9,7 @@ pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
 pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 8;
 pub const VIZG_HIR_REACHABILITY_API_VERSION: u32 = 1;
+pub const VIZG_HIR_CONSUMER_API_VERSION: u32 = 1;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
 pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION: u32 = vizg.language_item_contract_version;
 pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
@@ -600,6 +601,32 @@ pub const Vizg_HirReachabilitySummary = extern struct {
     instruction_count: usize,
     binding_count: usize,
     external_module_count: usize,
+};
+
+/// Root-independent immutable consumer-index queries. These expose relations
+/// ViZG already computed while sealing canonical HIR so downstream consumers
+/// never reconstruct producer/capture/import/place graphs from projected records.
+/// For BINDING records `related_id` is the immediate semantic source binding
+/// (capture source or exact imported provider binding).
+pub const Vizg_HirConsumerKind = enum(u32) {
+    VALUE = 0,
+    BINDING = 1,
+    PLACE = 2,
+};
+
+pub const VIZG_HIR_CONSUMER_HAS_ORDINAL: u32 = 1 << 0;
+pub const VIZG_HIR_CONSUMER_HAS_PRODUCER: u32 = 1 << 1;
+pub const VIZG_HIR_CONSUMER_HAS_TYPE: u32 = 1 << 2;
+pub const VIZG_HIR_CONSUMER_HAS_RELATED_ID: u32 = 1 << 3;
+pub const VIZG_HIR_CONSUMER_PLACE_CONSUMED: u32 = 1 << 4;
+pub const VIZG_HIR_CONSUMER_PLACE_DELETED: u32 = 1 << 5;
+
+pub const Vizg_HirConsumerInfo = extern struct {
+    flags: u32,
+    canonical_ordinal: u32,
+    producer_instruction_ordinal: u32,
+    type_id: u32,
+    related_id: u64,
 };
 
 /// Kind-neutral immutable record. `tag`, `parent_id`, `secondary_id`, and
@@ -2411,6 +2438,122 @@ pub fn hirReachabilityApiVersion() callconv(.c) u32 {
     return VIZG_HIR_REACHABILITY_API_VERSION;
 }
 
+pub fn hirConsumerApiVersion() callconv(.c) u32 {
+    return VIZG_HIR_CONSUMER_API_VERSION;
+}
+
+pub fn hirConsumerInfo(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    kind: Vizg_HirConsumerKind,
+    raw_id: u64,
+    out_info: ?*Vizg_HirConsumerInfo,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version != VIZG_HIR_CONSUMER_API_VERSION) return .INVALID_ARGUMENT;
+    const owned = hirOwned(result, VIZG_HIR_API_VERSION) orelse return .INVALID_STATE;
+    const output = out_info orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(Vizg_HirConsumerInfo, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirConsumerInfo)))
+        return .INVALID_ARGUMENT;
+    if (raw_id > std.math.maxInt(u32) or raw_id == std.math.maxInt(u32))
+        return .INVALID_ARGUMENT;
+
+    const hir_result = &owned.hir_result.?;
+    const index = hir_result.consumerIndex();
+    const raw: u32 = @intCast(raw_id);
+    output.* = .{
+        .flags = 0,
+        .canonical_ordinal = VIZG_HIR_U32_NONE,
+        .producer_instruction_ordinal = VIZG_HIR_U32_NONE,
+        .type_id = VIZG_HIR_U32_NONE,
+        .related_id = VIZG_HIR_ID_NONE,
+    };
+
+    switch (kind) {
+        .VALUE => {
+            const id = vizg.hir.ValueId.init(hir_result.identity_domain, raw) catch return .INVALID_ARGUMENT;
+            const ordinal = index.valueOrdinal(id) orelse return .INVALID_ARGUMENT;
+            output.canonical_ordinal = ordinal;
+            output.flags |= VIZG_HIR_CONSUMER_HAS_ORDINAL;
+            if (index.producerInstructionOrdinal(id)) |producer| {
+                output.producer_instruction_ordinal = producer;
+                output.flags |= VIZG_HIR_CONSUMER_HAS_PRODUCER;
+            }
+            if (index.valueType(id)) |type_id| {
+                output.type_id = type_id;
+                output.flags |= VIZG_HIR_CONSUMER_HAS_TYPE;
+            }
+        },
+        .BINDING => {
+            const id = vizg.hir.BindingId.init(hir_result.identity_domain, raw) catch return .INVALID_ARGUMENT;
+            const ordinal = index.bindingOrdinal(id) orelse return .INVALID_ARGUMENT;
+            output.canonical_ordinal = ordinal;
+            output.flags |= VIZG_HIR_CONSUMER_HAS_ORDINAL;
+            if (index.bindingSource(hir_result.project, id)) |source| {
+                output.related_id = source.index() orelse return .INTERNAL_ERROR;
+                output.flags |= VIZG_HIR_CONSUMER_HAS_RELATED_ID;
+            }
+        },
+        .PLACE => {
+            const id = vizg.hir.PlaceId.init(hir_result.identity_domain, raw) catch return .INVALID_ARGUMENT;
+            if (index.bindingForPlace(id)) |binding| {
+                output.related_id = binding.index() orelse return .INTERNAL_ERROR;
+                output.flags |= VIZG_HIR_CONSUMER_HAS_RELATED_ID;
+            }
+            if (index.placeIsConsumed(id)) output.flags |= VIZG_HIR_CONSUMER_PLACE_CONSUMED;
+            if (index.placeIsDeleted(id)) output.flags |= VIZG_HIR_CONSUMER_PLACE_DELETED;
+            // A valid place may have no binding (property/element/super place),
+            // so zero flags is still a successful query.
+        },
+    }
+    return .OK;
+}
+
+pub fn hirBindingWriterCount(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    binding_raw_id: u64,
+    out_count: ?*usize,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version != VIZG_HIR_CONSUMER_API_VERSION) return .INVALID_ARGUMENT;
+    const owned = hirOwned(result, VIZG_HIR_API_VERSION) orelse return .INVALID_STATE;
+    const output = out_count orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(usize, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(usize))) return .INVALID_ARGUMENT;
+    if (binding_raw_id > std.math.maxInt(u32) or binding_raw_id == std.math.maxInt(u32))
+        return .INVALID_ARGUMENT;
+    const hir_result = &owned.hir_result.?;
+    const id = vizg.hir.BindingId.init(hir_result.identity_domain, @intCast(binding_raw_id)) catch
+        return .INVALID_ARGUMENT;
+    if (hir_result.consumerIndex().bindingOrdinal(id) == null) return .INVALID_ARGUMENT;
+    output.* = hir_result.consumerIndex().writersForBinding(id).len;
+    return .OK;
+}
+
+pub fn hirBindingWriterAt(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    binding_raw_id: u64,
+    writer_index: usize,
+    out_instruction_ordinal: ?*u32,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version != VIZG_HIR_CONSUMER_API_VERSION) return .INVALID_ARGUMENT;
+    const owned = hirOwned(result, VIZG_HIR_API_VERSION) orelse return .INVALID_STATE;
+    const output = out_instruction_ordinal orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(u32, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(u32))) return .INVALID_ARGUMENT;
+    if (binding_raw_id > std.math.maxInt(u32) or binding_raw_id == std.math.maxInt(u32))
+        return .INVALID_ARGUMENT;
+    const hir_result = &owned.hir_result.?;
+    const id = vizg.hir.BindingId.init(hir_result.identity_domain, @intCast(binding_raw_id)) catch
+        return .INVALID_ARGUMENT;
+    if (hir_result.consumerIndex().bindingOrdinal(id) == null) return .INVALID_ARGUMENT;
+    const writers = hir_result.consumerIndex().writersForBinding(id);
+    if (writer_index >= writers.len) return .INVALID_ARGUMENT;
+    output.* = writers[writer_index];
+    return .OK;
+}
+
 pub fn hirReachabilityRequirements(
     result: ?*const Vizg_ProjectResult,
     requested_version: u32,
@@ -4177,6 +4320,10 @@ comptime {
     @export(&projectAnalyzeSource, .{ .name = "vizg_project_analyze_source" });
     @export(&hirApiVersion, .{ .name = "vizg_hir_api_version" });
     @export(&hirReachabilityApiVersion, .{ .name = "vizg_hir_reachability_api_version" });
+    @export(&hirConsumerApiVersion, .{ .name = "vizg_hir_consumer_api_version" });
+    @export(&hirConsumerInfo, .{ .name = "vizg_hir_consumer_info" });
+    @export(&hirBindingWriterCount, .{ .name = "vizg_hir_binding_writer_count" });
+    @export(&hirBindingWriterAt, .{ .name = "vizg_hir_binding_writer_at" });
     @export(&hirReachabilityRequirements, .{ .name = "vizg_hir_reachability_requirements" });
     @export(&hirReachabilityAnalyze, .{ .name = "vizg_hir_reachability_analyze" });
     @export(&hirSummary, .{ .name = "vizg_hir_summary" });

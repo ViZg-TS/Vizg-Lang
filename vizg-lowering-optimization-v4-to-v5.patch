@@ -1,0 +1,727 @@
+diff --git a/Lib/abi.zig b/Lib/abi.zig
+index 9ec0252cb75ad6580e13b14422b479db1cb36c8d..f66e6fafbcadf6d59319bdf281e315aed69fd76a 100644
+--- a/Lib/abi.zig
++++ b/Lib/abi.zig
+@@ -9,6 +9,7 @@ pub const VIZG_HIR_API_VERSION: u32 = 2;
+ pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
+ pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 8;
+ pub const VIZG_HIR_REACHABILITY_API_VERSION: u32 = 1;
++pub const VIZG_HIR_CONSUMER_API_VERSION: u32 = 1;
+ pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
+ pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION: u32 = vizg.language_item_contract_version;
+ pub const VIZG_EXTERNAL_TYPE_REFERENCE_BUILTIN: u32 = 0;
+@@ -602,6 +603,32 @@ pub const Vizg_HirReachabilitySummary = extern struct {
+     external_module_count: usize,
+ };
+ 
++/// Root-independent immutable consumer-index queries. These expose relations
++/// ViZG already computed while sealing canonical HIR so downstream consumers
++/// never reconstruct producer/capture/import/place graphs from projected records.
++/// For BINDING records `related_id` is the immediate semantic source binding
++/// (capture source or exact imported provider binding).
++pub const Vizg_HirConsumerKind = enum(u32) {
++    VALUE = 0,
++    BINDING = 1,
++    PLACE = 2,
++};
++
++pub const VIZG_HIR_CONSUMER_HAS_ORDINAL: u32 = 1 << 0;
++pub const VIZG_HIR_CONSUMER_HAS_PRODUCER: u32 = 1 << 1;
++pub const VIZG_HIR_CONSUMER_HAS_TYPE: u32 = 1 << 2;
++pub const VIZG_HIR_CONSUMER_HAS_RELATED_ID: u32 = 1 << 3;
++pub const VIZG_HIR_CONSUMER_PLACE_CONSUMED: u32 = 1 << 4;
++pub const VIZG_HIR_CONSUMER_PLACE_DELETED: u32 = 1 << 5;
++
++pub const Vizg_HirConsumerInfo = extern struct {
++    flags: u32,
++    canonical_ordinal: u32,
++    producer_instruction_ordinal: u32,
++    type_id: u32,
++    related_id: u64,
++};
++
+ /// Kind-neutral immutable record. `tag`, `parent_id`, `secondary_id`, and
+ /// `flags` are interpreted according to `kind` and the requested HIR API
+ /// version; unknown fields are zero. For instruction records, v1 reports the
+@@ -2411,6 +2438,122 @@ pub fn hirReachabilityApiVersion() callconv(.c) u32 {
+     return VIZG_HIR_REACHABILITY_API_VERSION;
+ }
+ 
++pub fn hirConsumerApiVersion() callconv(.c) u32 {
++    return VIZG_HIR_CONSUMER_API_VERSION;
++}
++
++pub fn hirConsumerInfo(
++    result: ?*const Vizg_ProjectResult,
++    requested_version: u32,
++    kind: Vizg_HirConsumerKind,
++    raw_id: u64,
++    out_info: ?*Vizg_HirConsumerInfo,
++) callconv(.c) Vizg_ProjectStatus {
++    if (requested_version != VIZG_HIR_CONSUMER_API_VERSION) return .INVALID_ARGUMENT;
++    const owned = hirOwned(result, VIZG_HIR_API_VERSION) orelse return .INVALID_STATE;
++    const output = out_info orelse return .INVALID_ARGUMENT;
++    if (!validAlignedMutableHostArray(Vizg_HirConsumerInfo, output, 1) or
++        !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirConsumerInfo)))
++        return .INVALID_ARGUMENT;
++    if (raw_id > std.math.maxInt(u32) or raw_id == std.math.maxInt(u32))
++        return .INVALID_ARGUMENT;
++
++    const hir_result = &owned.hir_result.?;
++    const index = hir_result.consumerIndex();
++    const raw: u32 = @intCast(raw_id);
++    output.* = .{
++        .flags = 0,
++        .canonical_ordinal = VIZG_HIR_U32_NONE,
++        .producer_instruction_ordinal = VIZG_HIR_U32_NONE,
++        .type_id = VIZG_HIR_U32_NONE,
++        .related_id = VIZG_HIR_ID_NONE,
++    };
++
++    switch (kind) {
++        .VALUE => {
++            const id = vizg.hir.ValueId.init(hir_result.identity_domain, raw) catch return .INVALID_ARGUMENT;
++            const ordinal = index.valueOrdinal(id) orelse return .INVALID_ARGUMENT;
++            output.canonical_ordinal = ordinal;
++            output.flags |= VIZG_HIR_CONSUMER_HAS_ORDINAL;
++            if (index.producerInstructionOrdinal(id)) |producer| {
++                output.producer_instruction_ordinal = producer;
++                output.flags |= VIZG_HIR_CONSUMER_HAS_PRODUCER;
++            }
++            if (index.valueType(id)) |type_id| {
++                output.type_id = type_id;
++                output.flags |= VIZG_HIR_CONSUMER_HAS_TYPE;
++            }
++        },
++        .BINDING => {
++            const id = vizg.hir.BindingId.init(hir_result.identity_domain, raw) catch return .INVALID_ARGUMENT;
++            const ordinal = index.bindingOrdinal(id) orelse return .INVALID_ARGUMENT;
++            output.canonical_ordinal = ordinal;
++            output.flags |= VIZG_HIR_CONSUMER_HAS_ORDINAL;
++            if (index.bindingSource(hir_result.project, id)) |source| {
++                output.related_id = source.index() orelse return .INTERNAL_ERROR;
++                output.flags |= VIZG_HIR_CONSUMER_HAS_RELATED_ID;
++            }
++        },
++        .PLACE => {
++            const id = vizg.hir.PlaceId.init(hir_result.identity_domain, raw) catch return .INVALID_ARGUMENT;
++            if (index.bindingForPlace(id)) |binding| {
++                output.related_id = binding.index() orelse return .INTERNAL_ERROR;
++                output.flags |= VIZG_HIR_CONSUMER_HAS_RELATED_ID;
++            }
++            if (index.placeIsConsumed(id)) output.flags |= VIZG_HIR_CONSUMER_PLACE_CONSUMED;
++            if (index.placeIsDeleted(id)) output.flags |= VIZG_HIR_CONSUMER_PLACE_DELETED;
++            // A valid place may have no binding (property/element/super place),
++            // so zero flags is still a successful query.
++        },
++    }
++    return .OK;
++}
++
++pub fn hirBindingWriterCount(
++    result: ?*const Vizg_ProjectResult,
++    requested_version: u32,
++    binding_raw_id: u64,
++    out_count: ?*usize,
++) callconv(.c) Vizg_ProjectStatus {
++    if (requested_version != VIZG_HIR_CONSUMER_API_VERSION) return .INVALID_ARGUMENT;
++    const owned = hirOwned(result, VIZG_HIR_API_VERSION) orelse return .INVALID_STATE;
++    const output = out_count orelse return .INVALID_ARGUMENT;
++    if (!validAlignedMutableHostArray(usize, output, 1) or
++        !outputOutsideWorkspace(owned, output, @sizeOf(usize))) return .INVALID_ARGUMENT;
++    if (binding_raw_id > std.math.maxInt(u32) or binding_raw_id == std.math.maxInt(u32))
++        return .INVALID_ARGUMENT;
++    const hir_result = &owned.hir_result.?;
++    const id = vizg.hir.BindingId.init(hir_result.identity_domain, @intCast(binding_raw_id)) catch
++        return .INVALID_ARGUMENT;
++    if (hir_result.consumerIndex().bindingOrdinal(id) == null) return .INVALID_ARGUMENT;
++    output.* = hir_result.consumerIndex().writersForBinding(id).len;
++    return .OK;
++}
++
++pub fn hirBindingWriterAt(
++    result: ?*const Vizg_ProjectResult,
++    requested_version: u32,
++    binding_raw_id: u64,
++    writer_index: usize,
++    out_instruction_ordinal: ?*u32,
++) callconv(.c) Vizg_ProjectStatus {
++    if (requested_version != VIZG_HIR_CONSUMER_API_VERSION) return .INVALID_ARGUMENT;
++    const owned = hirOwned(result, VIZG_HIR_API_VERSION) orelse return .INVALID_STATE;
++    const output = out_instruction_ordinal orelse return .INVALID_ARGUMENT;
++    if (!validAlignedMutableHostArray(u32, output, 1) or
++        !outputOutsideWorkspace(owned, output, @sizeOf(u32))) return .INVALID_ARGUMENT;
++    if (binding_raw_id > std.math.maxInt(u32) or binding_raw_id == std.math.maxInt(u32))
++        return .INVALID_ARGUMENT;
++    const hir_result = &owned.hir_result.?;
++    const id = vizg.hir.BindingId.init(hir_result.identity_domain, @intCast(binding_raw_id)) catch
++        return .INVALID_ARGUMENT;
++    if (hir_result.consumerIndex().bindingOrdinal(id) == null) return .INVALID_ARGUMENT;
++    const writers = hir_result.consumerIndex().writersForBinding(id);
++    if (writer_index >= writers.len) return .INVALID_ARGUMENT;
++    output.* = writers[writer_index];
++    return .OK;
++}
++
+ pub fn hirReachabilityRequirements(
+     result: ?*const Vizg_ProjectResult,
+     requested_version: u32,
+@@ -4177,6 +4320,10 @@ comptime {
+     @export(&projectAnalyzeSource, .{ .name = "vizg_project_analyze_source" });
+     @export(&hirApiVersion, .{ .name = "vizg_hir_api_version" });
+     @export(&hirReachabilityApiVersion, .{ .name = "vizg_hir_reachability_api_version" });
++    @export(&hirConsumerApiVersion, .{ .name = "vizg_hir_consumer_api_version" });
++    @export(&hirConsumerInfo, .{ .name = "vizg_hir_consumer_info" });
++    @export(&hirBindingWriterCount, .{ .name = "vizg_hir_binding_writer_count" });
++    @export(&hirBindingWriterAt, .{ .name = "vizg_hir_binding_writer_at" });
+     @export(&hirReachabilityRequirements, .{ .name = "vizg_hir_reachability_requirements" });
+     @export(&hirReachabilityAnalyze, .{ .name = "vizg_hir_reachability_analyze" });
+     @export(&hirSummary, .{ .name = "vizg_hir_summary" });
+diff --git a/Lib/vizg.h b/Lib/vizg.h
+index 0ec0fb6cbc328b992d0311f10ea978fe62538ac1..6c7ea6ede8b2f5b2abf65146b8f0ea9ed6ee5344 100644
+--- a/Lib/vizg.h
++++ b/Lib/vizg.h
+@@ -11,6 +11,7 @@
+ #define VIZG_HIR_PAYLOAD_API_VERSION 1u
+ #define VIZG_HIR_DETAIL_API_VERSION 8u
+ #define VIZG_HIR_REACHABILITY_API_VERSION 1u
++#define VIZG_HIR_CONSUMER_API_VERSION 1u
+ #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
+ #define VIZG_INTRINSIC_CONTRACT_VERSION 3u
+ #define VIZG_LANGUAGE_ITEM_CONTRACT_VERSION 1u
+@@ -974,6 +975,31 @@ typedef struct Vizg_HirReachabilitySummary {
+     size_t external_module_count;
+ } Vizg_HirReachabilitySummary;
+ 
++typedef enum Vizg_HirConsumerKind {
++    VIZG_HIR_CONSUMER_VALUE = 0,
++    VIZG_HIR_CONSUMER_BINDING = 1,
++    VIZG_HIR_CONSUMER_PLACE = 2
++} Vizg_HirConsumerKind;
++
++#define VIZG_HIR_CONSUMER_HAS_ORDINAL (1u << 0)
++#define VIZG_HIR_CONSUMER_HAS_PRODUCER (1u << 1)
++#define VIZG_HIR_CONSUMER_HAS_TYPE (1u << 2)
++#define VIZG_HIR_CONSUMER_HAS_RELATED_ID (1u << 3)
++#define VIZG_HIR_CONSUMER_PLACE_CONSUMED (1u << 4)
++#define VIZG_HIR_CONSUMER_PLACE_DELETED (1u << 5)
++
++/* For VIZG_HIR_CONSUMER_BINDING, related_id is the immediate semantic
++ * source binding: either the capture source or the exact source declaration
++ * provider for an import alias. Hosts can follow this relation to a fixed
++ * point without reconstructing import/re-export graphs. */
++typedef struct Vizg_HirConsumerInfo {
++    uint32_t flags;
++    uint32_t canonical_ordinal;
++    uint32_t producer_instruction_ordinal;
++    uint32_t type_id;
++    uint64_t related_id;
++} Vizg_HirConsumerInfo;
++
+ /* Generic immutable record. Kind-specific tag and id field meanings are
+  * versioned by VIZG_HIR_API_VERSION. For instruction records, HIR API v1
+  * stores the parent function id in secondary_id; v2 stores the result ValueId
+@@ -1350,6 +1376,17 @@ Vizg_ProjectStatus vizg_project_analyze_source(
+     Vizg_ProjectResult **out_result);
+ uint32_t vizg_hir_api_version(void);
+ uint32_t vizg_hir_reachability_api_version(void);
++uint32_t vizg_hir_consumer_api_version(void);
++Vizg_ProjectStatus vizg_hir_consumer_info(
++    const Vizg_ProjectResult *result, uint32_t requested_version,
++    Vizg_HirConsumerKind kind, uint64_t raw_id, Vizg_HirConsumerInfo *out_info);
++Vizg_ProjectStatus vizg_hir_binding_writer_count(
++    const Vizg_ProjectResult *result, uint32_t requested_version,
++    uint64_t binding_raw_id, size_t *out_count);
++Vizg_ProjectStatus vizg_hir_binding_writer_at(
++    const Vizg_ProjectResult *result, uint32_t requested_version,
++    uint64_t binding_raw_id, size_t writer_index,
++    uint32_t *out_instruction_ordinal);
+ Vizg_ProjectStatus vizg_hir_reachability_requirements(
+     const Vizg_ProjectResult *result, uint32_t requested_version,
+     Vizg_HirReachabilityRequirements *out_requirements);
+diff --git a/build.zig b/build.zig
+index 34c3f8d73b12998e78c461f7ad2512c6ec199f89..296f098e13feb4f662ee7e84bc77015c91842ad8 100644
+--- a/build.zig
++++ b/build.zig
+@@ -392,6 +392,10 @@ pub fn build(b: *std.Build) void {
+         \\vizg_hir_applied_generic_target
+         \\vizg_hir_array_element_type
+         \\vizg_hir_binding_detail_at
++        \\vizg_hir_binding_writer_at
++        \\vizg_hir_binding_writer_count
++        \\vizg_hir_consumer_api_version
++        \\vizg_hir_consumer_info
+         \\vizg_hir_block_detail_at
+         \\vizg_hir_block_parameter_at
+         \\vizg_hir_class_detail
+diff --git a/src/hir/consumer_index.zig b/src/hir/consumer_index.zig
+index c41d150838e5e84dbbc393725445da2013f3a32a..13c9d4e3c5adb3ae523a342e49ca0d661a6f3944 100644
+--- a/src/hir/consumer_index.zig
++++ b/src/hir/consumer_index.zig
+@@ -141,9 +141,12 @@ pub const Index = struct {
+         const capture_sources = try allocator.alloc(?ids.BindingId, binding_count);
+         result.capture_sources = capture_sources;
+         @memset(capture_sources, null);
+-        const writer_offsets = try allocator.alloc(u32, binding_count + 1);
+-        result.binding_writer_offsets = writer_offsets;
+-        @memset(writer_offsets, 0);
++        const writer_lists = try allocator.alloc(std.ArrayList(u32), binding_count);
++        defer {
++            for (writer_lists) |*list| list.deinit(allocator);
++            allocator.free(writer_lists);
++        }
++        for (writer_lists) |*list| list.* = .empty;
+ 
+         for (project.modules, 0..) |module, ordinal| {
+             try putUnique(&result.module_ordinals, module.module_id.value(), @as(u32, @intCast(ordinal)));
+@@ -259,13 +262,13 @@ pub const Index = struct {
+                             .external => |external| try indexExternalModule(&result, external.value()),
+                             .source => {},
+                         },
+-                        .initialize_binding => |payload| try incrementWriterCount(&result, writer_offsets, payload.binding),
+-                        .store_binding => |payload| try incrementWriterCount(&result, writer_offsets, payload.binding),
++                        .initialize_binding => |payload| try appendWriterList(&result, writer_lists, payload.binding, @intCast(instruction_ordinal)),
++                        .store_binding => |payload| try appendWriterList(&result, writer_lists, payload.binding, @intCast(instruction_ordinal)),
+                         .load_place => |place| try result.consumed_places.put(try rawIdOwned(identity_domain, place), {}),
+                         .store_place => |payload| {
+                             try result.consumed_places.put(try rawIdOwned(identity_domain, payload.place), {});
+                             if (result.bindingForPlace(payload.place)) |binding_id|
+-                                try incrementWriterCount(&result, writer_offsets, binding_id);
++                                try appendWriterList(&result, writer_lists, binding_id, @intCast(instruction_ordinal));
+                         },
+                         .delete_place => |place| {
+                             const raw = try rawIdOwned(identity_domain, place);
+@@ -273,11 +276,11 @@ pub const Index = struct {
+                             try result.deleted_places.put(raw, {});
+                         },
+                         .apply_pattern => |plan| for (plan.items) |item| switch (item) {
+-                            .binding_target => |binding_id| try incrementWriterCount(&result, writer_offsets, binding_id),
++                            .binding_target => |binding_id| try appendWriterList(&result, writer_lists, binding_id, @intCast(instruction_ordinal)),
+                             .place_target => |place| {
+                                 try result.consumed_places.put(try rawIdOwned(identity_domain, place), {});
+                                 if (result.bindingForPlace(place)) |binding_id|
+-                                    try incrementWriterCount(&result, writer_offsets, binding_id);
++                                    try appendWriterList(&result, writer_lists, binding_id, @intCast(instruction_ordinal));
+                             },
+                             else => {},
+                         },
+@@ -311,38 +314,24 @@ pub const Index = struct {
+             }
+         }
+ 
+-        for (0..binding_count) |ordinal|
+-            writer_offsets[ordinal + 1] = std.math.add(u32, writer_offsets[ordinal], writer_offsets[ordinal + 1]) catch return error.IndexOverflow;
++        const writer_offsets = try allocator.alloc(u32, binding_count + 1);
++        result.binding_writer_offsets = writer_offsets;
++        writer_offsets[0] = 0;
++        for (writer_lists, 0..) |list, ordinal| {
++            writer_offsets[ordinal + 1] = std.math.add(
++                u32,
++                writer_offsets[ordinal],
++                @as(u32, @intCast(list.items.len)),
++            ) catch return error.IndexOverflow;
++        }
+         const writer_instructions = try allocator.alloc(u32, writer_offsets[binding_count]);
+-        const cursors = try allocator.dupe(u32, writer_offsets[0..binding_count]);
+         result.binding_writer_instructions = writer_instructions;
+-
+-        for (project.functions) |hir_function| {
+-            for (hir_function.blocks) |hir_block| {
+-                for (hir_block.instructions) |hir_instruction| {
+-                    const instruction_ord = result.instructionOrdinal(hir_instruction.id) orelse return error.InconsistentProjection;
+-                    switch (hir_instruction.operation) {
+-                        .initialize_binding => |payload| try appendWriter(&result, writer_instructions, cursors, payload.binding, instruction_ord),
+-                        .store_binding => |payload| try appendWriter(&result, writer_instructions, cursors, payload.binding, instruction_ord),
+-                        .store_place => |payload| if (result.bindingForPlace(payload.place)) |binding_id|
+-                            try appendWriter(&result, writer_instructions, cursors, binding_id, instruction_ord),
+-                        .apply_pattern => |plan| for (plan.items) |item| switch (item) {
+-                            .binding_target => |binding_id| try appendWriter(&result, writer_instructions, cursors, binding_id, instruction_ord),
+-                            .place_target => |place| if (result.bindingForPlace(place)) |binding_id|
+-                                try appendWriter(&result, writer_instructions, cursors, binding_id, instruction_ord),
+-                            else => {},
+-                        },
+-                        else => {},
+-                    }
+-                }
+-            }
++        for (writer_lists, 0..) |list, ordinal| {
++            const start = writer_offsets[ordinal];
++            const end = writer_offsets[ordinal + 1];
++            @memcpy(writer_instructions[start..end], list.items);
+         }
+ 
+-        // `cursors` is temporary construction scratch. It is the most recent
+-        // arena allocation here, so releasing it now avoids retaining it in the
+-        // sealed HIR result on allocators that can reclaim the last allocation.
+-        allocator.free(cursors);
+-
+         // Names are projection metadata only. Resolve them once by stable
+         // declaration identity instead of rescanning every binding per query.
+         for (project.functions, 0..) |hir_function, function_index| {
+@@ -504,6 +493,24 @@ pub const Index = struct {
+         return self.capture_sources[ordinal];
+     }
+ 
++    /// Return the immediate semantic source binding for an alias binding.
++    /// Capture-local bindings point at their captured source. Import bindings
++    /// point at the exact source declaration provider when that provider is a
++    /// projected HIR binding. This relation is root-independent and lets hosts
++    /// follow capture/import/re-export chains without rebuilding module graphs.
++    pub fn bindingSource(
++        self: *const Index,
++        project: model.HirProject,
++        binding_id: ids.BindingId,
++    ) ?ids.BindingId {
++        if (self.captureSource(binding_id)) |source| return source;
++        const import_binding = self.importForBinding(project, binding_id) orelse return null;
++        const provider = self.semanticProvider(import_binding.target.declaration) orelse return null;
++        const provider_ordinal = provider.binding_ordinal orelse return null;
++        const hir_binding = self.binding(project, provider_ordinal) orelse return null;
++        return hir_binding.id;
++    }
++
+     pub fn writersForBinding(self: *const Index, binding_id: ids.BindingId) []const u32 {
+         const ordinal = self.bindingOrdinal(binding_id) orelse return &.{};
+         const start = self.binding_writer_offsets[ordinal];
+@@ -550,23 +557,15 @@ fn indexExternalModule(index: *Index, raw_id: u64) !void {
+     try index.external_module_ordinals.put(raw_id, @as(u32, @intCast(index.external_module_ordinals.count())));
+ }
+ 
+-fn incrementWriterCount(index: *const Index, offsets: []u32, binding: ids.BindingId) !void {
+-    const ordinal = index.bindingOrdinal(binding) orelse return error.InconsistentProjection;
+-    offsets[ordinal + 1] = std.math.add(u32, offsets[ordinal + 1], 1) catch return error.IndexOverflow;
+-}
+-
+-fn appendWriter(
++fn appendWriterList(
+     index: *const Index,
+-    writer_instructions: []u32,
+-    cursors: []u32,
++    writer_lists: []std.ArrayList(u32),
+     binding: ids.BindingId,
+     instruction_ordinal: u32,
+ ) !void {
+     const ordinal = index.bindingOrdinal(binding) orelse return error.InconsistentProjection;
+-    const cursor = cursors[ordinal];
+-    if (cursor >= writer_instructions.len) return error.InconsistentProjection;
+-    writer_instructions[cursor] = instruction_ordinal;
+-    cursors[ordinal] = cursor + 1;
++    if (ordinal >= writer_lists.len) return error.InconsistentProjection;
++    try writer_lists[ordinal].append(index.allocator, instruction_ordinal);
+ }
+ 
+ fn freeSlice(allocator: std.mem.Allocator, slice: anytype) void {
+diff --git a/src/hir/reachability_test.zig b/src/hir/reachability_test.zig
+index 15bc8cafd8ec207b54c110cd5244b79a91d1836f..671c6ffe8fb6b6724cdad76a6ae9b9e394a63445 100644
+--- a/src/hir/reachability_test.zig
++++ b/src/hir/reachability_test.zig
+@@ -1027,6 +1027,59 @@ test "artifact reachability roots static-library exports and re-export targets o
+     _ = try expectFunctionReachability(result, reached, "localDead", false);
+ }
+ 
++test "consumer index resolves source import aliases to exact provider bindings" {
++    var project = project_mod.Project.init(std.testing.allocator);
++    defer project.deinit();
++    try project.addRoot(.{
++        .id = .init(1350),
++        .logical_name = "consumer-import.ts",
++        .bytes =
++        \\import { publicThing } from "./dep";
++        \\publicThing();
++        ,
++    });
++    while (true) switch (try project.step()) {
++        .complete => break,
++        .request => |request| {
++            try std.testing.expectEqualStrings("./dep", request.raw_specifier);
++            try project.respondSource(request.id, .{
++                .id = .init(1351),
++                .logical_name = "consumer-dep.ts",
++                .bytes = \\export function publicThing(): number { return 7; },
++            });
++        },
++    };
++    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
++
++    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
++    defer outcome.deinit();
++    const result = switch (outcome) {
++        .result => |*value| value,
++        .diagnostics => return error.UnexpectedLoweringDiagnostics,
++    };
++
++    const index = result.consumerIndex();
++    var saw_alias = false;
++    for (result.project.modules) |module| {
++        if (module.module_id.value() != 1350) continue;
++        for (module.imports) |import_binding| {
++            const local = import_binding.local orelse continue;
++            const source = index.bindingSource(result.project, local) orelse
++                return error.TestExpectedProviderBinding;
++            try std.testing.expect(source.index().? != local.index().?);
++            const source_ordinal = index.bindingOrdinal(source) orelse
++                return error.TestExpectedProviderBinding;
++            _ = index.binding(result.project, source_ordinal) orelse
++                return error.TestExpectedProviderBinding;
++            const provider_function = index.bindingFunction(result.project, source_ordinal) orelse
++                return error.TestExpectedProviderBinding;
++            try std.testing.expectEqual(@as(u64, 1351), provider_function.module_id.value());
++            saw_alias = true;
++        }
++    }
++    try std.testing.expect(saw_alias);
++}
++
+ test "artifact reachability retains effectful binding reads even when their value is unused" {
+     var result = try loweredRoot(
+         1390,
+diff --git a/test/abi_lifecycle.zig b/test/abi_lifecycle.zig
+index 6f6fd2c5fa73c79e94d6d5551af45737bd76e563..10c76415e60fa1f8905c3fa0c8466311bf2db4f8 100644
+--- a/test/abi_lifecycle.zig
++++ b/test/abi_lifecycle.zig
+@@ -680,11 +680,99 @@ test "versioned C HIR consumer reads immutable result records" {
+     try std.testing.expectEqual(@as(u32, c.VIZG_HIR_API_VERSION), c.vizg_hir_api_version());
+     try std.testing.expectEqual(@as(u32, c.VIZG_HIR_PAYLOAD_API_VERSION), c.vizg_hir_payload_api_version());
+     try std.testing.expectEqual(@as(u32, c.VIZG_HIR_DETAIL_API_VERSION), c.vizg_hir_detail_api_version());
++    try std.testing.expectEqual(@as(u32, c.VIZG_HIR_CONSUMER_API_VERSION), c.vizg_hir_consumer_api_version());
+     var summary: c.Vizg_HirSummary = undefined;
+     try std.testing.expectEqual(
+         @as(u32, c.VIZG_PROJECT_STATUS_OK),
+         c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
+     );
++    var queried_value = false;
++    for (0..summary.instruction_count) |instruction_ordinal| {
++        var record: c.Vizg_HirRecord = undefined;
++        try std.testing.expectEqual(
++            @as(u32, c.VIZG_PROJECT_STATUS_OK),
++            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_INSTRUCTION, instruction_ordinal, &record),
++        );
++        if ((record.flags & 1) == 0) continue;
++        var info: c.Vizg_HirConsumerInfo = undefined;
++        try std.testing.expectEqual(
++            @as(u32, c.VIZG_PROJECT_STATUS_OK),
++            c.vizg_hir_consumer_info(
++                result,
++                c.VIZG_HIR_CONSUMER_API_VERSION,
++                c.VIZG_HIR_CONSUMER_VALUE,
++                record.secondary_id,
++                &info,
++            ),
++        );
++        try std.testing.expect((info.flags & c.VIZG_HIR_CONSUMER_HAS_ORDINAL) != 0);
++        try std.testing.expect((info.flags & c.VIZG_HIR_CONSUMER_HAS_PRODUCER) != 0);
++        try std.testing.expectEqual(@as(u32, @intCast(instruction_ordinal)), info.producer_instruction_ordinal);
++        queried_value = true;
++        break;
++    }
++    try std.testing.expect(queried_value);
++
++    var queried_writer = false;
++    for (0..summary.binding_count) |binding_ordinal| {
++        var binding_record: c.Vizg_HirRecord = undefined;
++        try std.testing.expectEqual(
++            @as(u32, c.VIZG_PROJECT_STATUS_OK),
++            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_BINDING, binding_ordinal, &binding_record),
++        );
++        var writer_count: usize = 0;
++        try std.testing.expectEqual(
++            @as(u32, c.VIZG_PROJECT_STATUS_OK),
++            c.vizg_hir_binding_writer_count(
++                result,
++                c.VIZG_HIR_CONSUMER_API_VERSION,
++                binding_record.id,
++                &writer_count,
++            ),
++        );
++        if (writer_count == 0) continue;
++        var writer_ordinal: u32 = undefined;
++        try std.testing.expectEqual(
++            @as(u32, c.VIZG_PROJECT_STATUS_OK),
++            c.vizg_hir_binding_writer_at(
++                result,
++                c.VIZG_HIR_CONSUMER_API_VERSION,
++                binding_record.id,
++                0,
++                &writer_ordinal,
++            ),
++        );
++        try std.testing.expect(@as(usize, writer_ordinal) < summary.instruction_count);
++        queried_writer = true;
++        break;
++    }
++    try std.testing.expect(queried_writer);
++
++    var queried_binding_source = false;
++    for (0..summary.binding_count) |binding_ordinal| {
++        var binding_record: c.Vizg_HirRecord = undefined;
++        try std.testing.expectEqual(
++            @as(u32, c.VIZG_PROJECT_STATUS_OK),
++            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_BINDING, binding_ordinal, &binding_record),
++        );
++        var info: c.Vizg_HirConsumerInfo = undefined;
++        try std.testing.expectEqual(
++            @as(u32, c.VIZG_PROJECT_STATUS_OK),
++            c.vizg_hir_consumer_info(
++                result,
++                c.VIZG_HIR_CONSUMER_API_VERSION,
++                c.VIZG_HIR_CONSUMER_BINDING,
++                binding_record.id,
++                &info,
++            ),
++        );
++        if ((info.flags & c.VIZG_HIR_CONSUMER_HAS_RELATED_ID) == 0) continue;
++        try std.testing.expect(info.related_id != c.VIZG_HIR_ID_NONE);
++        queried_binding_source = true;
++        break;
++    }
++    try std.testing.expect(queried_binding_source);
++
+     var legacy_summary: c.Vizg_HirSummary = undefined;
+     try std.testing.expectEqual(
+         @as(u32, c.VIZG_PROJECT_STATUS_OK),
+diff --git a/test/c_abi/layout_probe.c b/test/c_abi/layout_probe.c
+index cd7d9c22db8a44b599f0eefd8d5fdf675083ccaa..4cf77eb268e6970c7b9949f07873c59589811ad0 100644
+--- a/test/c_abi/layout_probe.c
++++ b/test/c_abi/layout_probe.c
+@@ -54,6 +54,8 @@ LAYOUT(Vizg_HirReachabilityRequest)
+ LAYOUT(Vizg_HirReachabilityRequirements)
+ LAYOUT(Vizg_HirReachabilityBuffers)
+ LAYOUT(Vizg_HirReachabilitySummary)
++LAYOUT(Vizg_HirConsumerKind)
++LAYOUT(Vizg_HirConsumerInfo)
+ LAYOUT(Vizg_HirRecord)
+ LAYOUT(Vizg_HirPayload)
+ LAYOUT(Vizg_HirPayloadItem)
+@@ -293,6 +295,14 @@ size_t vizg_c_fields_Vizg_HirReachabilitySummary(void) {
+         F(Vizg_HirReachabilitySummary, binding_count, 5) +
+         F(Vizg_HirReachabilitySummary, external_module_count, 6);
+ }
++
++size_t vizg_c_fields_Vizg_HirConsumerInfo(void) {
++    return F(Vizg_HirConsumerInfo, flags, 1) +
++        F(Vizg_HirConsumerInfo, canonical_ordinal, 2) +
++        F(Vizg_HirConsumerInfo, producer_instruction_ordinal, 3) +
++        F(Vizg_HirConsumerInfo, type_id, 4) +
++        F(Vizg_HirConsumerInfo, related_id, 5);
++}
+ size_t vizg_c_fields_Vizg_HirRecord(void) {
+     return F(Vizg_HirRecord, kind, 1) + F(Vizg_HirRecord, tag, 2) +
+         F(Vizg_HirRecord, id, 3) + F(Vizg_HirRecord, parent_id, 4) +
+diff --git a/test/c_abi/layout_test.zig b/test/c_abi/layout_test.zig
+index f288e78e0adaf58398d968222486bb6924e3b848..d35d379c431d4cc2dea125705805d4c3d40fd920 100644
+--- a/test/c_abi/layout_test.zig
++++ b/test/c_abi/layout_test.zig
+@@ -99,6 +99,10 @@ extern fn vizg_c_sizeof_Vizg_HirReachabilityBuffers() usize;
+ extern fn vizg_c_alignof_Vizg_HirReachabilityBuffers() usize;
+ extern fn vizg_c_sizeof_Vizg_HirReachabilitySummary() usize;
+ extern fn vizg_c_alignof_Vizg_HirReachabilitySummary() usize;
++extern fn vizg_c_sizeof_Vizg_HirConsumerKind() usize;
++extern fn vizg_c_alignof_Vizg_HirConsumerKind() usize;
++extern fn vizg_c_sizeof_Vizg_HirConsumerInfo() usize;
++extern fn vizg_c_alignof_Vizg_HirConsumerInfo() usize;
+ extern fn vizg_c_sizeof_Vizg_HirRecord() usize;
+ extern fn vizg_c_alignof_Vizg_HirRecord() usize;
+ extern fn vizg_c_sizeof_Vizg_HirPayload() usize;
+@@ -178,6 +182,7 @@ extern fn vizg_c_fields_Vizg_HirReachabilityRequest() usize;
+ extern fn vizg_c_fields_Vizg_HirReachabilityRequirements() usize;
+ extern fn vizg_c_fields_Vizg_HirReachabilityBuffers() usize;
+ extern fn vizg_c_fields_Vizg_HirReachabilitySummary() usize;
++extern fn vizg_c_fields_Vizg_HirConsumerInfo() usize;
+ extern fn vizg_c_fields_Vizg_HirRecord() usize;
+ extern fn vizg_c_fields_Vizg_HirPayload() usize;
+ extern fn vizg_c_fields_Vizg_HirPayloadItem() usize;
+@@ -273,6 +278,8 @@ test "official ABI v1 C and Zig layouts match" {
+     try expectLayout(abi.Vizg_HirReachabilityRequirements, vizg_c_sizeof_Vizg_HirReachabilityRequirements(), vizg_c_alignof_Vizg_HirReachabilityRequirements());
+     try expectLayout(abi.Vizg_HirReachabilityBuffers, vizg_c_sizeof_Vizg_HirReachabilityBuffers(), vizg_c_alignof_Vizg_HirReachabilityBuffers());
+     try expectLayout(abi.Vizg_HirReachabilitySummary, vizg_c_sizeof_Vizg_HirReachabilitySummary(), vizg_c_alignof_Vizg_HirReachabilitySummary());
++    try expectLayout(abi.Vizg_HirConsumerKind, vizg_c_sizeof_Vizg_HirConsumerKind(), vizg_c_alignof_Vizg_HirConsumerKind());
++    try expectLayout(abi.Vizg_HirConsumerInfo, vizg_c_sizeof_Vizg_HirConsumerInfo(), vizg_c_alignof_Vizg_HirConsumerInfo());
+     try expectLayout(abi.Vizg_HirRecord, vizg_c_sizeof_Vizg_HirRecord(), vizg_c_alignof_Vizg_HirRecord());
+     try expectLayout(abi.Vizg_HirPayload, vizg_c_sizeof_Vizg_HirPayload(), vizg_c_alignof_Vizg_HirPayload());
+     try expectLayout(abi.Vizg_HirPayloadItem, vizg_c_sizeof_Vizg_HirPayloadItem(), vizg_c_alignof_Vizg_HirPayloadItem());
+@@ -327,6 +334,7 @@ test "official ABI v1 C and Zig layouts match" {
+     try std.testing.expectEqual(f(abi.Vizg_HirReachabilityRequirements, "scratch_bytes", 1) + f(abi.Vizg_HirReachabilityRequirements, "module_word_count", 2) + f(abi.Vizg_HirReachabilityRequirements, "function_word_count", 3) + f(abi.Vizg_HirReachabilityRequirements, "block_word_count", 4) + f(abi.Vizg_HirReachabilityRequirements, "instruction_word_count", 5) + f(abi.Vizg_HirReachabilityRequirements, "binding_word_count", 6) + f(abi.Vizg_HirReachabilityRequirements, "module_ordinal_capacity", 7) + f(abi.Vizg_HirReachabilityRequirements, "function_ordinal_capacity", 8) + f(abi.Vizg_HirReachabilityRequirements, "block_ordinal_capacity", 9) + f(abi.Vizg_HirReachabilityRequirements, "instruction_ordinal_capacity", 10) + f(abi.Vizg_HirReachabilityRequirements, "binding_ordinal_capacity", 11) + f(abi.Vizg_HirReachabilityRequirements, "external_module_capacity", 12), vizg_c_fields_Vizg_HirReachabilityRequirements());
+     try std.testing.expectEqual(f(abi.Vizg_HirReachabilityBuffers, "scratch_ptr", 1) + f(abi.Vizg_HirReachabilityBuffers, "scratch_len", 2) + f(abi.Vizg_HirReachabilityBuffers, "module_bits_ptr", 3) + f(abi.Vizg_HirReachabilityBuffers, "module_word_count", 4) + f(abi.Vizg_HirReachabilityBuffers, "function_bits_ptr", 5) + f(abi.Vizg_HirReachabilityBuffers, "function_word_count", 6) + f(abi.Vizg_HirReachabilityBuffers, "block_bits_ptr", 7) + f(abi.Vizg_HirReachabilityBuffers, "block_word_count", 8) + f(abi.Vizg_HirReachabilityBuffers, "instruction_bits_ptr", 9) + f(abi.Vizg_HirReachabilityBuffers, "instruction_word_count", 10) + f(abi.Vizg_HirReachabilityBuffers, "binding_bits_ptr", 11) + f(abi.Vizg_HirReachabilityBuffers, "binding_word_count", 12) + f(abi.Vizg_HirReachabilityBuffers, "module_ordinals_ptr", 13) + f(abi.Vizg_HirReachabilityBuffers, "module_ordinal_capacity", 14) + f(abi.Vizg_HirReachabilityBuffers, "function_ordinals_ptr", 15) + f(abi.Vizg_HirReachabilityBuffers, "function_ordinal_capacity", 16) + f(abi.Vizg_HirReachabilityBuffers, "block_ordinals_ptr", 17) + f(abi.Vizg_HirReachabilityBuffers, "block_ordinal_capacity", 18) + f(abi.Vizg_HirReachabilityBuffers, "instruction_ordinals_ptr", 19) + f(abi.Vizg_HirReachabilityBuffers, "instruction_ordinal_capacity", 20) + f(abi.Vizg_HirReachabilityBuffers, "binding_ordinals_ptr", 21) + f(abi.Vizg_HirReachabilityBuffers, "binding_ordinal_capacity", 22) + f(abi.Vizg_HirReachabilityBuffers, "external_module_ids_ptr", 23) + f(abi.Vizg_HirReachabilityBuffers, "external_module_capacity", 24), vizg_c_fields_Vizg_HirReachabilityBuffers());
+     try std.testing.expectEqual(f(abi.Vizg_HirReachabilitySummary, "module_count", 1) + f(abi.Vizg_HirReachabilitySummary, "function_count", 2) + f(abi.Vizg_HirReachabilitySummary, "block_count", 3) + f(abi.Vizg_HirReachabilitySummary, "instruction_count", 4) + f(abi.Vizg_HirReachabilitySummary, "binding_count", 5) + f(abi.Vizg_HirReachabilitySummary, "external_module_count", 6), vizg_c_fields_Vizg_HirReachabilitySummary());
++    try std.testing.expectEqual(f(abi.Vizg_HirConsumerInfo, "flags", 1) + f(abi.Vizg_HirConsumerInfo, "canonical_ordinal", 2) + f(abi.Vizg_HirConsumerInfo, "producer_instruction_ordinal", 3) + f(abi.Vizg_HirConsumerInfo, "type_id", 4) + f(abi.Vizg_HirConsumerInfo, "related_id", 5), vizg_c_fields_Vizg_HirConsumerInfo());
+     try std.testing.expectEqual(f(abi.Vizg_HirRecord, "kind", 1) + f(abi.Vizg_HirRecord, "tag", 2) + f(abi.Vizg_HirRecord, "id", 3) + f(abi.Vizg_HirRecord, "parent_id", 4) + f(abi.Vizg_HirRecord, "secondary_id", 5) + f(abi.Vizg_HirRecord, "module_id", 6) + f(abi.Vizg_HirRecord, "type_id", 7) + f(abi.Vizg_HirRecord, "effect_bits", 8) + f(abi.Vizg_HirRecord, "flags", 9) + f(abi.Vizg_HirRecord, "reserved", 10) + f(abi.Vizg_HirRecord, "origin_id", 11) + f(abi.Vizg_HirRecord, "name_ptr", 12) + f(abi.Vizg_HirRecord, "name_len", 13) + f(abi.Vizg_HirRecord, "child_count", 14), vizg_c_fields_Vizg_HirRecord());
+     try std.testing.expectEqual(f(abi.Vizg_HirPayload, "tag", 1) + f(abi.Vizg_HirPayload, "tag0", 2) + f(abi.Vizg_HirPayload, "tag1", 3) + f(abi.Vizg_HirPayload, "flags", 4) + f(abi.Vizg_HirPayload, "operand0", 5) + f(abi.Vizg_HirPayload, "operand1", 6) + f(abi.Vizg_HirPayload, "operand2", 7) + f(abi.Vizg_HirPayload, "operand3", 8) + f(abi.Vizg_HirPayload, "string0_ptr", 9) + f(abi.Vizg_HirPayload, "string0_len", 10) + f(abi.Vizg_HirPayload, "string1_ptr", 11) + f(abi.Vizg_HirPayload, "string1_len", 12) + f(abi.Vizg_HirPayload, "item_count", 13), vizg_c_fields_Vizg_HirPayload());
+     try std.testing.expectEqual(f(abi.Vizg_HirPayloadItem, "tag", 1) + f(abi.Vizg_HirPayloadItem, "flags", 2) + f(abi.Vizg_HirPayloadItem, "operand0", 3) + f(abi.Vizg_HirPayloadItem, "operand1", 4) + f(abi.Vizg_HirPayloadItem, "string0_ptr", 5) + f(abi.Vizg_HirPayloadItem, "string0_len", 6) + f(abi.Vizg_HirPayloadItem, "string1_ptr", 7) + f(abi.Vizg_HirPayloadItem, "string1_len", 8), vizg_c_fields_Vizg_HirPayloadItem());
+diff --git a/test/wasm/official_abi_v1.mjs b/test/wasm/official_abi_v1.mjs
+index e4228ff850693c714f9414bab361f1d306e669cc..92bb1eaa6a52b0c75ade8bd8c9d5bcb50628153f 100644
+--- a/test/wasm/official_abi_v1.mjs
++++ b/test/wasm/official_abi_v1.mjs
+@@ -15,18 +15,29 @@ const expectedExports = [
+   "vizg_abi_version",
+   "vizg_external_module_api_version",
+   "vizg_hir_api_version",
++  "vizg_hir_applied_generic_target",
+   "vizg_hir_array_element_type",
+   "vizg_hir_binding_detail_at",
++  "vizg_hir_binding_writer_at",
++  "vizg_hir_binding_writer_count",
++  "vizg_hir_consumer_api_version",
++  "vizg_hir_consumer_info",
+   "vizg_hir_block_detail_at",
+   "vizg_hir_block_parameter_at",
++  "vizg_hir_class_detail",
++  "vizg_hir_class_method_at",
+   "vizg_hir_detail_api_version",
+   "vizg_hir_external_declaration_detail_at",
++  "vizg_hir_external_type_identity",
+   "vizg_hir_function_capture_at",
+   "vizg_hir_function_completion_type",
+   "vizg_hir_function_detail_at",
+   "vizg_hir_function_parameter_at",
+   "vizg_hir_function_signature",
+   "vizg_hir_function_storage_detail_at",
++  "vizg_hir_language_item_at",
++  "vizg_hir_language_item_count",
++  "vizg_hir_language_item_function",
+   "vizg_hir_module_dependency_at",
+   "vizg_hir_module_detail_at",
+   "vizg_hir_module_export_at",
+@@ -35,6 +46,9 @@ const expectedExports = [
+   "vizg_hir_operation_item_at",
+   "vizg_hir_origin_detail_at",
+   "vizg_hir_payload_api_version",
++  "vizg_hir_reachability_analyze",
++  "vizg_hir_reachability_api_version",
++  "vizg_hir_reachability_requirements",
+   "vizg_hir_record_at",
+   "vizg_hir_region_count",
+   "vizg_hir_region_detail_at",
+@@ -56,17 +70,19 @@ const expectedExports = [
+   "vizg_project_register_ambient_globals",
+   "vizg_project_register_ambient_globals_v2",
+   "vizg_project_register_source_host_bindings",
++  "vizg_project_register_source_language_items",
+   "vizg_project_respond_external",
+   "vizg_project_respond_external_v2",
+   "vizg_project_respond_external_v3",
++  "vizg_project_respond_external_v4",
+   "vizg_project_respond_failure",
+   "vizg_project_respond_source",
++  "vizg_project_result_destroy",
+   "vizg_project_result_diagnostic",
+   "vizg_project_result_edge",
+   "vizg_project_result_export",
+   "vizg_project_result_import",
+   "vizg_project_result_module",
+-  "vizg_project_result_destroy",
+   "vizg_project_result_summary",
+   "vizg_project_step",
+   "vizg_project_workspace_alignment",
+@@ -95,6 +111,12 @@ if (api.vizg_hir_payload_api_version() !== 1) {
+ if (api.vizg_hir_detail_api_version() !== 8) {
+   throw new Error(`unexpected HIR detail ABI version: ${api.vizg_hir_detail_api_version()}`);
+ }
++if (api.vizg_hir_reachability_api_version() !== 1) {
++  throw new Error(`unexpected HIR reachability ABI version: ${api.vizg_hir_reachability_api_version()}`);
++}
++if (api.vizg_hir_consumer_api_version() !== 1) {
++  throw new Error(`unexpected HIR consumer ABI version: ${api.vizg_hir_consumer_api_version()}`);
++}
+ const PAGE_BYTES = 64 * 1024;
+ const WORKSPACE_BYTES = 8 * 1024 * 1024;
+ const STATUS_OK = 0;

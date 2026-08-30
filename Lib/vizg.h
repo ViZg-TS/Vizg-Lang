@@ -11,6 +11,7 @@
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
 #define VIZG_HIR_DETAIL_API_VERSION 8u
 #define VIZG_HIR_REACHABILITY_API_VERSION 1u
+#define VIZG_HIR_CONSUMER_API_VERSION 1u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
 #define VIZG_INTRINSIC_CONTRACT_VERSION 3u
 #define VIZG_LANGUAGE_ITEM_CONTRACT_VERSION 1u
@@ -974,6 +975,31 @@ typedef struct Vizg_HirReachabilitySummary {
     size_t external_module_count;
 } Vizg_HirReachabilitySummary;
 
+typedef enum Vizg_HirConsumerKind {
+    VIZG_HIR_CONSUMER_VALUE = 0,
+    VIZG_HIR_CONSUMER_BINDING = 1,
+    VIZG_HIR_CONSUMER_PLACE = 2
+} Vizg_HirConsumerKind;
+
+#define VIZG_HIR_CONSUMER_HAS_ORDINAL (1u << 0)
+#define VIZG_HIR_CONSUMER_HAS_PRODUCER (1u << 1)
+#define VIZG_HIR_CONSUMER_HAS_TYPE (1u << 2)
+#define VIZG_HIR_CONSUMER_HAS_RELATED_ID (1u << 3)
+#define VIZG_HIR_CONSUMER_PLACE_CONSUMED (1u << 4)
+#define VIZG_HIR_CONSUMER_PLACE_DELETED (1u << 5)
+
+/* For VIZG_HIR_CONSUMER_BINDING, related_id is the immediate semantic
+ * source binding: either the capture source or the exact source declaration
+ * provider for an import alias. Hosts can follow this relation to a fixed
+ * point without reconstructing import/re-export graphs. */
+typedef struct Vizg_HirConsumerInfo {
+    uint32_t flags;
+    uint32_t canonical_ordinal;
+    uint32_t producer_instruction_ordinal;
+    uint32_t type_id;
+    uint64_t related_id;
+} Vizg_HirConsumerInfo;
+
 /* Generic immutable record. Kind-specific tag and id field meanings are
  * versioned by VIZG_HIR_API_VERSION. For instruction records, HIR API v1
  * stores the parent function id in secondary_id; v2 stores the result ValueId
@@ -1350,6 +1376,17 @@ Vizg_ProjectStatus vizg_project_analyze_source(
     Vizg_ProjectResult **out_result);
 uint32_t vizg_hir_api_version(void);
 uint32_t vizg_hir_reachability_api_version(void);
+uint32_t vizg_hir_consumer_api_version(void);
+Vizg_ProjectStatus vizg_hir_consumer_info(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    Vizg_HirConsumerKind kind, uint64_t raw_id, Vizg_HirConsumerInfo *out_info);
+Vizg_ProjectStatus vizg_hir_binding_writer_count(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint64_t binding_raw_id, size_t *out_count);
+Vizg_ProjectStatus vizg_hir_binding_writer_at(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint64_t binding_raw_id, size_t writer_index,
+    uint32_t *out_instruction_ordinal);
 Vizg_ProjectStatus vizg_hir_reachability_requirements(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     Vizg_HirReachabilityRequirements *out_requirements);

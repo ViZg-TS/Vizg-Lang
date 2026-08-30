@@ -392,6 +392,10 @@ pub fn build(b: *std.Build) void {
         \\vizg_hir_applied_generic_target
         \\vizg_hir_array_element_type
         \\vizg_hir_binding_detail_at
+        \\vizg_hir_binding_writer_at
+        \\vizg_hir_binding_writer_count
+        \\vizg_hir_consumer_api_version
+        \\vizg_hir_consumer_info
         \\vizg_hir_block_detail_at
         \\vizg_hir_block_parameter_at
         \\vizg_hir_class_detail

@@ -680,11 +680,99 @@ test "versioned C HIR consumer reads immutable result records" {
     try std.testing.expectEqual(@as(u32, c.VIZG_HIR_API_VERSION), c.vizg_hir_api_version());
     try std.testing.expectEqual(@as(u32, c.VIZG_HIR_PAYLOAD_API_VERSION), c.vizg_hir_payload_api_version());
     try std.testing.expectEqual(@as(u32, c.VIZG_HIR_DETAIL_API_VERSION), c.vizg_hir_detail_api_version());
+    try std.testing.expectEqual(@as(u32, c.VIZG_HIR_CONSUMER_API_VERSION), c.vizg_hir_consumer_api_version());
     var summary: c.Vizg_HirSummary = undefined;
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_OK),
         c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
     );
+    var queried_value = false;
+    for (0..summary.instruction_count) |instruction_ordinal| {
+        var record: c.Vizg_HirRecord = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_INSTRUCTION, instruction_ordinal, &record),
+        );
+        if ((record.flags & 1) == 0) continue;
+        var info: c.Vizg_HirConsumerInfo = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_consumer_info(
+                result,
+                c.VIZG_HIR_CONSUMER_API_VERSION,
+                c.VIZG_HIR_CONSUMER_VALUE,
+                record.secondary_id,
+                &info,
+            ),
+        );
+        try std.testing.expect((info.flags & c.VIZG_HIR_CONSUMER_HAS_ORDINAL) != 0);
+        try std.testing.expect((info.flags & c.VIZG_HIR_CONSUMER_HAS_PRODUCER) != 0);
+        try std.testing.expectEqual(@as(u32, @intCast(instruction_ordinal)), info.producer_instruction_ordinal);
+        queried_value = true;
+        break;
+    }
+    try std.testing.expect(queried_value);
+
+    var queried_writer = false;
+    for (0..summary.binding_count) |binding_ordinal| {
+        var binding_record: c.Vizg_HirRecord = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_BINDING, binding_ordinal, &binding_record),
+        );
+        var writer_count: usize = 0;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_binding_writer_count(
+                result,
+                c.VIZG_HIR_CONSUMER_API_VERSION,
+                binding_record.id,
+                &writer_count,
+            ),
+        );
+        if (writer_count == 0) continue;
+        var writer_ordinal: u32 = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_binding_writer_at(
+                result,
+                c.VIZG_HIR_CONSUMER_API_VERSION,
+                binding_record.id,
+                0,
+                &writer_ordinal,
+            ),
+        );
+        try std.testing.expect(@as(usize, writer_ordinal) < summary.instruction_count);
+        queried_writer = true;
+        break;
+    }
+    try std.testing.expect(queried_writer);
+
+    var queried_binding_source = false;
+    for (0..summary.binding_count) |binding_ordinal| {
+        var binding_record: c.Vizg_HirRecord = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_record_at(result, c.VIZG_HIR_API_VERSION, c.VIZG_HIR_ENTITY_BINDING, binding_ordinal, &binding_record),
+        );
+        var info: c.Vizg_HirConsumerInfo = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_consumer_info(
+                result,
+                c.VIZG_HIR_CONSUMER_API_VERSION,
+                c.VIZG_HIR_CONSUMER_BINDING,
+                binding_record.id,
+                &info,
+            ),
+        );
+        if ((info.flags & c.VIZG_HIR_CONSUMER_HAS_RELATED_ID) == 0) continue;
+        try std.testing.expect(info.related_id != c.VIZG_HIR_ID_NONE);
+        queried_binding_source = true;
+        break;
+    }
+    try std.testing.expect(queried_binding_source);
+
     var legacy_summary: c.Vizg_HirSummary = undefined;
     try std.testing.expectEqual(
         @as(u32, c.VIZG_PROJECT_STATUS_OK),

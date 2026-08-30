@@ -54,6 +54,8 @@ LAYOUT(Vizg_HirReachabilityRequest)
 LAYOUT(Vizg_HirReachabilityRequirements)
 LAYOUT(Vizg_HirReachabilityBuffers)
 LAYOUT(Vizg_HirReachabilitySummary)
+LAYOUT(Vizg_HirConsumerKind)
+LAYOUT(Vizg_HirConsumerInfo)
 LAYOUT(Vizg_HirRecord)
 LAYOUT(Vizg_HirPayload)
 LAYOUT(Vizg_HirPayloadItem)
@@ -292,6 +294,14 @@ size_t vizg_c_fields_Vizg_HirReachabilitySummary(void) {
         F(Vizg_HirReachabilitySummary, instruction_count, 4) +
         F(Vizg_HirReachabilitySummary, binding_count, 5) +
         F(Vizg_HirReachabilitySummary, external_module_count, 6);
+}
+
+size_t vizg_c_fields_Vizg_HirConsumerInfo(void) {
+    return F(Vizg_HirConsumerInfo, flags, 1) +
+        F(Vizg_HirConsumerInfo, canonical_ordinal, 2) +
+        F(Vizg_HirConsumerInfo, producer_instruction_ordinal, 3) +
+        F(Vizg_HirConsumerInfo, type_id, 4) +
+        F(Vizg_HirConsumerInfo, related_id, 5);
 }
 size_t vizg_c_fields_Vizg_HirRecord(void) {
     return F(Vizg_HirRecord, kind, 1) + F(Vizg_HirRecord, tag, 2) +

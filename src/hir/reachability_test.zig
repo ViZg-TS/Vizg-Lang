@@ -1027,6 +1027,59 @@ test "artifact reachability roots static-library exports and re-export targets o
     _ = try expectFunctionReachability(result, reached, "localDead", false);
 }
 
+test "consumer index resolves source import aliases to exact provider bindings" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(1350),
+        .logical_name = "consumer-import.ts",
+        .bytes =
+        \\import { publicThing } from "./dep";
+        \\publicThing();
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| {
+            try std.testing.expectEqualStrings("./dep", request.raw_specifier);
+            try project.respondSource(request.id, .{
+                .id = .init(1351),
+                .logical_name = "consumer-dep.ts",
+                .bytes = \\export function publicThing(): number { return 7; },
+            });
+        },
+    };
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const index = result.consumerIndex();
+    var saw_alias = false;
+    for (result.project.modules) |module| {
+        if (module.module_id.value() != 1350) continue;
+        for (module.imports) |import_binding| {
+            const local = import_binding.local orelse continue;
+            const source = index.bindingSource(result.project, local) orelse
+                return error.TestExpectedProviderBinding;
+            try std.testing.expect(source.index().? != local.index().?);
+            const source_ordinal = index.bindingOrdinal(source) orelse
+                return error.TestExpectedProviderBinding;
+            _ = index.binding(result.project, source_ordinal) orelse
+                return error.TestExpectedProviderBinding;
+            const provider_function = index.bindingFunction(result.project, source_ordinal) orelse
+                return error.TestExpectedProviderBinding;
+            try std.testing.expectEqual(@as(u64, 1351), provider_function.module_id.value());
+            saw_alias = true;
+        }
+    }
+    try std.testing.expect(saw_alias);
+}
+
 test "artifact reachability retains effectful binding reads even when their value is unused" {
     var result = try loweredRoot(
         1390,
