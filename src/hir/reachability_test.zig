@@ -1031,21 +1031,18 @@ test "consumer index resolves source import aliases to exact provider bindings" 
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
     try project.addRoot(.{
-        .id = .init(1350),
-        .logical_name = "consumer-import.ts",
-        .bytes =
-        \\import { publicThing } from "./dep";
-        \\publicThing();
-        ,
+        .id = .init(40),
+        .logical_name = "descriptive/root.ts",
+        .bytes = "import { value as depValue } from './dep'; export const answer: number = depValue;",
     });
     while (true) switch (try project.step()) {
         .complete => break,
         .request => |request| {
             try std.testing.expectEqualStrings("./dep", request.raw_specifier);
             try project.respondSource(request.id, .{
-                .id = .init(1351),
-                .logical_name = "consumer-dep.ts",
-                .bytes = \\export function publicThing(): number { return 7; },
+                .id = .init(7),
+                .logical_name = "unrelated-name.ts",
+                .bytes = "export const value: number = 7;",
             });
         },
     };
@@ -1061,7 +1058,7 @@ test "consumer index resolves source import aliases to exact provider bindings" 
     const index = result.consumerIndex();
     var saw_alias = false;
     for (result.project.modules) |module| {
-        if (module.module_id.value() != 1350) continue;
+        if (module.module_id.value() != 40) continue;
         for (module.imports) |import_binding| {
             const local = import_binding.local orelse continue;
             const source = index.bindingSource(result.project, local) orelse
@@ -1073,7 +1070,7 @@ test "consumer index resolves source import aliases to exact provider bindings" 
                 return error.TestExpectedProviderBinding;
             const provider_function = index.bindingFunction(result.project, source_ordinal) orelse
                 return error.TestExpectedProviderBinding;
-            try std.testing.expectEqual(@as(u64, 1351), provider_function.module_id.value());
+            try std.testing.expectEqual(@as(u64, 7), provider_function.module_id.value());
             saw_alias = true;
         }
     }

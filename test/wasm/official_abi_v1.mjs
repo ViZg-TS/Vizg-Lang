@@ -99,7 +99,7 @@ const { exports: api } = await WebAssembly.instantiate(module);
 if (api.vizg_abi_version() !== 1) {
   throw new Error(`unexpected ABI version: ${api.vizg_abi_version()}`);
 }
-if (api.vizg_external_module_api_version() !== 3) {
+if (api.vizg_external_module_api_version() !== 4) {
   throw new Error(`unexpected external-module API version: ${api.vizg_external_module_api_version()}`);
 }
 if (api.vizg_hir_api_version() !== 2) {
