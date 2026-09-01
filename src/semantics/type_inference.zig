@@ -562,15 +562,16 @@ fn lookupAccessSingle(
     tree: ast_mod.Ast,
     store: *types.TypeStore,
 ) !OperatorResult {
-    return lookupAccessSingleWithArraySurface(object_type, key, tree, store, true);
+    return lookupAccessSingleWithCanonicalSurfaces(object_type, key, tree, store, true, true);
 }
 
-fn lookupAccessSingleWithArraySurface(
+fn lookupAccessSingleWithCanonicalSurfaces(
     object_type: types.TypeId,
     key: AccessKey,
     tree: ast_mod.Ast,
     store: *types.TypeStore,
     use_array_surface: bool,
+    use_string_surface: bool,
 ) !OperatorResult {
     const b = &store.builtins;
     if (object_type == b.any or object_type == b.unknown) return .{ .type_id = object_type };
@@ -581,7 +582,7 @@ fn lookupAccessSingleWithArraySurface(
         .intersection => |members| blk: {
             var property_type: ?types.TypeId = null;
             for (members) |member| {
-                const result = try lookupAccessSingleWithArraySurface(member, key, tree, store, use_array_surface);
+                const result = try lookupAccessSingleWithCanonicalSurfaces(member, key, tree, store, use_array_surface, use_string_surface);
                 if (!result.valid) continue;
                 property_type = if (property_type) |current|
                     try store.intersectionOf(&.{ current, result.type_id })
@@ -600,7 +601,7 @@ fn lookupAccessSingleWithArraySurface(
             break :blk switch (resolved.kind) {
                 .object => |properties| try lookupObjectProperty(properties, key, tree, store),
                 .class, .class_constructor, .interface => try lookupDeclaredMember(object_type, key, tree, store),
-                .intersection => try lookupAccessSingleWithArraySurface(target, key, tree, store, use_array_surface),
+                .intersection => try lookupAccessSingleWithCanonicalSurfaces(target, key, tree, store, use_array_surface, use_string_surface),
                 else => invalidAccess(key, b.unknown),
             };
         },
@@ -614,14 +615,17 @@ fn lookupAccessSingleWithArraySurface(
                 const surface = try store.canonicalArraySurface(array.element_type) orelse
                     break :blk invalidAccess(key, b.unknown);
                 const target = try store.resolveAppliedTarget(surface);
-                break :blk lookupAccessSingleWithArraySurface(target, key, tree, store, false);
+                break :blk lookupAccessSingleWithCanonicalSurfaces(target, key, tree, store, false, use_string_surface);
             } else invalidAccess(key, b.unknown)
         else
             invalidAccess(key, b.unknown),
-        .primitive => |primitive| if (primitive == .string and isNumericIndex(key, tree, store))
-            .{ .type_id = b.string }
-        else
-            invalidAccess(key, b.unknown),
+        .primitive => |primitive| if (primitive == .string) blk: {
+            if (isNumericIndex(key, tree, store)) break :blk .{ .type_id = b.string };
+            if (!use_string_surface) break :blk invalidAccess(key, b.unknown);
+            const surface = store.canonicalStringSurface() orelse
+                break :blk invalidAccess(key, b.unknown);
+            break :blk lookupAccessSingleWithCanonicalSurfaces(surface, key, tree, store, use_array_surface, false);
+        } else invalidAccess(key, b.unknown),
         else => invalidAccess(key, b.unknown),
     };
 }

@@ -3226,6 +3226,55 @@ test "authorized generic array language item supplies renamed members to plain a
     try std.testing.expect(saw_size);
 }
 
+test "authorized renamed String language item supplies primitive string members" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{.{
+        .id = .init(3),
+        .module_id = .init(35),
+        .exported_name = "RenamedTextSurface",
+        .namespace = .type,
+    }});
+    try project.addRoot(.{
+        .id = .init(35),
+        .logical_name = "replacement-string-std.ts",
+        .bytes = "export interface RenamedTextSurface { readonly extent: number; cut(start: number): string; }",
+    });
+    try project.addRoot(.{
+        .id = .init(36),
+        .logical_name = "string-consumer.ts",
+        .bytes =
+        \\const text: string = "hello";
+        \\const extent = text.extent;
+        \\const cut = text.cut(1);
+        ,
+    });
+    while (try project.step() != .complete) {}
+    const finished = try project.finish();
+    try std.testing.expect(!finished.has_failures);
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+
+    const semantic = project.semanticResult().?;
+    try std.testing.expect(semantic.type_store.canonicalStringSurface() != null);
+    const consumer = semantic.lookupModule(36) orelse return error.TestExpectedConsumerModule;
+    const source = project.find(.init(36)).?.semantic_result.?;
+    var saw_extent = false;
+    var saw_cut = false;
+    for (source.frontend.bind.symbols) |symbol| {
+        const info = consumer.type_info.lookupSymbol(symbol.id) orelse continue;
+        if (std.mem.eql(u8, symbol.name, "extent")) {
+            try std.testing.expectEqual(semantic.type_store.builtins.number, info.effective());
+            saw_extent = true;
+        }
+        if (std.mem.eql(u8, symbol.name, "cut")) {
+            try std.testing.expectEqual(semantic.type_store.builtins.string, info.effective());
+            saw_cut = true;
+        }
+    }
+    try std.testing.expect(saw_extent);
+    try std.testing.expect(saw_cut);
+}
+
 test "canonical Array constructor accepts explicit element type arguments" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();

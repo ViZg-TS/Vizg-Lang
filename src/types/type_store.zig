@@ -25,6 +25,7 @@ pub const TypeStore = struct {
     canonical_array_declaration: ?model.SemanticDeclId,
     canonical_array_carrier: ?model.TypeId,
     canonical_array_constructor: ?model.TypeId,
+    canonical_string_surface: ?model.TypeId,
 
     const StoredType = struct {
         id: model.TypeId,
@@ -51,6 +52,7 @@ pub const TypeStore = struct {
             .canonical_array_declaration = null,
             .canonical_array_carrier = null,
             .canonical_array_constructor = null,
+            .canonical_string_surface = null,
         };
     }
 
@@ -92,6 +94,7 @@ pub const TypeStore = struct {
         copy.canonical_array_declaration = self.canonical_array_declaration;
         copy.canonical_array_carrier = self.canonical_array_carrier;
         copy.canonical_array_constructor = self.canonical_array_constructor;
+        copy.canonical_string_surface = self.canonical_string_surface;
         return copy;
     }
 
@@ -129,6 +132,16 @@ pub const TypeStore = struct {
 
     pub fn isCanonicalArrayConstructor(self: *const TypeStore, type_id: model.TypeId) bool {
         return self.canonical_array_constructor == type_id;
+    }
+
+    /// Binds the authorized primitive String member surface by language-item
+    /// identity. The source declaration name and module path remain replaceable.
+    pub fn registerCanonicalStringSurface(self: *TypeStore, type_id: model.TypeId) void {
+        self.canonical_string_surface = type_id;
+    }
+
+    pub fn canonicalStringSurface(self: *const TypeStore) ?model.TypeId {
+        return self.canonical_string_surface;
     }
 
     fn findArrayType(self: *const TypeStore, type_id: model.TypeId, depth: usize) ?model.TypeId {

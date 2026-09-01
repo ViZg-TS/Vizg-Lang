@@ -520,6 +520,7 @@ fn analyzeModuleGraphData(
 }
 
 const canonical_array_language_item_id: u64 = 0x0002;
+const canonical_string_language_item_id: u64 = 0x0003;
 const canonical_array_constructor_language_item_id: u64 = 0x0005;
 
 fn registerCanonicalLanguageItemSurfaces(
@@ -529,6 +530,7 @@ fn registerCanonicalLanguageItemSurfaces(
 ) !void {
     for (graph.source_language_items) |item| {
         if (item.id != canonical_array_language_item_id and
+            item.id != canonical_string_language_item_id and
             item.id != canonical_array_constructor_language_item_id) continue;
         for (exports) |exported| {
             if (exported.module_id != item.module or
@@ -538,6 +540,8 @@ fn registerCanonicalLanguageItemSurfaces(
                 type_store.registerCanonicalArraySurface(identity.declaration) catch |err| switch (err) {
                     error.InvalidCanonicalArraySurface => {},
                 };
+            } else if (item.id == canonical_string_language_item_id and item.type_only) {
+                type_store.registerCanonicalStringSurface(exported.identity.type_id);
             } else if (item.id == canonical_array_constructor_language_item_id and !item.type_only) {
                 type_store.registerCanonicalArrayConstructor(exported.identity.type_id);
             }

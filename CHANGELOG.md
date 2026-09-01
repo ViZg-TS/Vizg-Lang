@@ -8,6 +8,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Primitive `string` member lookup now consumes the authorized, replaceable
+  String language-item surface instead of relying on a canonical source name.
 - Added stateless artifact-rooted HIR reachability API v1 with caller-owned scratch,
   canonical membership bitsets, reached-ordinal lists, and reached external-module
   identities. Canonical HIR now seals an immutable consumer index so flattened
