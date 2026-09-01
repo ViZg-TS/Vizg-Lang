@@ -10,6 +10,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 - Primitive `string` member lookup now consumes the authorized, replaceable
   String language-item surface instead of relying on a canonical source name.
+- Artifact reachability triggers can now select an executable language item
+  only when a property receiver has primitive `string` semantic type.
 - Added stateless artifact-rooted HIR reachability API v1 with caller-owned scratch,
   canonical membership bitsets, reached-ordinal lists, and reached external-module
   identities. Canonical HIR now seals an immutable consumer index so flattened

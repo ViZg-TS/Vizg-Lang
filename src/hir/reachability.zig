@@ -6,7 +6,8 @@ const types = @import("../types/root.zig");
 
 pub const trigger_canonical_array_base: u32 = 1 << 0;
 pub const trigger_place_deleted: u32 = 1 << 1;
-const known_trigger_flags = trigger_canonical_array_base | trigger_place_deleted;
+pub const trigger_primitive_string_base: u32 = 1 << 2;
+const known_trigger_flags = trigger_canonical_array_base | trigger_place_deleted | trigger_primitive_string_base;
 
 /// Host-defined hidden semantic dependency. `operation_tag` is the stable HIR
 /// operation ordinal exported by the HIR ABI; `language_item_id` is opaque to
@@ -601,6 +602,14 @@ const State = struct {
             };
             if (!try self.valueIsCanonicalArray(base)) return false;
         }
+        if ((trigger.flags & trigger_primitive_string_base) != 0) {
+            const base = switch (operation) {
+                .make_property_place => |value| value.base,
+                .make_element_place => |value| value.base,
+                else => return false,
+            };
+            if (!try self.valueIsPrimitiveString(base)) return false;
+        }
         if ((trigger.flags & trigger_place_deleted) != 0) {
             const place = switch (operation) {
                 .make_property_place => |value| value.result,
@@ -615,6 +624,15 @@ const State = struct {
     fn valueIsCanonicalArray(self: *State, value: ids.ValueId) !bool {
         const type_id = self.index.valueType(value) orelse return error.InconsistentProjection;
         return self.typeIsCanonicalArray(type_id, 0);
+    }
+
+    fn valueIsPrimitiveString(self: *State, value: ids.ValueId) !bool {
+        const type_id = self.index.valueType(value) orelse return error.InconsistentProjection;
+        const ty = self.type_store.lookup(type_id) orelse return error.InconsistentProjection;
+        return switch (ty.kind) {
+            .primitive => |primitive| primitive == .string,
+            else => false,
+        };
     }
 
     fn typeIsCanonicalArray(self: *State, type_id: model.TypeId, depth: usize) !bool {

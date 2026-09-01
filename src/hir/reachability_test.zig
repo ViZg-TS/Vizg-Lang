@@ -1219,3 +1219,59 @@ test "language-item operation triggers use stable identity and only reached oper
     try std.testing.expect(bitSet(with_trigger.function_bits[0..], protocol_ordinal));
     _ = try expectFunctionReachability(result, with_trigger, "dead", false);
 }
+
+test "language-item trigger can require a primitive string property receiver" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    const protocol_id: u64 = 0xA55B;
+    try project.registerSourceLanguageItems(&.{
+        .{
+            .id = .init(3),
+            .module_id = .init(1611),
+            .exported_name = "TextSurface",
+            .namespace = .type,
+        },
+        .{
+            .id = .init(protocol_id),
+            .module_id = .init(1611),
+            .exported_name = "renamedTextProtocol",
+            .namespace = .value,
+        },
+    });
+    try project.addRoot(.{
+        .id = .init(1610),
+        .logical_name = "main.ts",
+        .bytes =
+        \\const text: string = "hello";
+        \\const object = { length: 1 };
+        \\text.length;
+        \\object.length;
+        ,
+    });
+    try project.supplySource(.{
+        .id = .init(1611),
+        .logical_name = "text-protocol.ts",
+        .bytes =
+        \\export interface TextSurface { readonly length: number; }
+        \\export function renamedTextProtocol(value: string): string { return value; }
+        ,
+    });
+    while (try project.step() != .complete) {}
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    const protocol_ordinal = functionOrdinalByName(result, "renamedTextProtocol") orelse
+        return error.TestExpectedFunction;
+    const property_tag: u32 = @intFromEnum(std.meta.Tag(hir.HirOperation).make_property_place);
+    const reached = try analyzeForTest(result, &.{}, &.{1610}, &.{.{
+        .operation_tag = property_tag,
+        .flags = hir.reachability.trigger_primitive_string_base,
+        .language_item_id = protocol_id,
+    }});
+    try std.testing.expect(bitSet(reached.function_bits[0..], protocol_ordinal));
+}

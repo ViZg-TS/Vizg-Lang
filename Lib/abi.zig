@@ -540,6 +540,7 @@ pub const Vizg_HirReachabilityTrigger = vizg.hir.reachability.LanguageItemTrigge
 
 pub const VIZG_HIR_REACH_TRIGGER_CANONICAL_ARRAY_BASE: u32 = 1 << 0;
 pub const VIZG_HIR_REACH_TRIGGER_PLACE_DELETED: u32 = 1 << 1;
+pub const VIZG_HIR_REACH_TRIGGER_PRIMITIVE_STRING_BASE: u32 = 1 << 2;
 
 pub const Vizg_HirReachabilityRequest = extern struct {
     public_module_ids_ptr: [*c]const u64,

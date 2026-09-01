@@ -127,6 +127,7 @@ pub const Vizg_HirConsumerKind = abi.Vizg_HirConsumerKind;
 pub const Vizg_HirConsumerInfo = abi.Vizg_HirConsumerInfo;
 pub const VIZG_HIR_REACH_TRIGGER_CANONICAL_ARRAY_BASE = abi.VIZG_HIR_REACH_TRIGGER_CANONICAL_ARRAY_BASE;
 pub const VIZG_HIR_REACH_TRIGGER_PLACE_DELETED = abi.VIZG_HIR_REACH_TRIGGER_PLACE_DELETED;
+pub const VIZG_HIR_REACH_TRIGGER_PRIMITIVE_STRING_BASE = abi.VIZG_HIR_REACH_TRIGGER_PRIMITIVE_STRING_BASE;
 pub const Vizg_ProjectModuleInfo = abi.Vizg_ProjectModuleInfo;
 pub const Vizg_ProjectDiagnostic = abi.Vizg_ProjectDiagnostic;
 pub const Vizg_ProjectEdgeInfo = abi.Vizg_ProjectEdgeInfo;
