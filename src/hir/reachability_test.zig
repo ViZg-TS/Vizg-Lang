@@ -124,21 +124,19 @@ fn expectFunctionReachability(result: *const hir.HirResult, reached: TestReachab
 test "HIR reachability operation trigger ordinals remain ABI stable" {
     const Tag = std.meta.Tag(hir.HirOperation);
     const expected = [_]Tag{
-        .constant, .copy, .load_binding, .initialize_binding, .store_binding,
-        .load_this, .load_super, .load_meta,
-        .make_binding_place, .make_property_place, .make_element_place, .make_super_place,
-        .load_place, .store_place, .delete_place,
-        .to_boolean, .is_nullish, .typeof_value, .void_value, .unary, .binary, .add,
-        .call, .call_method, .call_super_method, .call_super_constructor, .construct,
-        .tagged_template_call, .dynamic_import,
-        .create_object, .create_array, .create_closure, .create_class, .create_enum_object,
-        .create_regexp, .create_template_site, .define_property, .define_method,
-        .copy_object_properties, .array_append, .array_append_hole, .array_append_iterable,
-        .build_string, .to_string, .get_iterator, .get_async_iterator, .iterator_next,
-        .iterator_done, .iterator_value, .iterator_close, .enumerate_properties,
-        .enumerator_next, .enumerator_done, .enumerator_value, .collect_rest_arguments,
-        .read_argument, .create_arguments_object, .await_, .yield_, .yield_delegate,
-        .debugger_trap, .apply_pattern, .intrinsic_call,
+        .constant,               .copy,                    .load_binding,         .initialize_binding,     .store_binding,
+        .load_this,              .load_super,              .load_meta,            .make_binding_place,     .make_property_place,
+        .make_element_place,     .make_super_place,        .load_place,           .store_place,            .delete_place,
+        .to_boolean,             .is_nullish,              .typeof_value,         .void_value,             .unary,
+        .binary,                 .add,                     .call,                 .call_method,            .call_super_method,
+        .call_super_constructor, .construct,               .tagged_template_call, .dynamic_import,         .create_object,
+        .create_array,           .create_closure,          .create_class,         .create_enum_object,     .create_regexp,
+        .create_template_site,   .define_property,         .define_method,        .copy_object_properties, .array_append,
+        .array_append_hole,      .array_append_iterable,   .build_string,         .to_string,              .get_iterator,
+        .get_async_iterator,     .iterator_next,           .iterator_done,        .iterator_value,         .iterator_close,
+        .enumerate_properties,   .enumerator_next,         .enumerator_done,      .enumerator_value,       .collect_rest_arguments,
+        .read_argument,          .create_arguments_object, .await_,               .yield_,                 .yield_delegate,
+        .debugger_trap,          .apply_pattern,           .intrinsic_call,
     };
     const fields = @typeInfo(Tag).@"enum".fields;
     try std.testing.expectEqual(@as(usize, expected.len), fields.len);
@@ -519,8 +517,7 @@ test "artifact reachability treats pattern place targets as real place consumers
 }
 
 test "artifact reachability excludes unused function declarations before MIR" {
-    var result = try loweredRoot(
-        1001,
+    var result = try loweredRoot(1001,
         \\function unused(): number { return 123; }
         \\function used(): number { return 456; }
         \\used();
@@ -1078,8 +1075,7 @@ test "consumer index resolves source import aliases to exact provider bindings" 
 }
 
 test "artifact reachability retains effectful binding reads even when their value is unused" {
-    var result = try loweredRoot(
-        1390,
+    var result = try loweredRoot(1390,
         \\const observed = 1;
         \\observed;
     );
@@ -1105,8 +1101,7 @@ test "artifact reachability retains effectful binding reads even when their valu
 }
 
 test "artifact reachability preserves observable RHS while omitting dead binding storage" {
-    var result = try loweredRoot(
-        1400,
+    var result = try loweredRoot(1400,
         \\function effect(): number { return 1; }
         \\const unused = effect();
     );
@@ -1138,8 +1133,7 @@ test "artifact reachability preserves observable RHS while omitting dead binding
 }
 
 test "artifact reachability traces capture binding sources" {
-    var result = try loweredRoot(
-        1500,
+    var result = try loweredRoot(1500,
         \\const captured = 7;
         \\function used(): number { return captured; }
         \\used();
@@ -1153,8 +1147,7 @@ test "artifact reachability traces capture binding sources" {
 }
 
 test "artifact reachability traces callable aliases without a global fixed point" {
-    var result = try loweredRoot(
-        1550,
+    var result = try loweredRoot(1550,
         \\function dead(): number { return 0; }
         \\function used(): number { return 1; }
         \\const first = used;
@@ -1274,4 +1267,52 @@ test "language-item trigger can require a primitive string property receiver" {
         .language_item_id = protocol_id,
     }});
     try std.testing.expect(bitSet(reached.function_bits[0..], protocol_ordinal));
+}
+
+test "language-item trigger distinguishes string concatenation from numeric add" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    const protocol_id: u64 = 0xA55C;
+    try project.registerSourceLanguageItems(&.{.{
+        .id = .init(protocol_id),
+        .module_id = .init(1622),
+        .exported_name = "renamedConcatProtocol",
+        .namespace = .value,
+    }});
+    try project.addRoot(.{
+        .id = .init(1620),
+        .logical_name = "numeric.ts",
+        .bytes = "export const value = 1 + 2;",
+    });
+    try project.addRoot(.{
+        .id = .init(1621),
+        .logical_name = "string.ts",
+        .bytes = "export const value = \"left\" + \"right\";",
+    });
+    try project.supplySource(.{
+        .id = .init(1622),
+        .logical_name = "concat-protocol.ts",
+        .bytes = "export function renamedConcatProtocol(left: string, right: string): string { return left; }",
+    });
+    while (try project.step() != .complete) {}
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    const protocol_ordinal = functionOrdinalByName(result, "renamedConcatProtocol") orelse
+        return error.TestExpectedFunction;
+    const add_tag: u32 = @intFromEnum(std.meta.Tag(hir.HirOperation).add);
+    const trigger = [_]hir.reachability.LanguageItemTrigger{.{
+        .operation_tag = add_tag,
+        .flags = hir.reachability.trigger_string_concat_add,
+        .language_item_id = protocol_id,
+    }};
+    const numeric = try analyzeForTest(result, &.{}, &.{1620}, &trigger);
+    try std.testing.expect(!bitSet(numeric.function_bits[0..], protocol_ordinal));
+    const string = try analyzeForTest(result, &.{}, &.{1621}, &trigger);
+    try std.testing.expect(bitSet(string.function_bits[0..], protocol_ordinal));
 }

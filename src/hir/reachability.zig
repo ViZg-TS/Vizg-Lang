@@ -7,7 +7,8 @@ const types = @import("../types/root.zig");
 pub const trigger_canonical_array_base: u32 = 1 << 0;
 pub const trigger_place_deleted: u32 = 1 << 1;
 pub const trigger_primitive_string_base: u32 = 1 << 2;
-const known_trigger_flags = trigger_canonical_array_base | trigger_place_deleted | trigger_primitive_string_base;
+pub const trigger_string_concat_add: u32 = 1 << 3;
+const known_trigger_flags = trigger_canonical_array_base | trigger_place_deleted | trigger_primitive_string_base | trigger_string_concat_add;
 
 /// Host-defined hidden semantic dependency. `operation_tag` is the stable HIR
 /// operation ordinal exported by the HIR ABI; `language_item_id` is opaque to
@@ -447,9 +448,17 @@ const State = struct {
             .delete_place,
             => {},
 
-            .load_this, .load_super, .load_meta, .create_object, .create_array,
-            .create_enum_object, .create_regexp, .create_template_site,
-            .collect_rest_arguments, .read_argument, .create_arguments_object,
+            .load_this,
+            .load_super,
+            .load_meta,
+            .create_object,
+            .create_array,
+            .create_enum_object,
+            .create_regexp,
+            .create_template_site,
+            .collect_rest_arguments,
+            .read_argument,
+            .create_arguments_object,
             .debugger_trap,
             => {},
 
@@ -472,11 +481,24 @@ const State = struct {
             .store_place => |value| if (self.index.bindingForPlace(value.place) == null)
                 try self.traceValue(value.value),
 
-            .to_boolean, .is_nullish, .typeof_value, .void_value,
-            .to_string, .get_iterator, .get_async_iterator, .iterator_next,
-            .iterator_done, .iterator_value, .iterator_close,
-            .enumerate_properties, .enumerator_next, .enumerator_done,
-            .enumerator_value, .await_, .yield_, .yield_delegate,
+            .to_boolean,
+            .is_nullish,
+            .typeof_value,
+            .void_value,
+            .to_string,
+            .get_iterator,
+            .get_async_iterator,
+            .iterator_next,
+            .iterator_done,
+            .iterator_value,
+            .iterator_close,
+            .enumerate_properties,
+            .enumerator_next,
+            .enumerator_done,
+            .enumerator_value,
+            .await_,
+            .yield_,
+            .yield_delegate,
             => |value| try self.traceValue(value),
 
             .unary => |value| try self.traceValue(value.operand),
@@ -617,6 +639,13 @@ const State = struct {
                 else => return false,
             };
             if (!self.index.placeIsDeleted(place)) return false;
+        }
+        if ((trigger.flags & trigger_string_concat_add) != 0) {
+            const mode = switch (operation) {
+                .add => |value| value.mode,
+                else => return false,
+            };
+            if (mode != .string_concat) return false;
         }
         return true;
     }

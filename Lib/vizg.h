@@ -902,6 +902,7 @@ typedef struct Vizg_HirSummary {
 #define VIZG_HIR_REACH_TRIGGER_CANONICAL_ARRAY_BASE (1u << 0)
 #define VIZG_HIR_REACH_TRIGGER_PLACE_DELETED (1u << 1)
 #define VIZG_HIR_REACH_TRIGGER_PRIMITIVE_STRING_BASE (1u << 2)
+#define VIZG_HIR_REACH_TRIGGER_STRING_CONCAT_ADD (1u << 3)
 
 /* operation_tag is the same versioned HIR operation ordinal reported in
  * Vizg_HirPayload.tag. Reordering/adding operation tags requires explicit
