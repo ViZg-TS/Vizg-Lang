@@ -1,5 +1,6 @@
 const std = @import("std");
 const model = @import("model.zig");
+const builtin_kind = @import("builtin.zig");
 
 pub const TypeStore = struct {
     /// Hard limits keep adversarial type shapes from causing unbounded work or
@@ -26,6 +27,11 @@ pub const TypeStore = struct {
     canonical_array_carrier: ?model.TypeId,
     canonical_array_constructor: ?model.TypeId,
     canonical_string_surface: ?model.TypeId,
+    canonical_number_surface: ?model.TypeId,
+    canonical_boolean_surface: ?model.TypeId,
+    canonical_bigint_surface: ?model.TypeId,
+    canonical_symbol_surface: ?model.TypeId,
+    canonical_function_surface: ?model.TypeId,
 
     const StoredType = struct {
         id: model.TypeId,
@@ -53,6 +59,11 @@ pub const TypeStore = struct {
             .canonical_array_carrier = null,
             .canonical_array_constructor = null,
             .canonical_string_surface = null,
+            .canonical_number_surface = null,
+            .canonical_boolean_surface = null,
+            .canonical_bigint_surface = null,
+            .canonical_symbol_surface = null,
+            .canonical_function_surface = null,
         };
     }
 
@@ -95,6 +106,11 @@ pub const TypeStore = struct {
         copy.canonical_array_carrier = self.canonical_array_carrier;
         copy.canonical_array_constructor = self.canonical_array_constructor;
         copy.canonical_string_surface = self.canonical_string_surface;
+        copy.canonical_number_surface = self.canonical_number_surface;
+        copy.canonical_boolean_surface = self.canonical_boolean_surface;
+        copy.canonical_bigint_surface = self.canonical_bigint_surface;
+        copy.canonical_symbol_surface = self.canonical_symbol_surface;
+        copy.canonical_function_surface = self.canonical_function_surface;
         return copy;
     }
 
@@ -142,6 +158,40 @@ pub const TypeStore = struct {
 
     pub fn canonicalStringSurface(self: *const TypeStore) ?model.TypeId {
         return self.canonical_string_surface;
+    }
+
+    pub fn registerCanonicalNumberSurface(self: *TypeStore, type_id: model.TypeId) void {
+        self.canonical_number_surface = type_id;
+    }
+
+    pub fn registerCanonicalBooleanSurface(self: *TypeStore, type_id: model.TypeId) void {
+        self.canonical_boolean_surface = type_id;
+    }
+
+    pub fn registerCanonicalBigIntSurface(self: *TypeStore, type_id: model.TypeId) void {
+        self.canonical_bigint_surface = type_id;
+    }
+
+    pub fn registerCanonicalSymbolSurface(self: *TypeStore, type_id: model.TypeId) void {
+        self.canonical_symbol_surface = type_id;
+    }
+
+    pub fn registerCanonicalFunctionSurface(self: *TypeStore, type_id: model.TypeId) void {
+        self.canonical_function_surface = type_id;
+    }
+
+    pub fn canonicalPrimitiveSurface(self: *const TypeStore, primitive: builtin_kind.BuiltinKind) ?model.TypeId {
+        return switch (primitive) {
+            .number => self.canonical_number_surface,
+            .boolean => self.canonical_boolean_surface,
+            .bigint => self.canonical_bigint_surface,
+            .symbol => self.canonical_symbol_surface,
+            else => null,
+        };
+    }
+
+    pub fn canonicalFunctionSurface(self: *const TypeStore) ?model.TypeId {
+        return self.canonical_function_surface;
     }
 
     fn findArrayType(self: *const TypeStore, type_id: model.TypeId, depth: usize) ?model.TypeId {

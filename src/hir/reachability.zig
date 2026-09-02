@@ -8,7 +8,16 @@ pub const trigger_canonical_array_base: u32 = 1 << 0;
 pub const trigger_place_deleted: u32 = 1 << 1;
 pub const trigger_primitive_string_base: u32 = 1 << 2;
 pub const trigger_string_concat_add: u32 = 1 << 3;
-const known_trigger_flags = trigger_canonical_array_base | trigger_place_deleted | trigger_primitive_string_base | trigger_string_concat_add;
+pub const trigger_primitive_number_base: u32 = 1 << 4;
+pub const trigger_primitive_boolean_base: u32 = 1 << 5;
+pub const trigger_primitive_bigint_base: u32 = 1 << 6;
+pub const trigger_primitive_symbol_base: u32 = 1 << 7;
+pub const trigger_function_base: u32 = 1 << 8;
+const known_trigger_flags = trigger_canonical_array_base | trigger_place_deleted |
+    trigger_primitive_string_base | trigger_string_concat_add |
+    trigger_primitive_number_base | trigger_primitive_boolean_base |
+    trigger_primitive_bigint_base | trigger_primitive_symbol_base |
+    trigger_function_base;
 
 /// Host-defined hidden semantic dependency. `operation_tag` is the stable HIR
 /// operation ordinal exported by the HIR ABI; `language_item_id` is opaque to
@@ -632,6 +641,17 @@ const State = struct {
             };
             if (!try self.valueIsPrimitiveString(base)) return false;
         }
+        const foundational_flags = trigger.flags & (trigger_primitive_number_base |
+            trigger_primitive_boolean_base | trigger_primitive_bigint_base |
+            trigger_primitive_symbol_base | trigger_function_base);
+        if (foundational_flags != 0) {
+            const base = switch (operation) {
+                .make_property_place => |value| value.base,
+                .make_element_place => |value| value.base,
+                else => return false,
+            };
+            if (!try self.valueMatchesFoundationalFlag(base, foundational_flags)) return false;
+        }
         if ((trigger.flags & trigger_place_deleted) != 0) {
             const place = switch (operation) {
                 .make_property_place => |value| value.result,
@@ -660,6 +680,22 @@ const State = struct {
         const ty = self.type_store.lookup(type_id) orelse return error.InconsistentProjection;
         return switch (ty.kind) {
             .primitive => |primitive| primitive == .string,
+            else => false,
+        };
+    }
+
+    fn valueMatchesFoundationalFlag(self: *State, value: ids.ValueId, flag: u32) !bool {
+        const type_id = self.index.valueType(value) orelse return error.InconsistentProjection;
+        const ty = self.type_store.lookup(type_id) orelse return error.InconsistentProjection;
+        return switch (ty.kind) {
+            .primitive => |primitive| switch (primitive) {
+                .number => flag == trigger_primitive_number_base,
+                .boolean => flag == trigger_primitive_boolean_base,
+                .bigint => flag == trigger_primitive_bigint_base,
+                .symbol => flag == trigger_primitive_symbol_base,
+                else => false,
+            },
+            .function => flag == trigger_function_base,
             else => false,
         };
     }

@@ -522,6 +522,11 @@ fn analyzeModuleGraphData(
 const canonical_array_language_item_id: u64 = 0x0002;
 const canonical_string_language_item_id: u64 = 0x0003;
 const canonical_array_constructor_language_item_id: u64 = 0x0005;
+const canonical_number_language_item_id: u64 = 0x0006;
+const canonical_boolean_language_item_id: u64 = 0x0007;
+const canonical_bigint_language_item_id: u64 = 0x0008;
+const canonical_symbol_language_item_id: u64 = 0x0009;
+const canonical_function_language_item_id: u64 = 0x000a;
 
 fn registerCanonicalLanguageItemSurfaces(
     graph: *const modules_mod.ModuleGraph,
@@ -531,7 +536,12 @@ fn registerCanonicalLanguageItemSurfaces(
     for (graph.source_language_items) |item| {
         if (item.id != canonical_array_language_item_id and
             item.id != canonical_string_language_item_id and
-            item.id != canonical_array_constructor_language_item_id) continue;
+            item.id != canonical_array_constructor_language_item_id and
+            item.id != canonical_number_language_item_id and
+            item.id != canonical_boolean_language_item_id and
+            item.id != canonical_bigint_language_item_id and
+            item.id != canonical_symbol_language_item_id and
+            item.id != canonical_function_language_item_id) continue;
         for (exports) |exported| {
             if (exported.module_id != item.module or
                 !std.mem.eql(u8, exported.name, item.exported_name)) continue;
@@ -544,6 +554,16 @@ fn registerCanonicalLanguageItemSurfaces(
                 type_store.registerCanonicalStringSurface(exported.identity.type_id);
             } else if (item.id == canonical_array_constructor_language_item_id and !item.type_only) {
                 type_store.registerCanonicalArrayConstructor(exported.identity.type_id);
+            } else if (item.id == canonical_number_language_item_id and item.type_only) {
+                type_store.registerCanonicalNumberSurface(exported.identity.type_id);
+            } else if (item.id == canonical_boolean_language_item_id and item.type_only) {
+                type_store.registerCanonicalBooleanSurface(exported.identity.type_id);
+            } else if (item.id == canonical_bigint_language_item_id and item.type_only) {
+                type_store.registerCanonicalBigIntSurface(exported.identity.type_id);
+            } else if (item.id == canonical_symbol_language_item_id and item.type_only) {
+                type_store.registerCanonicalSymbolSurface(exported.identity.type_id);
+            } else if (item.id == canonical_function_language_item_id and item.type_only) {
+                type_store.registerCanonicalFunctionSurface(exported.identity.type_id);
             }
             break;
         }

@@ -3275,6 +3275,56 @@ test "authorized renamed String language item supplies primitive string members"
     try std.testing.expect(saw_cut);
 }
 
+test "authorized renamed foundational language items supply primitive and function members" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{
+        .{ .id = .init(6), .module_id = .init(37), .exported_name = "NumericSurface", .namespace = .type },
+        .{ .id = .init(7), .module_id = .init(37), .exported_name = "TruthSurface", .namespace = .type },
+        .{ .id = .init(8), .module_id = .init(37), .exported_name = "IntegerSurface", .namespace = .type },
+        .{ .id = .init(9), .module_id = .init(37), .exported_name = "IdentitySurface", .namespace = .type },
+        .{ .id = .init(10), .module_id = .init(37), .exported_name = "CallableSurface", .namespace = .type },
+    });
+    try project.addRoot(.{
+        .id = .init(37),
+        .logical_name = "replacement-foundational-std.ts",
+        .bytes =
+        \\export interface NumericSurface { numericText(): string; }
+        \\export interface TruthSurface { truthText(): string; }
+        \\export interface IntegerSurface { integerText(): string; }
+        \\export interface IdentitySurface { identityText(): string; }
+        \\export interface CallableSurface { invokeText(): string; }
+        ,
+    });
+    try project.addRoot(.{
+        .id = .init(38),
+        .logical_name = "foundational-consumer.ts",
+        .bytes =
+        \\const numericText = (1).numericText();
+        \\const truthText = true.truthText();
+        \\const integerText = 1n.integerText();
+        \\const identityText = ({} as symbol).identityText();
+        \\const invokeText = (() => 1).invokeText();
+        ,
+    });
+    while (try project.step() != .complete) {}
+    const finished = try project.finish();
+    try std.testing.expect(!finished.has_failures);
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+
+    const semantic = project.semanticResult().?;
+    const consumer = semantic.lookupModule(38) orelse return error.TestExpectedConsumerModule;
+    const source = project.find(.init(38)).?.semantic_result.?;
+    var found: usize = 0;
+    for (source.frontend.bind.symbols) |symbol| {
+        if (!std.mem.endsWith(u8, symbol.name, "Text")) continue;
+        const info = consumer.type_info.lookupSymbol(symbol.id) orelse continue;
+        try std.testing.expectEqual(semantic.type_store.builtins.string, info.effective());
+        found += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), found);
+}
+
 test "canonical Array constructor accepts explicit element type arguments" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
