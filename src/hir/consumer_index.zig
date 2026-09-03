@@ -332,8 +332,12 @@ pub const Index = struct {
             @memcpy(writer_instructions[start..end], list.items);
         }
 
-        // Names are projection metadata only. Resolve them once by stable
-        // declaration identity instead of rescanning every binding per query.
+        // Names are projection metadata only. Seed explicit function
+        // declarations from stable semantic identity, then infer the names
+        // JavaScript/TypeScript gives anonymous function values from the HIR
+        // consumers that install them into bindings, properties, methods, or
+        // class entities. This stays linear in canonical HIR size and avoids
+        // rescanning the source AST for every function.
         for (project.functions, 0..) |hir_function, function_index| {
             const symbol = hir_function.symbol orelse continue;
             const provider = result.semantic_providers.get(symbol) orelse continue;
@@ -342,8 +346,144 @@ pub const Index = struct {
                 if (hir_binding.kind == .function) function_names[function_index] = hir_binding.name;
             }
         }
+        try result.inferFunctionProjectionNames(project, function_names);
 
         return result;
+    }
+
+    fn inferFunctionProjectionNames(
+        self: *const Index,
+        project: model.HirProject,
+        names: [][]const u8,
+    ) !void {
+        // Module initialization is a real generated function with a stable
+        // role even though it has no source declaration name.
+        for (project.modules) |module|
+            try self.setFunctionNameIfEmpty(names, module.initialization, "<module-init>");
+
+        // Class methods are not HIR bindings, so declaration-identity lookup
+        // cannot recover their source names. The class entity is the canonical
+        // owner of this relation and therefore the correct projection source.
+        for (project.entities) |hir_entity| switch (hir_entity.kind) {
+            .class => |class| {
+                try self.setFunctionNameIfEmpty(names, class.constructor, "constructor");
+                for (class.methods) |method| switch (method.name) {
+                    .static => |name| try self.setFunctionNameIfEmpty(names, method.function, name),
+                    else => {},
+                };
+                if (class.instance_initializer) |initializer_function|
+                    try self.setFunctionNameIfEmpty(names, initializer_function, "<instance-field-init>");
+                if (class.static_initializer) |initializer_function|
+                    try self.setFunctionNameIfEmpty(names, initializer_function, "<static-field-init>");
+            },
+            else => {},
+        };
+
+        // Function values acquire useful projection names at their semantic
+        // installation site. Existing explicit names always win.
+        for (project.functions) |hir_function| {
+            for (hir_function.blocks) |hir_block| {
+                for (hir_block.instructions) |hir_instruction| switch (hir_instruction.operation) {
+                    .initialize_binding => |payload| {
+                        const target = self.closureFunctionForValue(project, payload.value) orelse continue;
+                        const binding_ordinal = self.bindingOrdinal(payload.binding) orelse return error.InconsistentProjection;
+                        const hir_binding = self.binding(project, binding_ordinal) orelse return error.InconsistentProjection;
+                        try self.setFunctionNameIfEmpty(names, target, hir_binding.name);
+                    },
+                    .store_binding => |payload| {
+                        const target = self.closureFunctionForValue(project, payload.value) orelse continue;
+                        const binding_ordinal = self.bindingOrdinal(payload.binding) orelse return error.InconsistentProjection;
+                        const hir_binding = self.binding(project, binding_ordinal) orelse return error.InconsistentProjection;
+                        try self.setFunctionNameIfEmpty(names, target, hir_binding.name);
+                    },
+                    .store_place => |payload| {
+                        const target = self.closureFunctionForValue(project, payload.value) orelse continue;
+                        const name = self.placeProjectionName(project, hir_function, payload.place) orelse continue;
+                        try self.setFunctionNameIfEmpty(names, target, name);
+                    },
+                    .define_property => |definition| switch (definition.key) {
+                        .static => |name| {
+                            const target = self.closureFunctionForValue(project, definition.value) orelse continue;
+                            try self.setFunctionNameIfEmpty(names, target, name);
+                        },
+                        else => {},
+                    },
+                    .define_method => |definition| switch (definition.key) {
+                        .static => |name| try self.setFunctionNameIfEmpty(names, definition.function, name),
+                        else => {},
+                    },
+                    .apply_pattern => |plan| for (plan.items) |item| switch (item) {
+                        .default_initializer => |value| {
+                            const target = self.closureFunctionForValue(project, value) orelse continue;
+                            try self.setFunctionNameIfEmpty(names, target, "<pattern-default>");
+                        },
+                        else => {},
+                    },
+                    else => {},
+                };
+            }
+        }
+    }
+
+    fn placeProjectionName(
+        self: *const Index,
+        project: model.HirProject,
+        hir_function: model.HirFunction,
+        place_id: ids.PlaceId,
+    ) ?[]const u8 {
+        for (hir_function.places) |place| {
+            if ((self.rawId(place.id) orelse continue) != (self.rawId(place_id) orelse return null)) continue;
+            return switch (place.kind) {
+                .binding => |binding_id| blk: {
+                    const ordinal = self.bindingOrdinal(binding_id) orelse break :blk null;
+                    const hir_binding = self.binding(project, ordinal) orelse break :blk null;
+                    break :blk hir_binding.name;
+                },
+                .property => |property| switch (property.key) {
+                    .static => |name| name,
+                    else => null,
+                },
+                .super_property => |property| switch (property.key) {
+                    .static => |name| name,
+                    else => null,
+                },
+                .element => null,
+            };
+        }
+        return null;
+    }
+
+    fn setFunctionNameIfEmpty(
+        self: *const Index,
+        names: [][]const u8,
+        function_id: ids.FunctionId,
+        candidate: []const u8,
+    ) !void {
+        if (candidate.len == 0) return;
+        const ordinal = self.functionOrdinal(function_id) orelse return error.InconsistentProjection;
+        if (ordinal >= names.len) return error.InconsistentProjection;
+        if (names[ordinal].len == 0) names[ordinal] = candidate;
+    }
+
+    fn closureFunctionForValue(
+        self: *const Index,
+        project: model.HirProject,
+        start: ids.ValueId,
+    ) ?ids.FunctionId {
+        var value = start;
+        // Canonicalization may leave short copy chains. Bound traversal so a
+        // malformed/cyclic HIR graph cannot turn projection indexing into an
+        // unbounded walk; the verifier owns graph validity separately.
+        for (0..64) |_| {
+            const producer_ordinal = self.producerInstructionOrdinal(value) orelse return null;
+            const producer = self.instruction(project, producer_ordinal) orelse return null;
+            switch (producer.operation) {
+                .create_closure => |function_id| return function_id,
+                .copy => |source| value = source,
+                else => return null,
+            }
+        }
+        return null;
     }
 
     pub fn deinit(self: *Index) void {

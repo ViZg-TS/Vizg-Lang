@@ -8,7 +8,7 @@ pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
 pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 8;
-pub const VIZG_HIR_REACHABILITY_API_VERSION: u32 = 1;
+pub const VIZG_HIR_REACHABILITY_API_VERSION: u32 = 2;
 pub const VIZG_HIR_CONSUMER_API_VERSION: u32 = 1;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
 pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION: u32 = vizg.language_item_contract_version;
@@ -548,6 +548,11 @@ pub const VIZG_HIR_REACH_TRIGGER_PRIMITIVE_BIGINT_BASE: u32 = 1 << 6;
 pub const VIZG_HIR_REACH_TRIGGER_PRIMITIVE_SYMBOL_BASE: u32 = 1 << 7;
 pub const VIZG_HIR_REACH_TRIGGER_FUNCTION_BASE: u32 = 1 << 8;
 
+pub const VIZG_HIR_PROPERTY_SURFACE_PRIMITIVE_STRING: u32 = 1 << 0;
+pub const VIZG_HIR_PROPERTY_SURFACE_CANONICAL_ARRAY: u32 = 1 << 1;
+pub const VIZG_HIR_PROPERTY_SURFACE_HAS_EXPOSURE_INTRINSIC: u32 = 1 << 8;
+pub const Vizg_HirPropertySurfaceRule = vizg.hir.reachability.PropertySurfaceRule;
+
 pub const Vizg_HirReachabilityRequest = extern struct {
     public_module_ids_ptr: [*c]const u64,
     public_module_count: usize,
@@ -555,6 +560,8 @@ pub const Vizg_HirReachabilityRequest = extern struct {
     application_module_count: usize,
     triggers_ptr: [*c]const Vizg_HirReachabilityTrigger,
     trigger_count: usize,
+    property_surface_rules_ptr: [*c]const Vizg_HirPropertySurfaceRule,
+    property_surface_rule_count: usize,
 };
 
 /// Caller-owned storage requirements for one immutable artifact reachability
@@ -2613,14 +2620,17 @@ pub fn hirReachabilityAnalyze(
         return .INVALID_ARGUMENT;
     if (!validAlignedHostArray(u64, request.public_module_ids_ptr, request.public_module_count) or
         !validAlignedHostArray(u64, request.application_module_ids_ptr, request.application_module_count) or
-        !validAlignedHostArray(Vizg_HirReachabilityTrigger, request.triggers_ptr, request.trigger_count))
+        !validAlignedHostArray(Vizg_HirReachabilityTrigger, request.triggers_ptr, request.trigger_count) or
+        !validAlignedHostArray(Vizg_HirPropertySurfaceRule, request.property_surface_rules_ptr, request.property_surface_rule_count))
         return .INVALID_ARGUMENT;
     const public_modules_bytes = checkedByteLen(u64, request.public_module_count) orelse return .INVALID_ARGUMENT;
     const application_modules_bytes = checkedByteLen(u64, request.application_module_count) orelse return .INVALID_ARGUMENT;
     const triggers_bytes = checkedByteLen(Vizg_HirReachabilityTrigger, request.trigger_count) orelse return .INVALID_ARGUMENT;
+    const property_surface_rules_bytes = checkedByteLen(Vizg_HirPropertySurfaceRule, request.property_surface_rule_count) orelse return .INVALID_ARGUMENT;
     if (!inputOutsideWorkspace(owned.owner, request.public_module_ids_ptr, public_modules_bytes) or
         !inputOutsideWorkspace(owned.owner, request.application_module_ids_ptr, application_modules_bytes) or
-        !inputOutsideWorkspace(owned.owner, request.triggers_ptr, triggers_bytes))
+        !inputOutsideWorkspace(owned.owner, request.triggers_ptr, triggers_bytes) or
+        !inputOutsideWorkspace(owned.owner, request.property_surface_rules_ptr, property_surface_rules_bytes))
         return .INVALID_ARGUMENT;
 
     const hir_result = &owned.hir_result.?;
@@ -2682,6 +2692,7 @@ pub fn hirReachabilityAnalyze(
         .{ .ptr = @ptrCast(request.public_module_ids_ptr), .len = public_modules_bytes },
         .{ .ptr = @ptrCast(request.application_module_ids_ptr), .len = application_modules_bytes },
         .{ .ptr = @ptrCast(request.triggers_ptr), .len = triggers_bytes },
+        .{ .ptr = @ptrCast(request.property_surface_rules_ptr), .len = property_surface_rules_bytes },
     };
     for (output_ranges, 0..) |left, left_index| {
         if (left.len != 0 and !outputOutsideWorkspace(owned, left.ptr, left.len)) return .INVALID_ARGUMENT;
@@ -2700,6 +2711,7 @@ pub fn hirReachabilityAnalyze(
     const public_modules: []const u64 = if (request.public_module_count == 0) &.{} else request.public_module_ids_ptr[0..request.public_module_count];
     const application_modules: []const u64 = if (request.application_module_count == 0) &.{} else request.application_module_ids_ptr[0..request.application_module_count];
     const triggers: []const Vizg_HirReachabilityTrigger = if (request.trigger_count == 0) &.{} else request.triggers_ptr[0..request.trigger_count];
+    const property_surface_rules: []const Vizg_HirPropertySurfaceRule = if (request.property_surface_rule_count == 0) &.{} else request.property_surface_rules_ptr[0..request.property_surface_rule_count];
     const scratch_raw: []u8 = if (buffers.scratch_len == 0) &.{} else buffers.scratch_ptr[0..buffers.scratch_len];
     const scratch: []align(@alignOf(u64)) u8 = @alignCast(scratch_raw);
 
@@ -2709,6 +2721,7 @@ pub fn hirReachabilityAnalyze(
             .public_modules = public_modules,
             .application_modules = application_modules,
             .language_item_triggers = triggers,
+            .property_surface_rules = property_surface_rules,
         },
         .{
             .module_bits = if (buffers.module_word_count == 0) &.{} else buffers.module_bits_ptr[0..buffers.module_word_count],

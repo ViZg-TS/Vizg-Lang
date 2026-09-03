@@ -28,10 +28,37 @@ pub const LanguageItemTrigger = extern struct {
     language_item_id: u64,
 };
 
+pub const property_surface_primitive_string: u32 = 1 << 0;
+pub const property_surface_canonical_array: u32 = 1 << 1;
+pub const property_surface_has_exposure_intrinsic: u32 = 1 << 8;
+const known_property_surface_flags = property_surface_primitive_string |
+    property_surface_canonical_array | property_surface_has_exposure_intrinsic;
+
+/// Host-owned description of one hidden property-registration surface. ViZG
+/// interprets only stable intrinsic identities, argument positions, and HIR
+/// receiver types. Source/module/function spelling never participates.
+///
+/// Registrations with statically recoverable string keys become conditional
+/// reachability edges. Dynamic/symbolic registrations remain ordinary strong
+/// edges. `exposure_intrinsic_id` is optional and, when enabled by flags,
+/// conservatively activates the whole surface when its receiver is exposed.
+pub const PropertySurfaceRule = extern struct {
+    registration_intrinsic_id: u64,
+    install_intrinsic_id: u64,
+    exposure_intrinsic_id: u64,
+    flags: u32,
+    registration_object_argument: u32,
+    registration_key_argument: u32,
+    registration_value_argument: u32,
+    install_object_argument: u32,
+    exposure_object_argument: u32,
+};
+
 pub const Request = struct {
     public_modules: []const u64 = &.{},
     application_modules: []const u64 = &.{},
     language_item_triggers: []const LanguageItemTrigger = &.{},
+    property_surface_rules: []const PropertySurfaceRule = &.{},
 };
 
 pub const Output = struct {
@@ -57,6 +84,16 @@ pub const Summary = struct {
     external_module_count: usize,
 };
 
+const SurfaceIdentity = union(enum) {
+    binding: u32,
+    value: u32,
+};
+
+const SurfaceInstall = struct {
+    rule_index: u32,
+    identity: SurfaceIdentity,
+};
+
 pub fn wordCount(bit_count: usize) usize {
     return bit_count / 64 + @intFromBool(bit_count % 64 != 0);
 }
@@ -69,6 +106,9 @@ pub fn scratchSize(project: model.HirProject, index: *const consumer_index.Index
     bytes = try addBytes(bytes, u64, wordCount(index.value_producers.len));
     bytes = try addBytes(bytes, u64, wordCount(project.entities.len));
     bytes = try addBytes(bytes, u64, wordCount(index.external_module_ids.len));
+    bytes = try addBytes(bytes, u64, wordCount(index.instructions.len));
+    bytes = try addBytes(bytes, u32, index.instructions.len);
+    bytes = try addBytes(bytes, SurfaceInstall, index.instructions.len);
     bytes = try addBytes(bytes, u32, project.modules.len);
     bytes = try addBytes(bytes, u32, project.functions.len);
     bytes = try addBytes(bytes, u32, index.bindings.len);
@@ -87,6 +127,7 @@ pub fn analyze(
 ) !Summary {
     try validateOutput(project, index, output);
     try validateTriggers(request.language_item_triggers);
+    try validatePropertySurfaceRules(request.property_surface_rules);
     @memset(output.module_bits, 0);
     @memset(output.function_bits, 0);
     @memset(output.block_bits, 0);
@@ -98,9 +139,14 @@ pub fn analyze(
     const traced_value_bits = try allocator.alloc(u64, wordCount(index.value_producers.len));
     const traced_entity_bits = try allocator.alloc(u64, wordCount(project.entities.len));
     const external_bits = try allocator.alloc(u64, wordCount(index.external_module_ids.len));
+    const selected_registration_bits = try allocator.alloc(u64, wordCount(index.instructions.len));
+    const conditional_registration_rules = try allocator.alloc(u32, index.instructions.len);
+    const surface_installs = try allocator.alloc(SurfaceInstall, index.instructions.len);
     @memset(traced_value_bits, 0);
     @memset(traced_entity_bits, 0);
     @memset(external_bits, 0);
+    @memset(conditional_registration_rules, std.math.maxInt(u32));
+    @memset(selected_registration_bits, 0);
 
     const module_queue = try allocator.alloc(u32, project.modules.len);
     const function_queue = try allocator.alloc(u32, project.functions.len);
@@ -117,12 +163,16 @@ pub fn analyze(
         .traced_value_bits = traced_value_bits,
         .traced_entity_bits = traced_entity_bits,
         .external_bits = external_bits,
+        .conditional_registration_rules = conditional_registration_rules,
+        .selected_registration_bits = selected_registration_bits,
+        .surface_installs = surface_installs,
         .module_queue = module_queue,
         .function_queue = function_queue,
         .binding_queue = binding_queue,
         .value_queue = value_queue,
         .external_queue = external_queue,
     };
+    try state.catalogConditionalRegistrations();
 
     for (request.application_modules) |raw| {
         const ordinal = index.module_ordinals.get(raw) orelse return error.UnknownArtifactRoot;
@@ -210,6 +260,10 @@ const State = struct {
     traced_value_bits: []u64,
     traced_entity_bits: []u64,
     external_bits: []u64,
+    conditional_registration_rules: []u32,
+    selected_registration_bits: []u64,
+    surface_installs: []SurfaceInstall,
+    surface_install_len: usize = 0,
 
     module_queue: []u32,
     function_queue: []u32,
@@ -231,6 +285,201 @@ const State = struct {
             self.function_head < self.function_len or
             self.binding_head < self.binding_len or
             self.value_head < self.value_len;
+    }
+
+    fn catalogConditionalRegistrations(self: *State) !void {
+        if (self.request.property_surface_rules.len == 0) return;
+
+        // First record default-surface installation identities in one linear
+        // HIR scan. Registration classification below then compares only
+        // against this bounded install list instead of rescanning the whole
+        // project once per registration.
+        for (self.project.functions) |function| {
+            for (function.blocks) |block| {
+                for (block.instructions) |instruction| {
+                    const call = switch (instruction.operation) {
+                        .intrinsic_call => |value| value,
+                        else => continue,
+                    };
+                    for (self.request.property_surface_rules, 0..) |rule, rule_index| {
+                        if (call.intrinsic.value() != rule.install_intrinsic_id) continue;
+                        const object_value = callArgumentAt(call.arguments, rule.install_object_argument) orelse continue;
+                        if (self.surface_install_len >= self.surface_installs.len) return error.InconsistentProjection;
+                        self.surface_installs[self.surface_install_len] = .{
+                            .rule_index = @intCast(rule_index),
+                            .identity = try self.surfaceIdentity(object_value, 0),
+                        };
+                        self.surface_install_len += 1;
+                    }
+                }
+            }
+        }
+
+        // A registration is conditional only when its key is a statically
+        // recoverable string and its receiver is one of the host-declared
+        // installed hidden surfaces. Symbol/dynamic keys remain strong edges.
+        for (self.project.functions) |function| {
+            for (function.blocks) |block| {
+                for (block.instructions) |instruction| {
+                    const call = switch (instruction.operation) {
+                        .intrinsic_call => |value| value,
+                        else => continue,
+                    };
+                    for (self.request.property_surface_rules, 0..) |rule, rule_index| {
+                        if (call.intrinsic.value() != rule.registration_intrinsic_id) continue;
+                        const object_value = callArgumentAt(call.arguments, rule.registration_object_argument) orelse continue;
+                        const key_value = callArgumentAt(call.arguments, rule.registration_key_argument) orelse continue;
+                        _ = callArgumentAt(call.arguments, rule.registration_value_argument) orelse continue;
+                        if ((try self.staticStringValue(key_value, 0)) == null) continue;
+                        const object_identity = try self.surfaceIdentity(object_value, 0);
+                        if (!self.surfaceInstalled(@intCast(rule_index), object_identity)) continue;
+
+                        const ordinal = self.index.instructionOrdinal(instruction.id) orelse return error.InconsistentProjection;
+                        if (self.conditional_registration_rules[ordinal] != std.math.maxInt(u32))
+                            return error.InconsistentProjection;
+                        self.conditional_registration_rules[ordinal] = @intCast(rule_index);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn surfaceInstalled(self: *const State, rule_index: u32, identity: SurfaceIdentity) bool {
+        for (self.surface_installs[0..self.surface_install_len]) |install| {
+            if (install.rule_index == rule_index and sameSurfaceIdentity(identity, install.identity)) return true;
+        }
+        return false;
+    }
+
+    fn surfaceIdentity(self: *State, value: ids.ValueId, depth: usize) !SurfaceIdentity {
+        if (depth > 64) return error.InconsistentProjection;
+        const value_ordinal = self.index.valueOrdinal(value) orelse return error.InconsistentProjection;
+        const producer_ordinal = self.index.value_producers[value_ordinal] orelse return .{ .value = value_ordinal };
+        const producer = self.index.instruction(self.project, producer_ordinal) orelse return error.InconsistentProjection;
+        return switch (producer.operation) {
+            .copy => |source| self.surfaceIdentity(source, depth + 1),
+            .load_binding => |binding| .{ .binding = self.index.bindingOrdinal(binding) orelse return error.InconsistentProjection },
+            else => .{ .value = value_ordinal },
+        };
+    }
+
+    fn staticStringValue(self: *State, value: ids.ValueId, depth: usize) !?[]const u8 {
+        if (depth > 64) return null;
+        const value_ordinal = self.index.valueOrdinal(value) orelse return error.InconsistentProjection;
+        const producer_ordinal = self.index.value_producers[value_ordinal] orelse return null;
+        const producer = self.index.instruction(self.project, producer_ordinal) orelse return error.InconsistentProjection;
+        return switch (producer.operation) {
+            .constant => |constant| switch (constant) {
+                .string => |text| text,
+                else => null,
+            },
+            .copy => |source| self.staticStringValue(source, depth + 1),
+            .load_binding => |binding| blk: {
+                const writers = self.index.writersForBinding(binding);
+                if (writers.len != 1) break :blk null;
+                const writer = self.index.instruction(self.project, writers[0]) orelse return error.InconsistentProjection;
+                const source = switch (writer.operation) {
+                    .initialize_binding => |payload| payload.value,
+                    .store_binding => |payload| payload.value,
+                    else => break :blk null,
+                };
+                break :blk try self.staticStringValue(source, depth + 1);
+            },
+            else => null,
+        };
+    }
+
+    fn conditionalRuleForInstruction(self: *const State, instruction_ordinal: u32) ?u32 {
+        if (@as(usize, instruction_ordinal) >= self.conditional_registration_rules.len) return null;
+        const value = self.conditional_registration_rules[instruction_ordinal];
+        return if (value == std.math.maxInt(u32)) null else value;
+    }
+
+    fn registrationSelected(self: *const State, instruction_ordinal: u32) bool {
+        return bitIsSet(self.selected_registration_bits, instruction_ordinal);
+    }
+
+    fn selectRegistration(self: *State, instruction_ordinal: u32) !void {
+        if (!setBitNew(self.selected_registration_bits, instruction_ordinal)) return;
+        const instruction = self.index.instruction(self.project, instruction_ordinal) orelse return error.InconsistentProjection;
+        const call = switch (instruction.operation) {
+            .intrinsic_call => |value| value,
+            else => return error.InconsistentProjection,
+        };
+        // Once selected, this is an ordinary effectful intrinsic call. Trace
+        // every argument so closure creation and its target function enter the
+        // same semantic fixed point as any other reached call.
+        try self.traceArguments(call.arguments);
+    }
+
+    fn activateSurfaceDemand(self: *State, rule_index: u32, key: ?[]const u8) !void {
+        if (@as(usize, rule_index) >= self.request.property_surface_rules.len) return error.InconsistentProjection;
+        for (self.conditional_registration_rules, 0..) |candidate_rule, instruction_ordinal| {
+            if (candidate_rule != rule_index or self.registrationSelected(@intCast(instruction_ordinal))) continue;
+            if (key) |wanted| {
+                const instruction = self.index.instruction(self.project, @intCast(instruction_ordinal)) orelse return error.InconsistentProjection;
+                const call = switch (instruction.operation) {
+                    .intrinsic_call => |value| value,
+                    else => return error.InconsistentProjection,
+                };
+                const rule = self.request.property_surface_rules[rule_index];
+                const key_value = callArgumentAt(call.arguments, rule.registration_key_argument) orelse return error.InconsistentProjection;
+                const candidate_key = (try self.staticStringValue(key_value, 0)) orelse return error.InconsistentProjection;
+                if (!std.mem.eql(u8, wanted, candidate_key)) continue;
+            }
+            try self.selectRegistration(@intCast(instruction_ordinal));
+        }
+    }
+
+    fn applyPropertySurfaceDemands(self: *State, instruction: model.HirInstruction) !void {
+        if (self.request.property_surface_rules.len == 0) return;
+        switch (instruction.operation) {
+            .make_property_place => |value| {
+                if (!self.index.placeIsConsumed(value.result)) return;
+                try self.activateRulesForReceiver(value.base, try self.propertyDemandKey(value.key));
+            },
+            .make_element_place => |value| {
+                if (!self.index.placeIsConsumed(value.result)) return;
+                const key = try self.staticStringValue(value.key, 0);
+                try self.activateRulesForReceiver(value.base, key);
+            },
+            .call_method, .call_super_method => |value| {
+                try self.activateRulesForReceiver(value.receiver, try self.propertyDemandKey(value.key));
+            },
+            .intrinsic_call => |call| {
+                for (self.request.property_surface_rules, 0..) |rule, rule_index| {
+                    if ((rule.flags & property_surface_has_exposure_intrinsic) == 0 or
+                        call.intrinsic.value() != rule.exposure_intrinsic_id) continue;
+                    const receiver = callArgumentAt(call.arguments, rule.exposure_object_argument) orelse continue;
+                    if (try self.ruleMatchesReceiver(rule, receiver))
+                        try self.activateSurfaceDemand(@intCast(rule_index), null);
+                }
+            },
+            else => {},
+        }
+    }
+
+
+    fn propertyDemandKey(self: *State, key: model.PropertyKey) !?[]const u8 {
+        return switch (key) {
+            .static => |name| name,
+            .computed => |value| self.staticStringValue(value, 0),
+            .private => null,
+        };
+    }
+
+    fn activateRulesForReceiver(self: *State, receiver: ids.ValueId, key: ?[]const u8) !void {
+        for (self.request.property_surface_rules, 0..) |rule, rule_index| {
+            if (try self.ruleMatchesReceiver(rule, receiver))
+                try self.activateSurfaceDemand(@intCast(rule_index), key);
+        }
+    }
+
+    fn ruleMatchesReceiver(self: *State, rule: PropertySurfaceRule, receiver: ids.ValueId) !bool {
+        if ((rule.flags & property_surface_primitive_string) != 0 and try self.valueIsPrimitiveString(receiver)) return true;
+        if ((rule.flags & property_surface_canonical_array) != 0 and try self.valueIsCanonicalArray(receiver)) return true;
+        return false;
     }
 
     fn reachModuleOrdinal(self: *State, ordinal: u32) !void {
@@ -347,6 +596,10 @@ const State = struct {
             _ = setBitNew(self.output.block_bits, block_ordinal);
             try self.traceTerminator(block.terminator);
             for (block.instructions) |instruction| {
+                try self.applyPropertySurfaceDemands(instruction);
+                const instruction_ordinal = self.index.instructionOrdinal(instruction.id) orelse return error.InconsistentProjection;
+                if (self.conditionalRuleForInstruction(instruction_ordinal) != null and
+                    !self.registrationSelected(instruction_ordinal)) continue;
                 try self.traceOperation(instruction.operation);
                 try self.applyLanguageItemTriggers(instruction);
             }
@@ -413,6 +666,9 @@ const State = struct {
     fn processValue(self: *State, ordinal: u32) !void {
         const instruction_ordinal = self.index.value_producers[ordinal] orelse return;
         const instruction = self.index.instruction(self.project, instruction_ordinal) orelse return error.InconsistentProjection;
+        if (self.conditionalRuleForInstruction(instruction_ordinal) != null and
+            !self.registrationSelected(instruction_ordinal))
+            try self.selectRegistration(instruction_ordinal);
         switch (instruction.operation) {
             .create_closure => |function| try self.reachFunction(function),
             .copy => |value| try self.traceValue(value),
@@ -680,6 +936,9 @@ const State = struct {
         const ty = self.type_store.lookup(type_id) orelse return error.InconsistentProjection;
         return switch (ty.kind) {
             .primitive => |primitive| primitive == .string,
+            // Direct string literals retain literal types in some HIR paths.
+            // They are semantically primitive strings for member reachability.
+            .literal => |literal| switch (literal) { .string => true, else => false },
             else => false,
         };
     }
@@ -738,6 +997,9 @@ const State = struct {
     }
 
     fn omitInstruction(self: *State, instruction: model.HirInstruction) !bool {
+        const instruction_ordinal = self.index.instructionOrdinal(instruction.id) orelse return error.InconsistentProjection;
+        if (self.conditionalRuleForInstruction(instruction_ordinal) != null and
+            !self.registrationSelected(instruction_ordinal)) return true;
         if (self.deadPlaceDefinition(instruction.operation)) return true;
         switch (instruction.operation) {
             .create_closure => {
@@ -809,6 +1071,44 @@ fn validateTriggers(triggers: []const LanguageItemTrigger) !void {
         if (@as(usize, trigger.operation_tag) >= operation_count or (trigger.flags & ~known_trigger_flags) != 0)
             return error.InvalidTrigger;
     }
+}
+
+fn validatePropertySurfaceRules(rules: []const PropertySurfaceRule) !void {
+    for (rules, 0..) |rule, rule_index| {
+        const surface_flags = rule.flags & (property_surface_primitive_string | property_surface_canonical_array);
+        if ((rule.flags & ~known_property_surface_flags) != 0 or @popCount(surface_flags) != 1)
+            return error.InvalidPropertySurfaceRule;
+        if (rule.registration_intrinsic_id == rule.install_intrinsic_id)
+            return error.InvalidPropertySurfaceRule;
+        if ((rule.flags & property_surface_has_exposure_intrinsic) != 0 and rule.exposure_intrinsic_id == 0)
+            return error.InvalidPropertySurfaceRule;
+        for (rules[0..rule_index]) |previous| {
+            // One stable install intrinsic identifies exactly one hidden
+            // surface. This also bounds the install catalog to instruction
+            // count without request-sized scratch allocation.
+            if (previous.install_intrinsic_id == rule.install_intrinsic_id)
+                return error.InvalidPropertySurfaceRule;
+        }
+    }
+}
+
+fn callArgumentAt(arguments: []const model.CallArgument, index: u32) ?ids.ValueId {
+    if (@as(usize, index) >= arguments.len) return null;
+    return arguments[@intCast(index)].operand();
+}
+
+
+fn sameSurfaceIdentity(left: SurfaceIdentity, right: SurfaceIdentity) bool {
+    return switch (left) {
+        .binding => |left_value| switch (right) {
+            .binding => |right_value| left_value == right_value,
+            .value => false,
+        },
+        .value => |left_value| switch (right) {
+            .binding => false,
+            .value => |right_value| left_value == right_value,
+        },
+    };
 }
 
 fn setBitNew(words: []u64, ordinal: usize) bool {

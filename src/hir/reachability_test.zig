@@ -36,6 +36,16 @@ fn analyzeForTest(
     application_modules: []const u64,
     triggers: []const hir.reachability.LanguageItemTrigger,
 ) !TestReachability {
+    return analyzeForTestWithRules(result, public_modules, application_modules, triggers, &.{});
+}
+
+fn analyzeForTestWithRules(
+    result: *const hir.HirResult,
+    public_modules: []const u64,
+    application_modules: []const u64,
+    triggers: []const hir.reachability.LanguageItemTrigger,
+    property_surface_rules: []const hir.reachability.PropertySurfaceRule,
+) !TestReachability {
     var scratch: [64 * 1024]u8 align(@alignOf(u64)) = undefined;
     const required = try result.artifactReachabilityScratchSize();
     if (required > scratch.len) return error.TestReachabilityScratchTooSmall;
@@ -47,6 +57,7 @@ fn analyzeForTest(
             .public_modules = public_modules,
             .application_modules = application_modules,
             .language_item_triggers = triggers,
+            .property_surface_rules = property_surface_rules,
         },
         .{
             .module_bits = output.module_bits[0..],
@@ -104,6 +115,28 @@ fn functionOrdinalByName(result: *const hir.HirResult, name: []const u8) ?usize 
     for (result.consumerIndex().function_names, 0..) |candidate, ordinal|
         if (std.mem.eql(u8, candidate, name)) return ordinal;
     return null;
+}
+
+test "HIR projection infers stable names for anonymous function installation sites" {
+    var result = try loweredRoot(
+        1042,
+        \\const assigned = (value) => value;
+        \\const api = {
+        \\  log: (value) => value,
+        \\  method(value) { return value; },
+        \\};
+        \\class Box { read() { return 1; } }
+        \\function declared() { return 1; }
+    );
+    defer result.deinit();
+
+    try std.testing.expect(functionOrdinalByName(&result, "<module-init>") != null);
+    try std.testing.expect(functionOrdinalByName(&result, "assigned") != null);
+    try std.testing.expect(functionOrdinalByName(&result, "log") != null);
+    try std.testing.expect(functionOrdinalByName(&result, "method") != null);
+    try std.testing.expect(functionOrdinalByName(&result, "read") != null);
+    try std.testing.expect(functionOrdinalByName(&result, "constructor") != null);
+    try std.testing.expect(functionOrdinalByName(&result, "declared") != null);
 }
 
 fn bindingOrdinalByName(result: *const hir.HirResult, name: []const u8) ?usize {
@@ -1315,4 +1348,103 @@ test "language-item trigger distinguishes string concatenation from numeric add"
     try std.testing.expect(!bitSet(numeric.function_bits[0..], protocol_ordinal));
     const string = try analyzeForTest(result, &.{}, &.{1621}, &trigger);
     try std.testing.expect(bitSet(string.function_bits[0..], protocol_ordinal));
+}
+
+test "artifact reachability activates only demanded hidden String property registrations" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+
+    // ID 3 is the canonical source-backed String surface type used by the
+    // semantic frontend. The reachability rule itself does not inspect this
+    // ID; it only sees the resulting primitive-string receiver type.
+    try project.registerSourceLanguageItems(&.{.{
+        .id = .init(3),
+        .module_id = .init(1701),
+        .exported_name = "TextSurface",
+        .namespace = .type,
+    }});
+    try project.addRoot(.{
+        .id = .init(1700),
+        .logical_name = "main.ts",
+        .bytes =
+        \\import { defineData, setDefaultString } from "host:surface";
+        \\const prototype: any = {};
+        \\function keepImpl(): string { return "keep"; }
+        \\function dropImpl(): string { return "drop"; }
+        \\defineData(prototype, "keep", keepImpl, 5);
+        \\defineData(prototype, "drop", dropImpl, 5);
+        \\setDefaultString(prototype);
+        \\const text: string = "value";
+        \\text.keep();
+        \\"literal".keep();
+        ,
+    });
+    try project.supplySource(.{
+        .id = .init(1701),
+        .logical_name = "text-surface.ts",
+        .bytes =
+        \\export interface TextSurface {
+        \\  keep(): string;
+        \\  drop(): string;
+        \\}
+        ,
+    });
+
+    const any_params = [_]project_mod.ExternalParameterDescriptor{
+        .{ .name = "object", .type_metadata = .any },
+        .{ .name = "key", .type_metadata = .any },
+        .{ .name = "value", .type_metadata = .any },
+        .{ .name = "attributes", .type_metadata = .number },
+    };
+    const object_param = [_]project_mod.ExternalParameterDescriptor{.{ .name = "object", .type_metadata = .any }};
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| try project.respondExternalModule(request.id, .{
+            .id = .init(9700),
+            .logical_name = "host:surface",
+            .exports = &.{
+                .{
+                    .name = "defineData",
+                    .type_metadata = .object,
+                    .symbol_id = .init(1),
+                    .intrinsic_id = .init(0xA001),
+                    .declaration_kind = .function,
+                    .function = .{ .parameters = &any_params, .return_type = .any },
+                    .effects = .{ .reads_memory = true, .writes_memory = true, .allocates = true, .may_throw = true, .unknown = false },
+                },
+                .{
+                    .name = "setDefaultString",
+                    .type_metadata = .object,
+                    .symbol_id = .init(2),
+                    .intrinsic_id = .init(0xA002),
+                    .declaration_kind = .function,
+                    .function = .{ .parameters = &object_param, .return_type = .any },
+                    .effects = .{ .reads_memory = true, .writes_memory = true, .may_throw = true, .unknown = false },
+                },
+            },
+        }),
+    };
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const rules = [_]hir.reachability.PropertySurfaceRule{.{
+        .registration_intrinsic_id = 0xA001,
+        .install_intrinsic_id = 0xA002,
+        .exposure_intrinsic_id = 0,
+        .flags = hir.reachability.property_surface_primitive_string,
+        .registration_object_argument = 0,
+        .registration_key_argument = 1,
+        .registration_value_argument = 2,
+        .install_object_argument = 0,
+        .exposure_object_argument = 0,
+    }};
+    const reached = try analyzeForTestWithRules(result, &.{}, &.{1700}, &.{}, &rules);
+    _ = try expectFunctionReachability(result, reached, "keepImpl", true);
+    _ = try expectFunctionReachability(result, reached, "dropImpl", false);
 }

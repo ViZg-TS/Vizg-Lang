@@ -23,6 +23,9 @@ pub const VIZG_HIR_REACH_TRIGGER_PRIMITIVE_BIGINT_BASE: u32 = c.VIZG_HIR_REACH_T
 pub const VIZG_HIR_REACH_TRIGGER_PRIMITIVE_SYMBOL_BASE: u32 = c.VIZG_HIR_REACH_TRIGGER_PRIMITIVE_SYMBOL_BASE;
 pub const VIZG_HIR_REACH_TRIGGER_FUNCTION_BASE: u32 = c.VIZG_HIR_REACH_TRIGGER_FUNCTION_BASE;
 pub const VIZG_HIR_REACH_TRIGGER_STRING_CONCAT_ADD: u32 = c.VIZG_HIR_REACH_TRIGGER_STRING_CONCAT_ADD;
+pub const VIZG_HIR_PROPERTY_SURFACE_PRIMITIVE_STRING: u32 = c.VIZG_HIR_PROPERTY_SURFACE_PRIMITIVE_STRING;
+pub const VIZG_HIR_PROPERTY_SURFACE_CANONICAL_ARRAY: u32 = c.VIZG_HIR_PROPERTY_SURFACE_CANONICAL_ARRAY;
+pub const VIZG_HIR_PROPERTY_SURFACE_HAS_EXPOSURE_INTRINSIC: u32 = c.VIZG_HIR_PROPERTY_SURFACE_HAS_EXPOSURE_INTRINSIC;
 pub const VIZG_INTRINSIC_CONTRACT_VERSION: u32 = c.VIZG_INTRINSIC_CONTRACT_VERSION;
 pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION: u32 = c.VIZG_LANGUAGE_ITEM_CONTRACT_VERSION;
 
@@ -33,7 +36,7 @@ test "public header versions match the declaration companion" {
     try std.testing.expectEqual(@as(u32, 2), VIZG_HIR_API_VERSION);
     try std.testing.expectEqual(@as(u32, 1), VIZG_HIR_PAYLOAD_API_VERSION);
     try std.testing.expectEqual(@as(u32, 8), VIZG_HIR_DETAIL_API_VERSION);
-    try std.testing.expectEqual(@as(u32, 1), VIZG_HIR_REACHABILITY_API_VERSION);
+    try std.testing.expectEqual(@as(u32, 2), VIZG_HIR_REACHABILITY_API_VERSION);
     try std.testing.expectEqual(@as(u32, 1), VIZG_HIR_CONSUMER_API_VERSION);
     try std.testing.expectEqual(@as(u32, 1 << 0), VIZG_HIR_REACH_TRIGGER_CANONICAL_ARRAY_BASE);
     try std.testing.expectEqual(@as(u32, 1 << 1), VIZG_HIR_REACH_TRIGGER_PLACE_DELETED);
@@ -44,6 +47,9 @@ test "public header versions match the declaration companion" {
     try std.testing.expectEqual(@as(u32, 1 << 6), VIZG_HIR_REACH_TRIGGER_PRIMITIVE_BIGINT_BASE);
     try std.testing.expectEqual(@as(u32, 1 << 7), VIZG_HIR_REACH_TRIGGER_PRIMITIVE_SYMBOL_BASE);
     try std.testing.expectEqual(@as(u32, 1 << 8), VIZG_HIR_REACH_TRIGGER_FUNCTION_BASE);
+    try std.testing.expectEqual(@as(u32, 1 << 0), VIZG_HIR_PROPERTY_SURFACE_PRIMITIVE_STRING);
+    try std.testing.expectEqual(@as(u32, 1 << 1), VIZG_HIR_PROPERTY_SURFACE_CANONICAL_ARRAY);
+    try std.testing.expectEqual(@as(u32, 1 << 8), VIZG_HIR_PROPERTY_SURFACE_HAS_EXPOSURE_INTRINSIC);
     try std.testing.expectEqual(@as(u32, 3), VIZG_INTRINSIC_CONTRACT_VERSION);
     try std.testing.expectEqual(@as(u32, 1), VIZG_LANGUAGE_ITEM_CONTRACT_VERSION);
 }

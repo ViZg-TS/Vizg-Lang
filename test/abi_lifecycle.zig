@@ -523,6 +523,8 @@ test "C HIR reachability uses caller-owned buffers and canonical ordinals" {
         .application_module_count = application_modules.len,
         .triggers_ptr = null,
         .trigger_count = 0,
+        .property_surface_rules_ptr = null,
+        .property_surface_rule_count = 0,
     };
     var buffers: c.Vizg_HirReachabilityBuffers = .{
         .scratch_ptr = if (scratch_words.len == 0) null else @ptrCast(scratch_words.ptr),

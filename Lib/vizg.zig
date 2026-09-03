@@ -119,6 +119,7 @@ pub const Vizg_SourceLanguageItem = abi.Vizg_SourceLanguageItem;
 /// Result introspection types — summary plus per-item iterators.
 pub const Vizg_ProjectResultSummary = abi.Vizg_ProjectResultSummary;
 pub const Vizg_HirReachabilityTrigger = abi.Vizg_HirReachabilityTrigger;
+pub const Vizg_HirPropertySurfaceRule = abi.Vizg_HirPropertySurfaceRule;
 pub const Vizg_HirReachabilityRequest = abi.Vizg_HirReachabilityRequest;
 pub const Vizg_HirReachabilityRequirements = abi.Vizg_HirReachabilityRequirements;
 pub const Vizg_HirReachabilityBuffers = abi.Vizg_HirReachabilityBuffers;
@@ -134,6 +135,9 @@ pub const VIZG_HIR_REACH_TRIGGER_PRIMITIVE_BIGINT_BASE = abi.VIZG_HIR_REACH_TRIG
 pub const VIZG_HIR_REACH_TRIGGER_PRIMITIVE_SYMBOL_BASE = abi.VIZG_HIR_REACH_TRIGGER_PRIMITIVE_SYMBOL_BASE;
 pub const VIZG_HIR_REACH_TRIGGER_FUNCTION_BASE = abi.VIZG_HIR_REACH_TRIGGER_FUNCTION_BASE;
 pub const VIZG_HIR_REACH_TRIGGER_STRING_CONCAT_ADD = abi.VIZG_HIR_REACH_TRIGGER_STRING_CONCAT_ADD;
+pub const VIZG_HIR_PROPERTY_SURFACE_PRIMITIVE_STRING = abi.VIZG_HIR_PROPERTY_SURFACE_PRIMITIVE_STRING;
+pub const VIZG_HIR_PROPERTY_SURFACE_CANONICAL_ARRAY = abi.VIZG_HIR_PROPERTY_SURFACE_CANONICAL_ARRAY;
+pub const VIZG_HIR_PROPERTY_SURFACE_HAS_EXPOSURE_INTRINSIC = abi.VIZG_HIR_PROPERTY_SURFACE_HAS_EXPOSURE_INTRINSIC;
 pub const Vizg_ProjectModuleInfo = abi.Vizg_ProjectModuleInfo;
 pub const Vizg_ProjectDiagnostic = abi.Vizg_ProjectDiagnostic;
 pub const Vizg_ProjectEdgeInfo = abi.Vizg_ProjectEdgeInfo;

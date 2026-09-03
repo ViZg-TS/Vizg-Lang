@@ -10,7 +10,7 @@
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
 #define VIZG_HIR_DETAIL_API_VERSION 8u
-#define VIZG_HIR_REACHABILITY_API_VERSION 1u
+#define VIZG_HIR_REACHABILITY_API_VERSION 2u
 #define VIZG_HIR_CONSUMER_API_VERSION 1u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
 #define VIZG_INTRINSIC_CONTRACT_VERSION 3u
@@ -918,6 +918,22 @@ typedef struct Vizg_HirReachabilityTrigger {
     uint64_t language_item_id;
 } Vizg_HirReachabilityTrigger;
 
+#define VIZG_HIR_PROPERTY_SURFACE_PRIMITIVE_STRING (1u << 0)
+#define VIZG_HIR_PROPERTY_SURFACE_CANONICAL_ARRAY (1u << 1)
+#define VIZG_HIR_PROPERTY_SURFACE_HAS_EXPOSURE_INTRINSIC (1u << 8)
+
+typedef struct Vizg_HirPropertySurfaceRule {
+    uint64_t registration_intrinsic_id;
+    uint64_t install_intrinsic_id;
+    uint64_t exposure_intrinsic_id;
+    uint32_t flags;
+    uint32_t registration_object_argument;
+    uint32_t registration_key_argument;
+    uint32_t registration_value_argument;
+    uint32_t install_object_argument;
+    uint32_t exposure_object_argument;
+} Vizg_HirPropertySurfaceRule;
+
 typedef struct Vizg_HirReachabilityRequest {
     const uint64_t *public_module_ids_ptr;
     size_t public_module_count;
@@ -925,6 +941,8 @@ typedef struct Vizg_HirReachabilityRequest {
     size_t application_module_count;
     const Vizg_HirReachabilityTrigger *triggers_ptr;
     size_t trigger_count;
+    const Vizg_HirPropertySurfaceRule *property_surface_rules_ptr;
+    size_t property_surface_rule_count;
 } Vizg_HirReachabilityRequest;
 
 /* Caller-owned shape for one stateless reachability query. Bit N uses the

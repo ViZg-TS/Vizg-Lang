@@ -50,6 +50,7 @@ LAYOUT(Vizg_ProjectImportInfo)
 LAYOUT(Vizg_ProjectExportInfo)
 LAYOUT(Vizg_HirSummary)
 LAYOUT(Vizg_HirReachabilityTrigger)
+LAYOUT(Vizg_HirPropertySurfaceRule)
 LAYOUT(Vizg_HirReachabilityRequest)
 LAYOUT(Vizg_HirReachabilityRequirements)
 LAYOUT(Vizg_HirReachabilityBuffers)
@@ -239,13 +240,26 @@ size_t vizg_c_fields_Vizg_HirReachabilityTrigger(void) {
         F(Vizg_HirReachabilityTrigger, flags, 2) +
         F(Vizg_HirReachabilityTrigger, language_item_id, 3);
 }
+size_t vizg_c_fields_Vizg_HirPropertySurfaceRule(void) {
+    return F(Vizg_HirPropertySurfaceRule, registration_intrinsic_id, 1) +
+        F(Vizg_HirPropertySurfaceRule, install_intrinsic_id, 2) +
+        F(Vizg_HirPropertySurfaceRule, exposure_intrinsic_id, 3) +
+        F(Vizg_HirPropertySurfaceRule, flags, 4) +
+        F(Vizg_HirPropertySurfaceRule, registration_object_argument, 5) +
+        F(Vizg_HirPropertySurfaceRule, registration_key_argument, 6) +
+        F(Vizg_HirPropertySurfaceRule, registration_value_argument, 7) +
+        F(Vizg_HirPropertySurfaceRule, install_object_argument, 8) +
+        F(Vizg_HirPropertySurfaceRule, exposure_object_argument, 9);
+}
 size_t vizg_c_fields_Vizg_HirReachabilityRequest(void) {
     return F(Vizg_HirReachabilityRequest, public_module_ids_ptr, 1) +
         F(Vizg_HirReachabilityRequest, public_module_count, 2) +
         F(Vizg_HirReachabilityRequest, application_module_ids_ptr, 3) +
         F(Vizg_HirReachabilityRequest, application_module_count, 4) +
         F(Vizg_HirReachabilityRequest, triggers_ptr, 5) +
-        F(Vizg_HirReachabilityRequest, trigger_count, 6);
+        F(Vizg_HirReachabilityRequest, trigger_count, 6) +
+        F(Vizg_HirReachabilityRequest, property_surface_rules_ptr, 7) +
+        F(Vizg_HirReachabilityRequest, property_surface_rule_count, 8);
 }
 size_t vizg_c_fields_Vizg_HirReachabilityRequirements(void) {
     return F(Vizg_HirReachabilityRequirements, scratch_bytes, 1) +
