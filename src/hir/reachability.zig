@@ -436,11 +436,11 @@ const State = struct {
         if (self.request.property_surface_rules.len == 0) return;
         switch (instruction.operation) {
             .make_property_place => |value| {
-                if (!self.index.placeIsConsumed(value.result)) return;
+                if (!self.index.placeIsLoaded(value.result)) return;
                 try self.activateRulesForReceiver(value.base, try self.propertyDemandKey(value.key));
             },
             .make_element_place => |value| {
-                if (!self.index.placeIsConsumed(value.result)) return;
+                if (!self.index.placeIsLoaded(value.result)) return;
                 const key = try self.staticStringValue(value.key, 0);
                 try self.activateRulesForReceiver(value.base, key);
             },
@@ -477,6 +477,12 @@ const State = struct {
     }
 
     fn ruleMatchesReceiver(self: *State, rule: PropertySurfaceRule, receiver: ids.ValueId) !bool {
+        const type_id = self.index.valueType(receiver) orelse return error.InconsistentProjection;
+        // `any`/`unknown` can carry every runtime surface. A static property
+        // key activates only the matching registration; a dynamic key
+        // conservatively activates the whole host-declared surface.
+        if (type_id == self.type_store.builtins.any or type_id == self.type_store.builtins.unknown)
+            return true;
         if ((rule.flags & property_surface_primitive_string) != 0 and try self.valueIsPrimitiveString(receiver)) return true;
         if ((rule.flags & property_surface_canonical_array) != 0 and try self.valueIsCanonicalArray(receiver)) return true;
         return false;
@@ -727,7 +733,20 @@ const State = struct {
             .debugger_trap,
             => {},
 
-            .load_binding => |binding| try self.traceBinding(binding),
+            .load_binding => |binding| {
+                // A binding load whose result is not consumed is observable
+                // only when the read itself may fail independently of its
+                // value. Hoisted/initialized lexical storage is safe to defer
+                // to processValue(); doing so is required for conditional
+                // property registrations because an unselected registration
+                // must not make its function-valued operand reachable merely
+                // through the argument's load_binding setup instruction.
+                //
+                // TDZ and live-import reads remain strong: they may throw even
+                // when their produced value is otherwise dead.
+                if (try self.bindingReadMustExecuteWithoutValue(binding))
+                    try self.traceBinding(binding);
+            },
 
             .make_property_place => |value| if (self.index.placeIsConsumed(value.result)) {
                 try self.traceValue(value.base);
@@ -926,6 +945,15 @@ const State = struct {
         return true;
     }
 
+    fn bindingReadMustExecuteWithoutValue(self: *State, binding_id: ids.BindingId) !bool {
+        const ordinal = self.index.bindingOrdinal(binding_id) orelse return error.InconsistentProjection;
+        const binding = self.index.binding(self.project, ordinal) orelse return error.InconsistentProjection;
+        return switch (binding.initial_state) {
+            .temporal_dead_zone, .live_import => true,
+            .hoisted_undefined, .hoisted_function, .initialized => false,
+        };
+    }
+
     fn valueIsCanonicalArray(self: *State, value: ids.ValueId) !bool {
         const type_id = self.index.valueType(value) orelse return error.InconsistentProjection;
         return self.typeIsCanonicalArray(type_id, 0);
@@ -1010,6 +1038,13 @@ const State = struct {
                 const result = instruction.result orelse return error.InconsistentProjection;
                 const ordinal = self.index.valueOrdinal(result) orelse return error.InconsistentProjection;
                 if (!bitIsSet(self.traced_value_bits, ordinal)) return true;
+            },
+            .load_binding => |binding| {
+                const result = instruction.result orelse return error.InconsistentProjection;
+                const ordinal = self.index.valueOrdinal(result) orelse return error.InconsistentProjection;
+                if (!bitIsSet(self.traced_value_bits, ordinal) and
+                    !try self.bindingReadMustExecuteWithoutValue(binding))
+                    return true;
             },
             .make_binding_place => |value| {
                 const ordinal = self.index.bindingOrdinal(value.binding) orelse return error.InconsistentProjection;

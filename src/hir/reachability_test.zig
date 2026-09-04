@@ -1133,6 +1133,33 @@ test "artifact reachability retains effectful binding reads even when their valu
     try std.testing.expect(saw_reached_load);
 }
 
+test "artifact reachability omits unused reads of hoisted function bindings" {
+    var result = try loweredRoot(1395,
+        \\function unused(): number { return 1; }
+        \\unused;
+    );
+    defer result.deinit();
+
+    const reached = try analyzeForTest(&result, &.{}, &.{1395}, &.{});
+    _ = try expectFunctionReachability(&result, reached, "unused", false);
+    const binding_ordinal = bindingOrdinalByName(&result, "unused") orelse return error.TestExpectedBinding;
+    try std.testing.expect(!bitSet(reached.binding_bits[0..], binding_ordinal));
+
+    var saw_omitted_load = false;
+    for (result.project.functions) |function| for (function.blocks) |block| for (block.instructions) |instruction| {
+        switch (instruction.operation) {
+            .load_binding => |binding| {
+                const ordinal = result.consumerIndex().bindingOrdinal(binding) orelse continue;
+                if (ordinal != binding_ordinal) continue;
+                const instruction_ordinal = result.consumerIndex().instructionOrdinal(instruction.id) orelse return error.TestExpectedInstruction;
+                if (!bitSet(reached.instruction_bits[0..], instruction_ordinal)) saw_omitted_load = true;
+            },
+            else => {},
+        }
+    };
+    try std.testing.expect(saw_omitted_load);
+}
+
 test "artifact reachability preserves observable RHS while omitting dead binding storage" {
     var result = try loweredRoot(1400,
         \\function effect(): number { return 1; }
@@ -1350,7 +1377,7 @@ test "language-item trigger distinguishes string concatenation from numeric add"
     try std.testing.expect(bitSet(string.function_bits[0..], protocol_ordinal));
 }
 
-test "artifact reachability activates only demanded hidden String property registrations" {
+fn loweredHiddenStringSurfaceRoot(module_id: u64, source: []const u8) !hir.HirResult {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
 
@@ -1359,28 +1386,17 @@ test "artifact reachability activates only demanded hidden String property regis
     // ID; it only sees the resulting primitive-string receiver type.
     try project.registerSourceLanguageItems(&.{.{
         .id = .init(3),
-        .module_id = .init(1701),
+        .module_id = .init(module_id + 1),
         .exported_name = "TextSurface",
         .namespace = .type,
     }});
     try project.addRoot(.{
-        .id = .init(1700),
+        .id = .init(module_id),
         .logical_name = "main.ts",
-        .bytes =
-        \\import { defineData, setDefaultString } from "host:surface";
-        \\const prototype: any = {};
-        \\function keepImpl(): string { return "keep"; }
-        \\function dropImpl(): string { return "drop"; }
-        \\defineData(prototype, "keep", keepImpl, 5);
-        \\defineData(prototype, "drop", dropImpl, 5);
-        \\setDefaultString(prototype);
-        \\const text: string = "value";
-        \\text.keep();
-        \\"literal".keep();
-        ,
+        .bytes = source,
     });
     try project.supplySource(.{
-        .id = .init(1701),
+        .id = .init(module_id + 1),
         .logical_name = "text-surface.ts",
         .bytes =
         \\export interface TextSurface {
@@ -1425,26 +1441,111 @@ test "artifact reachability activates only demanded hidden String property regis
         }),
     };
     if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
-
-    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
-    defer outcome.deinit();
-    const result = switch (outcome) {
-        .result => |*value| value,
-        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    return switch (try hir.lowerProject(std.testing.allocator, &project, .{})) {
+        .result => |result| result,
+        .diagnostics => error.UnexpectedLoweringDiagnostics,
     };
+}
 
-    const rules = [_]hir.reachability.PropertySurfaceRule{.{
-        .registration_intrinsic_id = 0xA001,
-        .install_intrinsic_id = 0xA002,
-        .exposure_intrinsic_id = 0,
-        .flags = hir.reachability.property_surface_primitive_string,
-        .registration_object_argument = 0,
-        .registration_key_argument = 1,
-        .registration_value_argument = 2,
-        .install_object_argument = 0,
-        .exposure_object_argument = 0,
-    }};
-    const reached = try analyzeForTestWithRules(result, &.{}, &.{1700}, &.{}, &rules);
-    _ = try expectFunctionReachability(result, reached, "keepImpl", true);
-    _ = try expectFunctionReachability(result, reached, "dropImpl", false);
+const hidden_string_surface_rules = [_]hir.reachability.PropertySurfaceRule{.{
+    .registration_intrinsic_id = 0xA001,
+    .install_intrinsic_id = 0xA002,
+    .exposure_intrinsic_id = 0,
+    .flags = hir.reachability.property_surface_primitive_string,
+    .registration_object_argument = 0,
+    .registration_key_argument = 1,
+    .registration_value_argument = 2,
+    .install_object_argument = 0,
+    .exposure_object_argument = 0,
+}};
+
+test "artifact reachability activates only demanded hidden String property registrations" {
+    var result = try loweredHiddenStringSurfaceRoot(
+        1700,
+        \\import { defineData, setDefaultString } from "host:surface";
+        \\const prototype: any = {};
+        \\function keepImpl(): string { return "keep"; }
+        \\function dropImpl(): string { return "drop"; }
+        \\defineData(prototype, "keep", keepImpl, 5);
+        \\defineData(prototype, "drop", dropImpl, 5);
+        \\setDefaultString(prototype);
+        \\const dynamic: any = "value";
+        \\dynamic.keep();
+        \\function inspectObject(value: any, key: string): any {
+        \\  if (typeof value !== "object") return null;
+        \\  if (value === null) return null;
+        \\  return value[key];
+        \\}
+        \\inspectObject({ drop: 1 }, "drop");
+    );
+    defer result.deinit();
+
+    const reached = try analyzeForTestWithRules(
+        &result,
+        &.{},
+        &.{1700},
+        &.{},
+        &hidden_string_surface_rules,
+    );
+    _ = try expectFunctionReachability(&result, reached, "keepImpl", true);
+    _ = try expectFunctionReachability(&result, reached, "dropImpl", false);
+}
+
+test "artifact reachability conservatively activates a hidden String surface for dynamic any keys" {
+    var result = try loweredHiddenStringSurfaceRoot(
+        1710,
+        \\import { defineData, setDefaultString } from "host:surface";
+        \\const prototype: any = {};
+        \\function keepImpl(): string { return "keep"; }
+        \\function dropImpl(): string { return "drop"; }
+        \\defineData(prototype, "keep", keepImpl, 5);
+        \\defineData(prototype, "drop", dropImpl, 5);
+        \\setDefaultString(prototype);
+        \\function readDynamic(value: any, key: string): any {
+        \\  return value[key];
+        \\}
+        \\readDynamic("value", "keep");
+    );
+    defer result.deinit();
+
+    const reached = try analyzeForTestWithRules(
+        &result,
+        &.{},
+        &.{1710},
+        &.{},
+        &hidden_string_surface_rules,
+    );
+    _ = try expectFunctionReachability(&result, reached, "keepImpl", true);
+    _ = try expectFunctionReachability(&result, reached, "dropImpl", true);
+}
+
+test "artifact reachability ignores write-only and delete-only hidden String property places" {
+    var result = try loweredHiddenStringSurfaceRoot(
+        1720,
+        \\import { defineData, setDefaultString } from "host:surface";
+        \\const prototype: any = {};
+        \\function keepImpl(): string { return "keep"; }
+        \\function dropImpl(): string { return "drop"; }
+        \\defineData(prototype, "keep", keepImpl, 5);
+        \\defineData(prototype, "drop", dropImpl, 5);
+        \\setDefaultString(prototype);
+        \\const dynamic: any = "value";
+        \\dynamic.keep();
+        \\function mutateDynamic(value: any, key: string): void {
+        \\  value[key] = 1;
+        \\  delete value[key];
+        \\}
+        \\mutateDynamic({}, "drop");
+    );
+    defer result.deinit();
+
+    const reached = try analyzeForTestWithRules(
+        &result,
+        &.{},
+        &.{1720},
+        &.{},
+        &hidden_string_surface_rules,
+    );
+    _ = try expectFunctionReachability(&result, reached, "keepImpl", true);
+    _ = try expectFunctionReachability(&result, reached, "dropImpl", false);
 }

@@ -105,8 +105,20 @@ const Analyzer = struct {
         if (!self.valid(node_id)) return;
         switch (self.frontend_result.ast.node(node_id).data) {
             .Identifier => if (self.symbolForNode(node_id)) |symbol| {
-                const narrowed = self.factType(facts, symbol) orelse self.baseType(symbol);
-                try self.putNode(.{ .node_id = node_id, .type_id = narrowed });
+                const base = self.baseType(symbol);
+                const narrowed = self.factType(facts, symbol) orelse base;
+                // `any`/`unknown` remain checker-facing dynamic types after a
+                // `typeof value === "object"` guard: TypeScript still permits
+                // dynamic indexed access there. The flow map nevertheless
+                // records the proven runtime receiver category so HIR
+                // reachability can distinguish object-only dynamic reads from
+                // a genuinely unconstrained `any` receiver.
+                const node_type = if ((base == self.store.builtins.any or base == self.store.builtins.unknown) and
+                    narrowed == self.store.builtins.object)
+                    base
+                else
+                    narrowed;
+                try self.putNode(.{ .node_id = node_id, .type_id = node_type });
                 try self.putFlow(.{ .function_node = self.function_node, .block_id = self.block_id, .program_point = self.program_point, .symbol_id = symbol, .reference_node = node_id, .type_id = narrowed });
                 self.program_point += 1;
             },
@@ -300,9 +312,25 @@ const Analyzer = struct {
         const left_data = self.frontend_result.ast.node(left).data;
         if (left_data != .UnaryExpression or left_data.UnaryExpression.operator != .Keyword_typeof) return false;
         const name = self.literalText(right) orelse return false;
-        const wanted = if (std.mem.eql(u8, name, "string")) self.store.builtins.string else if (std.mem.eql(u8, name, "number")) self.store.builtins.number else if (std.mem.eql(u8, name, "boolean")) self.store.builtins.boolean else if (std.mem.eql(u8, name, "bigint")) self.store.builtins.bigint else if (std.mem.eql(u8, name, "symbol")) self.store.builtins.symbol else if (std.mem.eql(u8, name, "undefined")) self.store.builtins.undefined else return false;
         const symbol = self.symbolForNode(left_data.UnaryExpression.argument) orelse return false;
-        try self.setFact(facts, symbol, try self.filterType(self.currentType(facts, symbol), wanted, keep));
+        const current = self.currentType(facts, symbol);
+
+        // A dynamic receiver checked by `typeof` has a runtime category even
+        // though its checker-facing TypeScript type remains `any`/`unknown`.
+        // Keep the negative branch conservative because the current type
+        // model has no compact "not object" complement.
+        if (std.mem.eql(u8, name, "object") and
+            (current == self.store.builtins.any or current == self.store.builtins.unknown))
+        {
+            if (keep)
+                try self.setFact(facts, symbol, self.store.builtins.object)
+            else
+                self.removeFact(facts, symbol);
+            return true;
+        }
+
+        const wanted = if (std.mem.eql(u8, name, "string")) self.store.builtins.string else if (std.mem.eql(u8, name, "number")) self.store.builtins.number else if (std.mem.eql(u8, name, "boolean")) self.store.builtins.boolean else if (std.mem.eql(u8, name, "bigint")) self.store.builtins.bigint else if (std.mem.eql(u8, name, "symbol")) self.store.builtins.symbol else if (std.mem.eql(u8, name, "undefined")) self.store.builtins.undefined else return false;
+        try self.setFact(facts, symbol, try self.filterType(current, wanted, keep));
         return true;
     }
 

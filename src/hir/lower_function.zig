@@ -1102,7 +1102,9 @@ fn nodeScope(local: *const semantics.SemanticResult, node_id: ast.NodeId) ?binde
 }
 
 fn resolvedNodeType(inputs: Inputs, node_id: ast.NodeId) model.TypeId {
-    return inputs.project_module.type_info.lookupNode(node_id) orelse inputs.builder.result.semanticResult().type_store.builtins.unknown;
+    return inputs.project_module.type_info.lookupFlowTypeAtReference(node_id) orelse
+        inputs.project_module.type_info.lookupNode(node_id) orelse
+        inputs.builder.result.semanticResult().type_store.builtins.unknown;
 }
 
 /// Build (or reuse) a zero-parameter function signature for a pattern default

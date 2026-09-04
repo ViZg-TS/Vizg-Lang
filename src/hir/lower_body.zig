@@ -770,7 +770,9 @@ const Lowerer = struct {
     }
 
     pub fn nodeType(self: *const Lowerer, node_id: ast.NodeId) model.TypeId {
-        return self.project_module.type_info.lookupNode(node_id) orelse self.builder.result.semanticResult().type_store.builtins.unknown;
+        return self.project_module.type_info.lookupFlowTypeAtReference(node_id) orelse
+            self.project_module.type_info.lookupNode(node_id) orelse
+            self.builder.result.semanticResult().type_store.builtins.unknown;
     }
 
     fn declarationId(self: *const Lowerer, node_id: ast.NodeId) model.SemanticDeclId {

@@ -3400,6 +3400,25 @@ test "Goal 146 joins facts and leaves unsupported guards conservative" {
     try std.testing.expect(result.lookupType(testReferenceTypeAt(&result, invalidated_offset).?).?.kind == .union_type);
 }
 
+test "typeof object keeps dynamic checker typing but records object receiver flow" {
+    const source =
+        \\function inspect(value: any, key: string) {
+        \\  if (typeof value !== "object") return;
+        \\  const selected = value[key];
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+
+    const value_offset = (std.mem.indexOf(u8, source, "selected = value") orelse unreachable) + "selected = ".len;
+    const node_type = testReferenceTypeAt(&result, value_offset).?;
+    const flow_type = testFlowEntryAt(&result, value_offset).?.type_id;
+    try std.testing.expectEqual(result.type_store.builtins.any, node_type);
+    try std.testing.expectEqual(result.type_store.builtins.object, flow_type);
+
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+}
+
 test "Goal 147 checker accepts structural interfaces and reports inherited property paths" {
     var result = try analyze(std.testing.allocator,
         \\interface Entity { id: number; }

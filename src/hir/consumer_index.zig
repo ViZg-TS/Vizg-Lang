@@ -65,6 +65,7 @@ pub const Index = struct {
 
     place_bindings: std.AutoHashMap(u32, ids.BindingId),
     consumed_places: std.AutoHashMap(u32, void),
+    loaded_places: std.AutoHashMap(u32, void),
     deleted_places: std.AutoHashMap(u32, void),
     semantic_providers: std.AutoHashMap(model.SemanticDeclId, SemanticProvider),
 
@@ -98,6 +99,7 @@ pub const Index = struct {
             .binding_writer_instructions = &.{},
             .place_bindings = std.AutoHashMap(u32, ids.BindingId).init(allocator),
             .consumed_places = std.AutoHashMap(u32, void).init(allocator),
+            .loaded_places = std.AutoHashMap(u32, void).init(allocator),
             .deleted_places = std.AutoHashMap(u32, void).init(allocator),
             .semantic_providers = std.AutoHashMap(model.SemanticDeclId, SemanticProvider).init(allocator),
         };
@@ -264,7 +266,11 @@ pub const Index = struct {
                         },
                         .initialize_binding => |payload| try appendWriterList(&result, writer_lists, payload.binding, @intCast(instruction_ordinal)),
                         .store_binding => |payload| try appendWriterList(&result, writer_lists, payload.binding, @intCast(instruction_ordinal)),
-                        .load_place => |place| try result.consumed_places.put(try rawIdOwned(identity_domain, place), {}),
+                        .load_place => |place| {
+                            const raw = try rawIdOwned(identity_domain, place);
+                            try result.consumed_places.put(raw, {});
+                            try result.loaded_places.put(raw, {});
+                        },
                         .store_place => |payload| {
                             try result.consumed_places.put(try rawIdOwned(identity_domain, payload.place), {});
                             if (result.bindingForPlace(payload.place)) |binding_id|
@@ -498,6 +504,7 @@ pub const Index = struct {
         self.language_item_functions.deinit();
         self.place_bindings.deinit();
         self.consumed_places.deinit();
+        self.loaded_places.deinit();
         self.deleted_places.deinit();
         self.semantic_providers.deinit();
         freeSlice(self.allocator, self.blocks);
@@ -664,6 +671,13 @@ pub const Index = struct {
 
     pub fn placeIsConsumed(self: *const Index, place: ids.PlaceId) bool {
         return self.consumed_places.contains(self.rawId(place) orelse return false);
+    }
+
+    /// Property-surface method registrations are read dependencies. A place
+    /// that is only written or deleted does not require the current value of
+    /// an inherited method registration to exist in the artifact.
+    pub fn placeIsLoaded(self: *const Index, place: ids.PlaceId) bool {
+        return self.loaded_places.contains(self.rawId(place) orelse return false);
     }
 
     pub fn placeIsDeleted(self: *const Index, place: ids.PlaceId) bool {
