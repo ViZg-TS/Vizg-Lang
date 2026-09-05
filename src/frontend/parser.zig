@@ -888,7 +888,7 @@ const Parser = struct {
             _ = self.advance();
         }
         const is_generator = self.eat(.Asterisk);
-        const name_token = self.expectIdentifierLike("expected class member name");
+        const name_token = self.expectPropertyName("expected class member name");
         if (self.eat(.LParen)) {
             var params: std.ArrayList(NodeId) = .empty;
             errdefer params.deinit(self.allocator);
@@ -1124,7 +1124,7 @@ const Parser = struct {
                     _ = self.advance();
                     break :blk true;
                 } else false;
-                const name = self.expectIdentifierLike("expected property name in object type");
+                const name = self.expectPropertyName("expected property name in object type");
                 const optional = self.eat(.Question);
                 const member_type = if (self.eat(.LParen)) blk: {
                     var parameters: std.ArrayList(ast_mod.TypeParameter) = .empty;

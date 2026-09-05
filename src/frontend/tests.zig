@@ -214,6 +214,8 @@ test "parser precedence: i % colors.red.length || empty string groups % inside |
 
 test "parser accepts reserved words as dotted property names" {
     const source =
+        \\interface Registry { for(key: string): symbol; }
+        \\type RegistryShape = { for: (key: string) => symbol };
         \\Symbol.for("shared");
         \\value?.delete;
         \\new registry.class();
@@ -226,12 +228,12 @@ test "parser accepts reserved words as dotted property names" {
     try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
 
     const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
-    const call = parsed.ast.node(parsed.ast.node(statements[0]).data.ExpressionStatement.expression).data.CallExpression;
+    const call = parsed.ast.node(parsed.ast.node(statements[2]).data.ExpressionStatement.expression).data.CallExpression;
     try std.testing.expectEqualStrings("for", parsed.ast.node(call.callee).data.MemberExpression.property);
-    const optional = parsed.ast.node(parsed.ast.node(statements[1]).data.ExpressionStatement.expression).data.MemberExpression;
+    const optional = parsed.ast.node(parsed.ast.node(statements[3]).data.ExpressionStatement.expression).data.MemberExpression;
     try std.testing.expect(optional.optional);
     try std.testing.expectEqualStrings("delete", optional.property);
-    const construct = parsed.ast.node(parsed.ast.node(statements[2]).data.ExpressionStatement.expression).data.NewExpression;
+    const construct = parsed.ast.node(parsed.ast.node(statements[4]).data.ExpressionStatement.expression).data.NewExpression;
     try std.testing.expectEqualStrings("class", parsed.ast.node(construct.callee).data.MemberExpression.property);
 }
 
