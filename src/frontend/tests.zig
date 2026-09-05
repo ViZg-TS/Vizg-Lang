@@ -212,6 +212,29 @@ test "parser precedence: i % colors.red.length || empty string groups % inside |
     }
 }
 
+test "parser accepts reserved words as dotted property names" {
+    const source =
+        \\Symbol.for("shared");
+        \\value?.delete;
+        \\new registry.class();
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const scanned = try scanner.scanAll(arena.allocator(), source, false);
+    const parsed = try parser.parse(arena.allocator(), scanned.tokens, .{ .recover_errors = true });
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const call = parsed.ast.node(parsed.ast.node(statements[0]).data.ExpressionStatement.expression).data.CallExpression;
+    try std.testing.expectEqualStrings("for", parsed.ast.node(call.callee).data.MemberExpression.property);
+    const optional = parsed.ast.node(parsed.ast.node(statements[1]).data.ExpressionStatement.expression).data.MemberExpression;
+    try std.testing.expect(optional.optional);
+    try std.testing.expectEqualStrings("delete", optional.property);
+    const construct = parsed.ast.node(parsed.ast.node(statements[2]).data.ExpressionStatement.expression).data.NewExpression;
+    try std.testing.expectEqualStrings("class", parsed.ast.node(construct.callee).data.MemberExpression.property);
+}
+
 fn symbolByName(bound: binder.BindResult, name: []const u8) ?binder.Symbol {
     for (bound.symbols) |symbol| {
         if (std.mem.eql(u8, symbol.name, name)) return symbol;

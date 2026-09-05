@@ -8,6 +8,8 @@ Maintain `Unreleased` for notable features, behavior changes, bug fixes, and rem
 
 ## [Unreleased]
 
+- Dotted member access now accepts reserved words as ECMAScript
+  `IdentifierName` properties, including `Symbol.for` and optional/new chains.
 - Primitive `string` member lookup now consumes the authorized, replaceable
   String language-item surface instead of relying on a canonical source name.
 - Artifact reachability triggers can now select an executable language item

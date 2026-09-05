@@ -2577,7 +2577,7 @@ const Parser = struct {
                     });
                     continue;
                 }
-                if (self.at(.Identifier) or self.at(.PrivateIdentifier)) {
+                if (self.atPropertyName()) {
                     const property = self.advance();
                     node = try self.addNode(.{
                         .span = joinSpans(self.nodes.items[@intCast(node)].span, property.span),
@@ -2597,7 +2597,7 @@ const Parser = struct {
                 continue;
             }
             if (self.eat(.Dot)) {
-                const property = self.expectIdentifierLike("expected property name");
+                const property = self.expectPropertyName("expected property name");
                 node = try self.addNode(.{
                     .span = joinSpans(self.nodes.items[@intCast(node)].span, property.span),
                     .data = .{ .MemberExpression = .{ .object = node, .property = property.lexeme } },
@@ -2716,7 +2716,7 @@ const Parser = struct {
         var callee = try self.parsePrimaryAtom();
         while (true) {
             if (self.eat(.Dot)) {
-                const property = self.expectIdentifierLike("expected property name");
+                const property = self.expectPropertyName("expected property name");
                 callee = try self.addNode(.{
                     .span = joinSpans(self.nodes.items[@intCast(callee)].span, property.span),
                     .data = .{ .MemberExpression = .{ .object = callee, .property = property.lexeme } },
@@ -2840,6 +2840,22 @@ const Parser = struct {
 
     fn expectIdentifierLike(self: *Parser, message: []const u8) Token {
         if (self.at(.Identifier) or self.at(.PrivateIdentifier)) return self.advance();
+        self.report(message, .expected_token);
+        return self.current();
+    }
+
+    fn atPropertyName(self: *const Parser) bool {
+        const kind = self.current().kind;
+        if (kind == .Identifier or kind == .PrivateIdentifier or
+            kind == .TrueLiteral or kind == .FalseLiteral or kind == .NullLiteral)
+            return true;
+        const ordinal = @intFromEnum(kind);
+        return ordinal >= @intFromEnum(TokenType.Keyword_await) and
+            ordinal <= @intFromEnum(TokenType.Keyword_yield);
+    }
+
+    fn expectPropertyName(self: *Parser, message: []const u8) Token {
+        if (self.atPropertyName()) return self.advance();
         self.report(message, .expected_token);
         return self.current();
     }
