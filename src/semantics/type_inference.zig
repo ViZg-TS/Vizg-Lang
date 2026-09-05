@@ -74,7 +74,12 @@ pub fn inferBinaryOperator(
             .{ .type_id = b.bigint }
         else
             .{ .type_id = b.unknown, .valid = false, .issue = .invalid_operator },
-        .Ampersand, .Bar, .Caret, .LessThanLessThan, .GreaterThanGreaterThan, .GreaterThanGreaterThanGreaterThan => if (left == b.number and right == b.number)
+        .Ampersand, .Bar, .Caret, .LessThanLessThan, .GreaterThanGreaterThan => if ((left == b.number and right == b.number) or
+            (left == b.bigint and right == b.bigint))
+            .{ .type_id = left }
+        else
+            .{ .type_id = b.unknown, .valid = false, .issue = .invalid_operator },
+        .GreaterThanGreaterThanGreaterThan => if (left == b.number and right == b.number)
             .{ .type_id = b.number }
         else
             .{ .type_id = b.unknown, .valid = false, .issue = .invalid_operator },
@@ -119,7 +124,7 @@ pub fn inferUnaryOperator(
         .Keyword_delete => .{ .type_id = builtins.boolean },
         .Plus, .Minus, .Tilde => if (operand == builtins.number)
             .{ .type_id = builtins.number }
-        else if (operator != .Plus and operator != .Tilde and operand == builtins.bigint)
+        else if (operator != .Plus and operand == builtins.bigint)
             .{ .type_id = builtins.bigint }
         else
             .{ .type_id = builtins.unknown, .valid = false, .issue = .invalid_operator },

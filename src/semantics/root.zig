@@ -2615,6 +2615,46 @@ test "Goal 117 invalid operands recover with one targeted diagnostic" {
     try std.testing.expectEqual(@as(usize, 1), count);
 }
 
+test "P10-G009 BigInt bitwise operators retain bigint semantics" {
+    var result = try analyze(std.testing.allocator,
+        \\const andValue = 7n & 3n;
+        \\const orValue = 4n | 1n;
+        \\const xorValue = 7n ^ 3n;
+        \\const leftValue = 2n << 3n;
+        \\const rightValue = 16n >> 2n;
+        \\const complement = ~1n;
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+    for ([_][]const u8{
+        "andValue",
+        "orValue",
+        "xorValue",
+        "leftValue",
+        "rightValue",
+        "complement",
+    }) |name| {
+        try std.testing.expectEqual(
+            result.type_store.builtins.bigint,
+            result.lookupNodeType(testVariableInitializer(&result, name).?).?,
+        );
+    }
+}
+
+test "P10-G009 unsigned right shift remains invalid for BigInt" {
+    var result = try analyze(std.testing.allocator, "const bad = 8n >>> 1n;");
+    defer result.deinit();
+
+    var count: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .type_mismatch and
+            diagnostic.label != null and
+            std.mem.eql(u8, diagnostic.label.?, "invalid operator operands")) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
 test "Goal 117 assignment expression type is the assigned value" {
     var result = try analyze(std.testing.allocator,
         \\let target = 1;
