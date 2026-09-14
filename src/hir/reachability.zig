@@ -460,7 +460,6 @@ const State = struct {
         }
     }
 
-
     fn propertyDemandKey(self: *State, key: model.PropertyKey) !?[]const u8 {
         return switch (key) {
             .static => |name| name,
@@ -923,6 +922,7 @@ const State = struct {
             const base = switch (operation) {
                 .make_property_place => |value| value.base,
                 .make_element_place => |value| value.base,
+                .call_method, .call_super_method => |value| value.receiver,
                 else => return false,
             };
             if (!try self.valueMatchesFoundationalFlag(base, foundational_flags)) return false;
@@ -966,7 +966,10 @@ const State = struct {
             .primitive => |primitive| primitive == .string,
             // Direct string literals retain literal types in some HIR paths.
             // They are semantically primitive strings for member reachability.
-            .literal => |literal| switch (literal) { .string => true, else => false },
+            .literal => |literal| switch (literal) {
+                .string => true,
+                else => false,
+            },
             else => false,
         };
     }
@@ -1131,7 +1134,6 @@ fn callArgumentAt(arguments: []const model.CallArgument, index: u32) ?ids.ValueI
     if (@as(usize, index) >= arguments.len) return null;
     return arguments[@intCast(index)].operand();
 }
-
 
 fn sameSurfaceIdentity(left: SurfaceIdentity, right: SurfaceIdentity) bool {
     return switch (left) {

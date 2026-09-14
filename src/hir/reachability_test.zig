@@ -118,8 +118,7 @@ fn functionOrdinalByName(result: *const hir.HirResult, name: []const u8) ?usize 
 }
 
 test "HIR projection infers stable names for anonymous function installation sites" {
-    var result = try loweredRoot(
-        1042,
+    var result = try loweredRoot(1042,
         \\const assigned = (value) => value;
         \\const api = {
         \\  log: (value) => value,
@@ -1329,6 +1328,62 @@ test "language-item trigger can require a primitive string property receiver" {
     try std.testing.expect(bitSet(reached.function_bits[0..], protocol_ordinal));
 }
 
+test "language-item trigger recognizes a function call-method receiver" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    const protocol_id: u64 = 0xA55D;
+    try project.registerSourceLanguageItems(&.{
+        .{
+            .id = .init(10),
+            .module_id = .init(1631),
+            .exported_name = "CallableSurface",
+            .namespace = .type,
+        },
+        .{
+            .id = .init(protocol_id),
+            .module_id = .init(1631),
+            .exported_name = "renamedFunctionProtocol",
+            .namespace = .value,
+        },
+    });
+    try project.addRoot(.{
+        .id = .init(1630),
+        .logical_name = "main.ts",
+        .bytes =
+        \\function target(value: number): number { return value; }
+        \\target.call(null, 1);
+        ,
+    });
+    try project.supplySource(.{
+        .id = .init(1631),
+        .logical_name = "function-protocol.ts",
+        .bytes =
+        \\export interface CallableSurface {
+        \\  call(thisArg: any, value: number): number;
+        \\}
+        \\export function renamedFunctionProtocol(value: any): any { return value; }
+        ,
+    });
+    while (try project.step() != .complete) {}
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    const protocol_ordinal = functionOrdinalByName(result, "renamedFunctionProtocol") orelse
+        return error.TestExpectedFunction;
+    const call_method_tag: u32 = @intFromEnum(std.meta.Tag(hir.HirOperation).call_method);
+    const reached = try analyzeForTest(result, &.{}, &.{1630}, &.{.{
+        .operation_tag = call_method_tag,
+        .flags = hir.reachability.trigger_function_base,
+        .language_item_id = protocol_id,
+    }});
+    try std.testing.expect(bitSet(reached.function_bits[0..], protocol_ordinal));
+}
+
 test "language-item trigger distinguishes string concatenation from numeric add" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
@@ -1460,8 +1515,7 @@ const hidden_string_surface_rules = [_]hir.reachability.PropertySurfaceRule{.{
 }};
 
 test "artifact reachability activates only demanded hidden String property registrations" {
-    var result = try loweredHiddenStringSurfaceRoot(
-        1700,
+    var result = try loweredHiddenStringSurfaceRoot(1700,
         \\import { defineData, setDefaultString } from "host:surface";
         \\const prototype: any = {};
         \\function keepImpl(): string { return "keep"; }
@@ -1492,8 +1546,7 @@ test "artifact reachability activates only demanded hidden String property regis
 }
 
 test "artifact reachability conservatively activates a hidden String surface for dynamic any keys" {
-    var result = try loweredHiddenStringSurfaceRoot(
-        1710,
+    var result = try loweredHiddenStringSurfaceRoot(1710,
         \\import { defineData, setDefaultString } from "host:surface";
         \\const prototype: any = {};
         \\function keepImpl(): string { return "keep"; }
@@ -1520,8 +1573,7 @@ test "artifact reachability conservatively activates a hidden String surface for
 }
 
 test "artifact reachability ignores write-only and delete-only hidden String property places" {
-    var result = try loweredHiddenStringSurfaceRoot(
-        1720,
+    var result = try loweredHiddenStringSurfaceRoot(1720,
         \\import { defineData, setDefaultString } from "host:surface";
         \\const prototype: any = {};
         \\function keepImpl(): string { return "keep"; }

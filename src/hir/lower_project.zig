@@ -102,10 +102,14 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
         },
         else => return err,
     };
-    if (try verifier.verifyBuilder(allocator, &builder, .raw)) |code| {
-        const failure = try verifierReport(allocator, code);
-        result.deinit();
-        return .{ .diagnostics = failure };
+    {
+        var scratch = std.heap.ArenaAllocator.init(allocator);
+        defer scratch.deinit();
+        if (try verifier.verifyBuilder(scratch.allocator(), &builder, .raw)) |code| {
+            const failure = try verifierReport(allocator, code);
+            result.deinit();
+            return .{ .diagnostics = failure };
+        }
     }
     canonicalize.run(&builder) catch |err| switch (err) {
         error.CanonicalizationBudget => {
@@ -120,10 +124,14 @@ pub fn lowerWithDebug(allocator: std.mem.Allocator, project: *const project_mod.
         },
         else => return err,
     };
-    if (try verifier.verifyBuilder(allocator, &builder, .canonical)) |code| {
-        const failure = try verifierReport(allocator, code);
-        result.deinit();
-        return .{ .diagnostics = failure };
+    {
+        var scratch = std.heap.ArenaAllocator.init(allocator);
+        defer scratch.deinit();
+        if (try verifier.verifyBuilder(scratch.allocator(), &builder, .canonical)) |code| {
+            const failure = try verifierReport(allocator, code);
+            result.deinit();
+            return .{ .diagnostics = failure };
+        }
     }
     try builder.finish();
     try result.seal();

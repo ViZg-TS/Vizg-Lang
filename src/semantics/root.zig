@@ -2292,6 +2292,21 @@ test "function calls infer returns and validate argument count and type" {
     try std.testing.expectEqual(@as(usize, 1), type_errors);
 }
 
+test "typed rest method signatures accept variadic calls" {
+    var result = try analyze(std.testing.allocator,
+        \\function invoke(value: { call(receiver: number, ...args: number[]): number }): number {
+        \\    return value.call(0, 1, 2, 3);
+        \\}
+    );
+    defer result.deinit();
+
+    var count_errors: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .invalid_argument_count) count_errors += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), count_errors);
+}
+
 test "arrow implicit returns and optional default rest parameters shape signatures" {
     var result = try analyze(std.testing.allocator,
         \\const choose = (first: number, second?: number, ...rest: number[]) => first;

@@ -42,6 +42,7 @@ pub const TypeMember = struct {
 pub const TypeParameter = struct {
     name: []const u8,
     optional: bool = false,
+    rest: bool = false,
     type_node: TypeNodeId,
     span: tokens.Span,
 };

@@ -1130,17 +1130,25 @@ const Parser = struct {
                     var parameters: std.ArrayList(ast_mod.TypeParameter) = .empty;
                     errdefer parameters.deinit(self.allocator);
                     while (!self.at(.RParen) and !self.at(.EOF)) {
+                        const rest_token: ?Token = if (self.at(.Spread)) self.advance() else null;
                         const parameter_name = self.expectIdentifierLike("expected method parameter name");
                         const parameter_optional = self.eat(.Question);
+                        if (rest_token != null and parameter_optional) {
+                            self.reportAt(parameter_name, "rest parameter cannot be optional", .unexpected_token);
+                        }
                         _ = self.expect(.Colon, "expected ':' after method parameter");
                         const parameter_type = try self.parseType();
                         try parameters.append(self.allocator, .{
                             .name = parameter_name.lexeme,
                             .optional = parameter_optional,
+                            .rest = rest_token != null,
                             .type_node = parameter_type,
-                            .span = joinSpans(parameter_name.span, self.typeSpan(parameter_type)),
+                            .span = joinSpans(if (rest_token) |token| token.span else parameter_name.span, self.typeSpan(parameter_type)),
                         });
                         if (!self.eat(.Comma)) break;
+                        if (rest_token != null) {
+                            self.reportAt(self.previous().?, "rest parameter must be last", .unexpected_token);
+                        }
                     }
                     _ = self.expect(.RParen, "expected ')' after method parameters");
                     _ = self.expect(.Colon, "expected ':' before method return type");
@@ -1204,17 +1212,25 @@ const Parser = struct {
         errdefer parameters.deinit(self.allocator);
         while (!self.at(.RParen) and !self.at(.EOF)) {
             const before = self.index;
+            const rest_token: ?Token = if (self.at(.Spread)) self.advance() else null;
             const name = self.expectIdentifierLike("expected function type parameter name");
             const optional = self.eat(.Question);
+            if (rest_token != null and optional) {
+                self.reportAt(name, "rest parameter cannot be optional", .unexpected_token);
+            }
             _ = self.expect(.Colon, "expected ':' after function type parameter");
             const parameter_type = try self.parseType();
             try parameters.append(self.allocator, .{
                 .name = name.lexeme,
                 .optional = optional,
+                .rest = rest_token != null,
                 .type_node = parameter_type,
-                .span = joinSpans(name.span, self.typeSpan(parameter_type)),
+                .span = joinSpans(if (rest_token) |token| token.span else name.span, self.typeSpan(parameter_type)),
             });
             if (!self.eat(.Comma)) break;
+            if (rest_token != null) {
+                self.reportAt(self.previous().?, "rest parameter must be last", .unexpected_token);
+            }
             if (self.index == before) _ = self.advance();
         }
         _ = self.expect(.RParen, "expected ')' after function type parameters");

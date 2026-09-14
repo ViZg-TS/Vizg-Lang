@@ -2046,6 +2046,36 @@ test "frontend suite: structured type grammar preserves precedence and spans" {
     try std.testing.expect(parsed.ast.typeNode(grouped_inner).data == .Union);
 }
 
+test "frontend suite: type methods and function types preserve rest parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseOk(allocator,
+        \\let callback: (head: number, ...tail: string[]) => boolean;
+        \\interface Callable { call(thisArg: any, ...args: any[]): any; }
+    );
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    try std.testing.expectEqual(@as(usize, 2), statements.len);
+
+    const callback_decl = parsed.ast.node(statements[0]).data.VariableDeclaration.declarations[0];
+    const callback_annotation = parsed.ast.node(callback_decl).data.VariableDeclarator.type_annotation.?;
+    const callback = parsed.ast.typeNode(callback_annotation.root).data.Function;
+    try std.testing.expectEqual(@as(usize, 2), callback.parameters.len);
+    try std.testing.expect(!callback.parameters[0].rest);
+    try std.testing.expect(callback.parameters[1].rest);
+    try std.testing.expectEqualStrings("tail", callback.parameters[1].name);
+
+    const callable = parsed.ast.node(statements[1]).data.InterfaceDeclaration;
+    const members = parsed.ast.typeNode(callable.body).data.Object;
+    try std.testing.expectEqual(@as(usize, 1), members.len);
+    const call_signature = parsed.ast.typeNode(members[0].type_node).data.Function;
+    try std.testing.expectEqual(@as(usize, 2), call_signature.parameters.len);
+    try std.testing.expect(!call_signature.parameters[0].rest);
+    try std.testing.expect(call_signature.parameters[1].rest);
+    try std.testing.expectEqualStrings("args", call_signature.parameters[1].name);
+}
+
 test "frontend suite: malformed structured type recovers at member boundary" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

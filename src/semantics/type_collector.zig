@@ -927,6 +927,7 @@ fn resolveTypeNode(
                 .name = parameter.name,
                 .type_id = try resolveTypeNode(context, parameter.type_node, annotation_span, false),
                 .optional = parameter.optional,
+                .rest = parameter.rest,
             };
             break :blk try context.type_store.addFunction(parameters, try resolveTypeNode(context, function.return_type, annotation_span, false));
         },
