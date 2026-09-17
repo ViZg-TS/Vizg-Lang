@@ -451,7 +451,11 @@ const Lowerer = struct {
     }
 
     pub fn allowsAwait(_: *const Lowerer) bool {
-        return false;
+        // `Lowerer` owns only the source-module body. Nested functions use
+        // lower_function.Context and retain ordinary async-function checks.
+        // Modules may contain top-level await; lower_module marks the generated
+        // initializer async only when an await operation was actually emitted.
+        return true;
     }
 
     pub fn allowsYield(_: *const Lowerer) bool {

@@ -99,7 +99,7 @@ pub fn lower(
         .module_id = module.id,
         .symbol = null,
         .kind = .module_initialization,
-        .flags = .{},
+        .flags = .{ .async_ = bodyContainsAwait(body.blocks) },
         .signature_type = semantic_result.type_store.builtins.void,
         .bindings = body.bindings,
         .places = body.places,
@@ -124,6 +124,14 @@ pub fn lower(
         .entities = body.entities,
         .origin = .invalid,
     });
+}
+
+
+fn bodyContainsAwait(blocks: []const model.HirBlock) bool {
+    for (blocks) |block| for (block.instructions) |instruction| {
+        if (instruction.operation == .await_) return true;
+    };
+    return false;
 }
 
 fn bindingForSymbol(items: []const lower_body.SymbolBinding, symbol: @import("../frontend/binder.zig").SymbolId) ?@import("ids.zig").BindingId {

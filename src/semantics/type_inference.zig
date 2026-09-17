@@ -1223,7 +1223,10 @@ pub fn wrapFunctionReturn(
     store: *types.TypeStore,
 ) !types.TypeId {
     var return_type = base_return_type;
-    if (flags.is_async) return_type = try store.intern(.{ .promise = .{ .value_type = return_type } });
+    if (flags.is_async) {
+        const value_type = store.canonicalPromiseValueType(return_type) orelse return_type;
+        return_type = try store.intern(.{ .promise = .{ .value_type = value_type } });
+    }
     if (flags.is_generator) return_type = try store.intern(.{ .generator = .{
         .yield_type = store.builtins.unknown,
         .return_type = return_type,

@@ -223,6 +223,18 @@ pub const TypeStore = struct {
         return try self.instantiateGeneric(declaration, &.{value_type});
     }
 
+    /// Returns the semantic value type carried by an application of the
+    /// host-selected canonical Promise surface. This is identity-based: an
+    /// unrelated generic class with one argument is never treated as Promise.
+    pub fn canonicalPromiseValueType(self: *const TypeStore, type_id: model.TypeId) ?model.TypeId {
+        const declaration = self.canonical_promise_declaration orelse return null;
+        const ty = self.lookup(type_id) orelse return null;
+        if (ty.kind != .applied_generic) return null;
+        const applied = ty.kind.applied_generic;
+        if (!applied.declaration.eql(declaration) or applied.arguments.len != 1) return null;
+        return applied.arguments[0];
+    }
+
     fn findArrayType(self: *const TypeStore, type_id: model.TypeId, depth: usize) ?model.TypeId {
         if (depth >= max_substitution_depth) return null;
         const ty = self.lookup(type_id) orelse return null;
@@ -1158,6 +1170,30 @@ test "TypeStore owns every required shape and interns structural types" {
     }
     try std.testing.expectEqual(array, try store.intern(.{ .array = .{ .element_type = b.number } }));
     try std.testing.expect(store.lookupFunction(function) != null);
+}
+
+test "canonical Promise application exposes its resolved value type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+
+    const identity = model.SemanticDeclId.init(17, 1);
+    const parameter = try store.intern(.{ .type_parameter = .{
+        .identity = identity,
+        .parameter_id = 0,
+        .name = "T",
+    } });
+    try store.registerGenericDeclaration(identity, store.builtins.object, &.{.{ .type_id = parameter }});
+    try store.registerCanonicalPromiseSurface(identity);
+
+    const promise_number = try store.instantiateGeneric(identity, &.{store.builtins.number});
+    try std.testing.expectEqual(store.builtins.number, store.canonicalPromiseValueType(promise_number).?);
+    try std.testing.expect(store.canonicalPromiseValueType(store.builtins.number) == null);
+
+    const unrelated = model.SemanticDeclId.init(17, 2);
+    try store.registerGenericDeclaration(unrelated, store.builtins.object, &.{.{ .type_id = parameter }});
+    const unrelated_number = try store.instantiateGeneric(unrelated, &.{store.builtins.number});
+    try std.testing.expect(store.canonicalPromiseValueType(unrelated_number) == null);
 }
 
 test "Goal 134 inferred function signatures are immutable" {
