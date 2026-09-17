@@ -917,6 +917,7 @@ typedef struct Vizg_HirReachabilityTrigger {
     uint32_t operation_tag;
     uint32_t flags;
     uint64_t language_item_id;
+    uint64_t surface_language_item_id;
 } Vizg_HirReachabilityTrigger;
 
 #define VIZG_HIR_PROPERTY_SURFACE_PRIMITIVE_STRING (1u << 0)

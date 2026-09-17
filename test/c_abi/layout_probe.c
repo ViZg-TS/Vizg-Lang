@@ -238,7 +238,8 @@ size_t vizg_c_fields_Vizg_HirSummary(void) {
 size_t vizg_c_fields_Vizg_HirReachabilityTrigger(void) {
     return F(Vizg_HirReachabilityTrigger, operation_tag, 1) +
         F(Vizg_HirReachabilityTrigger, flags, 2) +
-        F(Vizg_HirReachabilityTrigger, language_item_id, 3);
+        F(Vizg_HirReachabilityTrigger, language_item_id, 3) +
+        F(Vizg_HirReachabilityTrigger, surface_language_item_id, 4);
 }
 size_t vizg_c_fields_Vizg_HirPropertySurfaceRule(void) {
     return F(Vizg_HirPropertySurfaceRule, registration_intrinsic_id, 1) +

@@ -27,6 +27,7 @@ pub const LanguageItemTrigger = extern struct {
     operation_tag: u32,
     flags: u32,
     language_item_id: u64,
+    surface_language_item_id: u64 = 0,
 };
 
 pub const property_surface_primitive_string: u32 = 1 << 0;
@@ -924,9 +925,10 @@ const State = struct {
                 .make_property_place => |value| value.base,
                 .make_element_place => |value| value.base,
                 .call_method, .call_super_method => |value| value.receiver,
+                .await_ => |value| value,
                 else => return false,
             };
-            if (!try self.valueIsPromise(base)) return false;
+            if (!try self.valueIsPromise(base, trigger.surface_language_item_id)) return false;
         }
         if (foundational_flags != 0) {
             const base = switch (operation) {
@@ -969,10 +971,17 @@ const State = struct {
         return self.typeIsCanonicalArray(type_id, 0);
     }
 
-    fn valueIsPromise(self: *State, value: ids.ValueId) !bool {
+    fn valueIsPromise(self: *State, value: ids.ValueId, surface_language_item_id: u64) !bool {
         const type_id = self.index.valueType(value) orelse return error.InconsistentProjection;
         const ty = self.type_store.lookup(type_id) orelse return error.InconsistentProjection;
-        return ty.kind == .promise;
+        if (ty.kind == .promise) return true;
+        if (surface_language_item_id == 0 or ty.kind != .applied_generic) return false;
+        const target = ty.kind.applied_generic.resolved_target;
+        for (self.project.language_items) |item| {
+            if (item.id.value() != surface_language_item_id) continue;
+            return item.target.namespace == .type and item.target.type_id == target;
+        }
+        return false;
     }
 
     fn valueIsPrimitiveString(self: *State, value: ids.ValueId) !bool {

@@ -113,8 +113,12 @@ pub fn inferUnaryOperator(
         .Keyword_await => blk: {
             var awaited = operand;
             while (store.lookup(awaited)) |item| {
-                if (item.kind != .promise or item.kind.promise.value_type == awaited) break;
-                awaited = item.kind.promise.value_type;
+                const value_type = if (item.kind == .promise)
+                    item.kind.promise.value_type
+                else
+                    store.canonicalPromiseValueType(awaited) orelse break;
+                if (value_type == awaited) break;
+                awaited = value_type;
             }
             break :blk .{ .type_id = awaited };
         },
