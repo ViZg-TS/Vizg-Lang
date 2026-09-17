@@ -107,6 +107,7 @@ const Resolver = struct {
                 if (field.initializer) |initializer| try self.resolveNode(initializer, scope);
             },
             .ClassMethod => |method| {
+                if (method.computed_name) |computed| try self.resolveNode(computed, scope);
                 if (method.type_parameters.len != 0) _ = self.takeScope();
                 const function_scope = self.takeScope();
                 try self.resolveParameterInitializers(method.params, function_scope);
@@ -277,7 +278,10 @@ const Resolver = struct {
         const node = self.ast.node(node_id);
         switch (node.data) {
             .Identifier => |identifier| try self.addReference(node_id, identifier.name, scope, .call),
-            .ElementAccessExpression => |elem_access| try self.resolveNode(elem_access.object, scope),
+            .ElementAccessExpression => |elem_access| {
+                try self.resolveNode(elem_access.object, scope);
+                try self.resolveNode(elem_access.index, scope);
+            },
             .MemberExpression => |member| try self.resolveNode(member.object, scope),
             else => try self.resolveNode(node_id, scope),
         }

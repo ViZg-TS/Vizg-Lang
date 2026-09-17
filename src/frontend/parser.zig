@@ -872,25 +872,37 @@ const Parser = struct {
             if (self.atIdentifierText("static")) is_static = true else if (self.atIdentifierText("readonly")) readonly = true else if (self.atIdentifierText("public")) access = .public else if (self.atIdentifierText("private")) access = .private else if (self.atIdentifierText("protected")) access = .protected else break;
             _ = self.advance();
         }
+        var computed_name: ?NodeId = null;
+        var name_token: Token = undefined;
         if (self.eat(.LBracket)) {
-            const parameter = self.expectIdentifierLike("expected index signature parameter name");
-            _ = self.expect(.Colon, "expected ':' after index signature parameter");
-            const key_root = try self.parseType();
-            _ = self.expect(.RBracket, "expected ']' after index signature parameter");
-            _ = self.expect(.Colon, "expected ':' after class index signature");
-            const value_root = try self.parseType();
-            _ = self.eat(.Semicolon);
-            return self.addNode(.{
-                .span = joinSpans(start, self.typeSpan(value_root)),
-                .data = .{ .ClassField = .{
-                    .name = parameter.lexeme,
-                    .readonly = readonly,
-                    .is_static = is_static,
-                    .access = access,
-                    .type_annotation = .{ .root = value_root, .span = self.typeSpan(value_root) },
-                    .index_key_type = .{ .root = key_root, .span = self.typeSpan(key_root) },
-                } },
-            });
+            const bracket_start = self.previousOrCurrent();
+            if ((self.at(.Identifier) or self.at(.PrivateIdentifier)) and self.peek(1).kind == .Colon) {
+                const parameter = self.advance();
+                _ = self.expect(.Colon, "expected ':' after index signature parameter");
+                const key_root = try self.parseType();
+                _ = self.expect(.RBracket, "expected ']' after index signature parameter");
+                _ = self.expect(.Colon, "expected ':' after class index signature");
+                const value_root = try self.parseType();
+                _ = self.eat(.Semicolon);
+                return self.addNode(.{
+                    .span = joinSpans(start, self.typeSpan(value_root)),
+                    .data = .{ .ClassField = .{
+                        .name = parameter.lexeme,
+                        .readonly = readonly,
+                        .is_static = is_static,
+                        .access = access,
+                        .type_annotation = .{ .root = value_root, .span = self.typeSpan(value_root) },
+                        .index_key_type = .{ .root = key_root, .span = self.typeSpan(key_root) },
+                    } },
+                });
+            }
+            computed_name = try self.parseExpression();
+            const close = self.expect(.RBracket, "expected ']' after computed class member name");
+            name_token = .{
+                .kind = .Identifier,
+                .span = joinSpans(bracket_start.span, close.span),
+                .lexeme = "<computed>",
+            };
         }
         const accessor_kind: ?ast_mod.ClassMethodKind = if (self.atIdentifierText("get") and
             (self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and
@@ -913,7 +925,7 @@ const Parser = struct {
             _ = self.advance();
         }
         const is_generator = self.eat(.Asterisk);
-        const name_token = self.expectPropertyName("expected class member name");
+        if (computed_name == null) name_token = self.expectPropertyName("expected class member name");
         const type_parameters = try self.parseGenericTypeParameters();
         if (self.eat(.LParen)) {
             var params: std.ArrayList(NodeId) = .empty;
@@ -931,6 +943,7 @@ const Parser = struct {
                 .span = joinSpans(start, self.previousOrCurrent().span),
                 .data = .{ .ClassMethod = .{
                     .name = name_token.lexeme,
+                    .computed_name = computed_name,
                     .type_parameters = type_parameters,
                     .params = try params.toOwnedSlice(self.allocator),
                     .body = body,
@@ -1039,6 +1052,10 @@ const Parser = struct {
     }
 
     fn parsePrimaryType(self: *Parser) anyerror!ast_mod.TypeNodeId {
+        if (self.eat(.Keyword_this)) {
+            const token = self.previousOrCurrent();
+            return self.addTypeNode(.{ .span = token.span, .data = .This });
+        }
         if (self.eat(.Keyword_typeof)) {
             const start = self.previousOrCurrent();
             if (self.at(.Keyword_import)) {
@@ -2657,6 +2674,27 @@ const Parser = struct {
                 });
                 continue;
             }
+            if (self.at(.LessThan) and self.looksLikeCallTypeArguments()) {
+                var call_type_arguments: std.ArrayList(ast_mod.TypeNodeId) = .empty;
+                defer call_type_arguments.deinit(self.allocator);
+                _ = self.advance();
+                while (!self.at(.GreaterThan) and !self.at(.EOF)) {
+                    try call_type_arguments.append(self.allocator, try self.parseType());
+                    if (!self.eat(.Comma)) break;
+                }
+                _ = self.expect(.GreaterThan, "expected '>' after call type arguments");
+                _ = self.expect(.LParen, "expected '(' after call type arguments");
+                const args = try self.parseArguments();
+                node = try self.addNode(.{
+                    .span = joinSpans(self.nodes.items[@intCast(node)].span, self.previousOrCurrent().span),
+                    .data = .{ .CallExpression = .{
+                        .callee = node,
+                        .type_arguments = try call_type_arguments.toOwnedSlice(self.allocator),
+                        .arguments = args,
+                    } },
+                });
+                continue;
+            }
             if (self.eat(.Dot)) {
                 const property = self.expectPropertyName("expected property name");
                 node = try self.addNode(.{
@@ -2771,6 +2809,22 @@ const Parser = struct {
             },
         }
         return node;
+    }
+
+    fn looksLikeCallTypeArguments(self: *const Parser) bool {
+        if (!self.at(.LessThan)) return false;
+        var cursor = self.index + 1;
+        var depth: usize = 1;
+        while (cursor < self.tokens.len) : (cursor += 1) {
+            const kind = self.tokens[cursor].kind;
+            if (kind == .LessThan) depth += 1;
+            if (kind == .GreaterThan) {
+                depth -= 1;
+                if (depth == 0) return cursor + 1 < self.tokens.len and self.tokens[cursor + 1].kind == .LParen;
+            }
+            if (kind == .Semicolon or kind == .EOF or kind == .LBrace) return false;
+        }
+        return false;
     }
 
     fn parseNewExpression(self: *Parser, new_token: Token) anyerror!NodeId {
@@ -4106,6 +4160,28 @@ test "parser preserves optional and default parameters across callable forms" {
     var found_rest_last = false;
     for (malformed.diagnostics) |diagnostic| found_rest_last = found_rest_last or std.mem.eql(u8, diagnostic.message, "rest parameter must be last");
     try std.testing.expect(found_rest_last);
+}
+
+test "parser preserves computed class method names and generic call type arguments" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source =
+        \\class IterableBox { [Symbol.iterator](): any { return this; } }
+        \\function identity<T>(value: T): T { return value; }
+        \\const n = identity<number>(42);
+    ;
+    const scanned = try scanner.scanAll(arena.allocator(), source, false);
+    const parsed = try parse(arena.allocator(), scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    const class_decl = parsed.ast.node(program.statements[0]).data.ClassDeclaration;
+    const method = parsed.ast.node(class_decl.members[0]).data.ClassMethod;
+    try std.testing.expect(method.computed_name != null);
+    const variable = parsed.ast.node(program.statements[2]).data.VariableDeclaration;
+    const declarator = parsed.ast.node(variable.declarations[0]).data.VariableDeclarator;
+    const call = parsed.ast.node(declarator.init.?).data.CallExpression;
+    try std.testing.expectEqual(@as(usize, 1), call.type_arguments.len);
 }
 
 test "parser preserves constructor parameter properties and class field markers" {

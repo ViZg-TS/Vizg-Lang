@@ -738,7 +738,7 @@ const Lowerer = struct {
         const node = self.local.frontend.ast.typeNode(node_id);
         switch (node.data) {
             .Named => |named| for (named.type_arguments) |child| self.eraseTypeNode(child),
-            .Literal, .TypeQuery => {},
+            .This, .Literal, .TypeQuery => {},
             .Array, .Readonly, .KeyOf, .Parenthesized => |child| self.eraseTypeNode(child),
             .IndexedAccess => |indexed| {
                 self.eraseTypeNode(indexed.object_type);

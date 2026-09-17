@@ -57,6 +57,7 @@ pub const GenericTypeParameter = struct {
 
 pub const TypeNodeData = union(enum) {
     Named: NamedType,
+    This: void,
     Literal: LiteralType,
     Array: TypeNodeId,
     Readonly: TypeNodeId,
@@ -309,6 +310,7 @@ pub const ClassMethodKind = enum { method, constructor, getter, setter };
 
 pub const ClassMethod = struct {
     name: []const u8,
+    computed_name: ?NodeId = null,
     type_parameters: []const GenericTypeParameter = &.{},
     params: []const NodeId,
     body: NodeId,
@@ -363,6 +365,7 @@ pub const ExpressionStatement = struct {
 
 pub const CallExpression = struct {
     callee: NodeId,
+    type_arguments: []const TypeNodeId = &.{},
     arguments: []const NodeId,
     optional: bool = false,
 };

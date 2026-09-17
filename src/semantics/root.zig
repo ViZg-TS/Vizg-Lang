@@ -4331,3 +4331,26 @@ test "BUG-0075 string enum members are string literals and disable numeric rever
     try std.testing.expect(saw_invalid_index);
     try std.testing.expectEqual(@as(usize, 1), result.semantic_diagnostics.len);
 }
+
+test "computed class members are indexable through symbol-typed keys" {
+    var result = try analyze(std.testing.allocator,
+        \\let key: symbol;
+        \\class Counter { [key](): number { return 1; } }
+        \\const counter = new Counter();
+        \\const value = counter[key]();
+    );
+    defer result.deinit();
+
+    var key_symbol: ?binder.SymbolId = null;
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind == .variable and std.mem.eql(u8, symbol.name, "key")) key_symbol = symbol.id;
+    }
+    const symbol_id = key_symbol orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(result.type_store.builtins.symbol, result.lookupSymbolType(symbol_id).?.effective().?);
+    for (result.frontend.resolve.references) |reference| {
+        if (!std.mem.eql(u8, reference.name, "key")) continue;
+        try std.testing.expectEqual(result.type_store.builtins.symbol, result.lookupNodeType(reference.node).?);
+    }
+    const initializer = testVariableInitializer(&result, "value") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(result.type_store.builtins.number, result.lookupNodeType(initializer).?);
+}

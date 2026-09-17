@@ -382,7 +382,7 @@ size_t vizg_c_fields_Vizg_HirClassDetail(void) {
 size_t vizg_c_fields_Vizg_HirClassMethod(void) {
     return F(Vizg_HirClassMethod, function_id, 1) + F(Vizg_HirClassMethod, name_ptr, 2) +
         F(Vizg_HirClassMethod, name_len, 3) + F(Vizg_HirClassMethod, kind, 4) +
-        F(Vizg_HirClassMethod, flags, 5) + F(Vizg_HirClassMethod, reserved, 6);
+        F(Vizg_HirClassMethod, flags, 5) + F(Vizg_HirClassMethod, key_kind, 6) + F(Vizg_HirClassMethod, reserved, 7) + F(Vizg_HirClassMethod, computed_value_id, 8);
 }
 size_t vizg_c_fields_Vizg_HirBlockDetail(void) {
     return F(Vizg_HirBlockDetail, id, 1) + F(Vizg_HirBlockDetail, parameter_count, 2);

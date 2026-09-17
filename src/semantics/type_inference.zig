@@ -296,7 +296,7 @@ fn inferNode(
             call.optional,
             tree.node(call.callee).data == .SuperExpression,
             tree.node(call.callee).data == .SuperExpression,
-            &.{},
+            call.type_arguments,
             entries,
             store,
             resolved_type_nodes,
@@ -337,6 +337,83 @@ fn inferTaggedTemplate(
     };
     const signature = store.lookupFunction(tag.kind.function) orelse return .{ .type_id = store.builtins.unknown };
     return .{ .type_id = signature.return_type };
+}
+
+fn genericParameterList(
+    allocator: std.mem.Allocator,
+    signature: types.FunctionSignature,
+    store: *const types.TypeStore,
+) ![]const types.GenericParameter {
+    const count: usize = @intCast(signature.type_parameter_count);
+    const parameters = try allocator.alloc(types.GenericParameter, count);
+    for (parameters, 0..) |*parameter, index| {
+        const type_id = genericParameterAt(signature, index, store) orelse store.builtins.unknown;
+        const ty = store.lookup(type_id);
+        parameter.* = if (ty != null and ty.?.kind == .type_parameter) .{
+            .type_id = type_id,
+            .constraint = ty.?.kind.type_parameter.constraint,
+            .default = ty.?.kind.type_parameter.default,
+        } else .{ .type_id = type_id };
+    }
+    return parameters;
+}
+
+fn inferTypeParameterBinding(
+    parameter_type: types.TypeId,
+    actual_type: types.TypeId,
+    parameters: []const types.GenericParameter,
+    bindings: []types.TypeId,
+    store: *types.TypeStore,
+) !bool {
+    for (parameters, 0..) |parameter, index| {
+        if (parameter.type_id != parameter_type) continue;
+        if (bindings[index] == store.builtins.unknown) bindings[index] = actual_type else if (bindings[index] != actual_type)
+            bindings[index] = try store.unionOf(&.{ bindings[index], actual_type });
+        return true;
+    }
+    const expected = store.lookup(parameter_type) orelse return false;
+    const actual = store.lookup(actual_type) orelse return false;
+    return switch (expected.kind) {
+        .array => |array| switch (actual.kind) {
+            .array => |actual_array| try inferTypeParameterBinding(array.element_type, actual_array.element_type, parameters, bindings, store),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn genericCallBindings(
+    allocator: std.mem.Allocator,
+    signature: types.FunctionSignature,
+    arguments: []const ast_mod.NodeId,
+    explicit_type_arguments: []const ast_mod.TypeNodeId,
+    entries: []const node_type_info_mod.NodeTypeInfo,
+    store: *types.TypeStore,
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
+) !?struct { parameters: []const types.GenericParameter, arguments: []const types.TypeId } {
+    if (signature.type_parameter_count == 0) return null;
+    const parameters = try genericParameterList(allocator, signature, store);
+    if (explicit_type_arguments.len > parameters.len) return null;
+    const bindings = try allocator.alloc(types.TypeId, parameters.len);
+    @memset(bindings, store.builtins.unknown);
+    for (explicit_type_arguments, 0..) |type_node, index|
+        bindings[index] = lookupResolvedTypeNode(type_node, resolved_type_nodes) orelse store.builtins.unknown;
+    for (arguments, 0..) |argument, index| {
+        const actual = findType(entries, argument) orelse continue;
+        const parameter = parameterForArgument(signature, index) orelse continue;
+        _ = try inferTypeParameterBinding(restArgumentType(parameter, store), actual, parameters, bindings, store);
+    }
+    for (parameters, 0..) |parameter, index| {
+        if (bindings[index] == store.builtins.unknown) {
+            if (parameter.default) |default| bindings[index] = try store.substitute(default, parameters[0..index], bindings[0..index]);
+        }
+        if (bindings[index] == store.builtins.unknown) continue;
+        if (parameter.constraint) |raw_constraint| {
+            const constraint = try store.substitute(raw_constraint, parameters[0..index], bindings[0..index]);
+            if (!type_compat.isAssignableInStore(bindings[index], constraint, store)) return null;
+        }
+    }
+    return .{ .parameters = parameters, .arguments = bindings };
 }
 
 fn inferCall(
@@ -496,9 +573,26 @@ fn inferCall(
             };
         }
         const signature = store.lookupFunction(member_type.kind.function) orelse return .{ .type_id = store.builtins.unknown };
-        const result = validateCallArguments(signature, signature.return_type, arguments, receiver, entries, store) orelse return null;
+        var effective_signature = signature;
+        if (signature.type_parameter_count == 0) {
+            if (explicit_type_arguments.len != 0) return .{
+                .type_id = signature.return_type,
+                .valid = false,
+                .issue = .invalid_argument_type,
+                .receiver_type = receiver,
+            };
+        } else if (try genericCallBindings(allocator, signature, arguments, explicit_type_arguments, entries, store, resolved_type_nodes)) |bindings| {
+            const substituted = try store.substitute(signature.id, bindings.parameters, bindings.arguments);
+            effective_signature = store.lookupFunction(substituted) orelse signature;
+        } else return .{
+            .type_id = signature.return_type,
+            .valid = false,
+            .issue = .invalid_argument_type,
+            .receiver_type = receiver,
+        };
+        const result = validateCallArguments(effective_signature, effective_signature.return_type, arguments, receiver, entries, store) orelse return null;
         if (!result.valid) return result;
-        try returns.append(allocator, signature.return_type);
+        try returns.append(allocator, effective_signature.return_type);
     }
     if (returns.items.len == 0) return .{
         .type_id = store.builtins.unknown,
@@ -508,6 +602,34 @@ fn inferCall(
     };
     if (optional) try returns.append(allocator, store.builtins.undefined);
     return .{ .type_id = try store.unionOf(returns.items), .receiver_type = receiver };
+}
+
+fn genericParameterAt(signature: types.FunctionSignature, target: usize, store: *const types.TypeStore) ?types.TypeId {
+    var seen: [32]types.TypeId = undefined;
+    var count: usize = 0;
+    for (signature.parameters) |parameter| {
+        const ty = store.lookup(parameter.type_id) orelse continue;
+        if (ty.kind != .type_parameter) continue;
+        var duplicate = false;
+        for (seen[0..count]) |item| if (item == parameter.type_id) {
+            duplicate = true;
+            break;
+        };
+        if (duplicate) continue;
+        if (count == target) return parameter.type_id;
+        if (count < seen.len) seen[count] = parameter.type_id;
+        count += 1;
+    }
+    const return_ty = store.lookup(signature.return_type) orelse return null;
+    if (return_ty.kind == .type_parameter) {
+        var duplicate = false;
+        for (seen[0..@min(count, seen.len)]) |item| if (item == signature.return_type) {
+            duplicate = true;
+            break;
+        };
+        if (!duplicate and count == target) return signature.return_type;
+    }
+    return null;
 }
 
 fn callableSignature(type_id: types.TypeId, store: *const types.TypeStore) ?types.FunctionSignature {
@@ -727,6 +849,11 @@ fn lookupDeclaredMember(
     tree: ast_mod.Ast,
     store: *types.TypeStore,
 ) !OperatorResult {
+    if (isSymbolIndex(key, store)) {
+        if (try lookupComputedSymbolMember(object_type, store, store.count() + 1)) |type_id|
+            return .{ .type_id = type_id };
+        return invalidAccess(key, store.builtins.unknown);
+    }
     if (isNumericIndex(key, tree, store)) {
         if (lookupNumericIndexSignature(object_type, store, store.count() + 1)) |type_id|
             return .{ .type_id = type_id };
@@ -743,6 +870,56 @@ fn lookupDeclaredMember(
     };
 }
 
+fn lookupComputedSymbolMember(
+    type_id: types.TypeId,
+    store: *types.TypeStore,
+    remaining: usize,
+) !?types.TypeId {
+    if (remaining == 0) return null;
+    const ty = store.lookup(type_id) orelse return null;
+    const table: ?types.MemberTable = switch (ty.kind) {
+        .class => |instance| if (store.lookupClassSemanticType(instance.identity)) |semantic| semantic.instance_members else null,
+        .class_constructor => |constructor| if (store.lookupClassSemanticType(constructor.identity)) |semantic| semantic.static_members else null,
+        .interface => |interface| if (store.lookupInterfaceSemanticType(interface.identity)) |semantic| semantic.members else null,
+        else => null,
+    };
+    if (table) |members| {
+        if (members.computed_members.len != 0) {
+            var result = members.computed_members[0].type_id;
+            for (members.computed_members[1..]) |member|
+                result = try store.unionOf(&.{ result, member.type_id });
+            return result;
+        }
+    }
+    return switch (ty.kind) {
+        .class => |instance| if (store.lookupClassSemanticType(instance.identity)) |semantic|
+            if (semantic.inheritance.extends) |base| try lookupComputedSymbolMember(base, store, remaining - 1) else null
+        else
+            null,
+        .class_constructor => |constructor| if (store.lookupClassSemanticType(constructor.identity)) |semantic| blk: {
+            const base_instance = semantic.inheritance.extends orelse break :blk null;
+            const base = store.lookup(base_instance) orelse break :blk null;
+            if (base.kind != .class) break :blk null;
+            const base_class = store.lookupClassSemanticType(base.kind.class.identity) orelse break :blk null;
+            break :blk try lookupComputedSymbolMember(base_class.constructor_type, store, remaining - 1);
+        } else null,
+        .interface => |interface| if (store.lookupInterfaceSemanticType(interface.identity)) |semantic| blk: {
+            for (semantic.inheritance.extends) |base|
+                if (try lookupComputedSymbolMember(base, store, remaining - 1)) |result| break :blk result;
+            break :blk null;
+        } else null,
+        .applied_generic => try lookupComputedSymbolMember(store.resolveAppliedTarget(type_id) catch return null, store, remaining - 1),
+        else => null,
+    };
+}
+
+fn isSymbolIndex(key: AccessKey, store: *types.TypeStore) bool {
+    return switch (key) {
+        .property => false,
+        .index => |index| index.type_id == store.builtins.symbol or
+            (if (store.lookup(index.type_id)) |ty| ty.kind == .primitive and ty.kind.primitive == .symbol else false),
+    };
+}
 fn lookupNumericIndexSignature(
     type_id: types.TypeId,
     store: *types.TypeStore,

@@ -9,7 +9,7 @@
 #define VIZG_ABI_VERSION 1u
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
-#define VIZG_HIR_DETAIL_API_VERSION 8u
+#define VIZG_HIR_DETAIL_API_VERSION 9u
 #define VIZG_HIR_REACHABILITY_API_VERSION 3u
 #define VIZG_HIR_CONSUMER_API_VERSION 1u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
@@ -1158,7 +1158,9 @@ typedef struct Vizg_HirClassMethod {
     size_t name_len;
     uint32_t kind;
     uint8_t flags; /* bit 0 static */
-    uint8_t reserved[3];
+    uint8_t key_kind; /* 0 static, 1 computed, 2 private */
+    uint8_t reserved[2];
+    uint64_t computed_value_id;
 } Vizg_HirClassMethod;
 
 typedef struct Vizg_HirBlockDetail {

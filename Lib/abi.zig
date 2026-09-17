@@ -7,7 +7,7 @@ const vizg = @import("vizg-impl");
 pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
-pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 8;
+pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 9;
 pub const VIZG_HIR_REACHABILITY_API_VERSION: u32 = 3;
 pub const VIZG_HIR_CONSUMER_API_VERSION: u32 = 1;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
@@ -771,7 +771,9 @@ pub const Vizg_HirClassMethod = extern struct {
     name_len: usize,
     kind: u32,
     flags: u8,
-    reserved: [3]u8,
+    key_kind: u8,
+    reserved: [2]u8,
+    computed_value_id: u64,
 };
 
 pub const Vizg_HirBlockDetail = extern struct {
@@ -3484,9 +3486,18 @@ pub fn hirClassMethodAt(
     if (method_index >= methods.len) return .INVALID_ARGUMENT;
     const method = methods[method_index];
     const function = hirFunctionById(hir_result, method.function) orelse return .INVALID_STATE;
-    const name = switch (method.name) {
+    const name: []const u8 = switch (method.name) {
         .static => |value| value,
-        .computed, .private => return .INVALID_STATE,
+        else => "",
+    };
+    const key_kind: u8 = switch (method.name) {
+        .static => 0,
+        .computed => 1,
+        .private => 2,
+    };
+    const computed_value_id: u64 = switch (method.name) {
+        .computed => |value| idIndex(value),
+        else => VIZG_HIR_ID_NONE,
     };
     output.* = .{
         .function_id = idIndex(method.function),
@@ -3494,7 +3505,9 @@ pub fn hirClassMethodAt(
         .name_len = name.len,
         .kind = @intFromEnum(function.kind),
         .flags = @intFromBool(method.is_static),
-        .reserved = .{ 0, 0, 0 },
+        .key_kind = key_kind,
+        .reserved = .{ 0, 0 },
+        .computed_value_id = computed_value_id,
     };
     return .OK;
 }

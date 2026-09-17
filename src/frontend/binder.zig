@@ -299,6 +299,7 @@ const Binder = struct {
                 if (field.initializer) |initializer| try self.bindNode(initializer, scope);
             },
             .ClassMethod => |method| {
+                if (method.computed_name) |computed| try self.bindNode(computed, scope);
                 const symbol_id = try self.declare(scope, method.name, .method, node_id, node.span, true);
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
                 const declaration_scope = try self.bindTypeParameters(method.type_parameters, scope, node_id);

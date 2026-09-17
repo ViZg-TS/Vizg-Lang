@@ -527,6 +527,16 @@ fn resolveRemainingAnnotations(context: *TypeResolutionContext, bind: binder.Bin
             .Parameter => |parameter| if (parameter.type_annotation) |annotation| {
                 _ = try resolveTypeAnnotation(context, annotation);
             },
+            .CallExpression => |expression| {
+                for (expression.type_arguments) |argument| {
+                    _ = try resolveTypeNode(
+                        context,
+                        argument,
+                        context.tree.typeNode(argument).span,
+                        false,
+                    );
+                }
+            },
             .NewExpression => |expression| {
                 for (expression.type_arguments) |argument| {
                     _ = try resolveTypeNode(
@@ -583,8 +593,12 @@ fn collectClassBody(
     const class_type = context.type_store.lookupClassSemanticType(identity) orelse return;
     var static_members: std.ArrayList(types.SemanticMember) = .empty;
     defer static_members.deinit(context.allocator);
+    var static_computed_members: std.ArrayList(types.SemanticMember) = .empty;
+    defer static_computed_members.deinit(context.allocator);
     var instance_members: std.ArrayList(types.SemanticMember) = .empty;
     defer instance_members.deinit(context.allocator);
+    var instance_computed_members: std.ArrayList(types.SemanticMember) = .empty;
+    defer instance_computed_members.deinit(context.allocator);
     var static_numeric_index: ?types.TypeId = null;
     var instance_numeric_index: ?types.TypeId = null;
     var constructor_signature: ?types.TypeId = null;
@@ -663,7 +677,12 @@ fn collectClassBody(
                         .type_id = signature_id,
                         .visibility = visibility(method.access),
                     };
-                    if (method.is_static)
+                    if (method.computed_name != null) {
+                        if (method.is_static)
+                            try static_computed_members.append(context.allocator, member)
+                        else
+                            try instance_computed_members.append(context.allocator, member);
+                    } else if (method.is_static)
                         try static_members.append(context.allocator, member)
                     else
                         try instance_members.append(context.allocator, member);
@@ -684,8 +703,8 @@ fn collectClassBody(
     };
     try context.type_store.completeClassSemanticType(
         identity,
-        .{ .members = static_members.items, .numeric_index = static_numeric_index },
-        .{ .members = instance_members.items, .numeric_index = instance_numeric_index },
+        .{ .members = static_members.items, .computed_members = static_computed_members.items, .numeric_index = static_numeric_index },
+        .{ .members = instance_members.items, .computed_members = instance_computed_members.items, .numeric_index = instance_numeric_index },
         constructor_signature,
         .{ .extends = extends },
     );
@@ -932,6 +951,7 @@ fn resolveTypeNode(
                 },
             };
         },
+        .This => context.type_store.builtins.unknown,
         .Literal => |literal| try resolveLiteralType(context, literal, annotation_span),
         .Array => |element| try context.type_store.intern(.{ .array = .{
             .element_type = try resolveTypeNode(context, element, annotation_span, false),

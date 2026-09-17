@@ -124,6 +124,10 @@ pub const SemanticMember = struct {
 
 pub const MemberTable = struct {
     members: []const SemanticMember = &.{},
+    /// Members declared with a computed property name. They live outside the
+    /// string-name namespace so symbol-keyed access can be modeled without
+    /// inventing sentinel property spellings.
+    computed_members: []const SemanticMember = &.{},
     numeric_index: ?TypeId = null,
 };
 

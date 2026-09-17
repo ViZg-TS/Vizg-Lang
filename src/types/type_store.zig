@@ -1031,8 +1031,14 @@ pub const TypeStore = struct {
             members[index] = member;
             members[index].name = try self.allocator.dupe(u8, member.name);
         }
+        const computed_members = try self.allocator.alloc(model.SemanticMember, table.computed_members.len);
+        for (table.computed_members, 0..) |member, index| {
+            computed_members[index] = member;
+            computed_members[index].name = try self.allocator.dupe(u8, member.name);
+        }
         return .{
             .members = members,
+            .computed_members = computed_members,
             .numeric_index = table.numeric_index,
         };
     }

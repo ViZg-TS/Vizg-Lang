@@ -62,7 +62,10 @@ pub fn lowerClassValue(
                 if (constructor != null) return error.DuplicateClassConstructor;
                 constructor = function;
             } else try methods.append(inputs.builder.allocator, .{
-                .name = .{ .static = try inputs.builder.copyString(method.name) },
+                .name = if (method.computed_name) |computed|
+                    .{ .computed = try context.lowerExpression(computed) }
+                else
+                    .{ .static = try inputs.builder.copyString(method.name) },
                 .function = function,
                 .is_static = method.is_static,
             });
@@ -1031,7 +1034,7 @@ const Context = struct {
         const node = self.inputs.local.frontend.ast.typeNode(node_id);
         switch (node.data) {
             .Named => |named| for (named.type_arguments) |child| self.eraseTypeNode(child),
-            .Literal, .TypeQuery => {},
+            .This, .Literal, .TypeQuery => {},
             .Array, .Readonly, .KeyOf, .Parenthesized => |child| self.eraseTypeNode(child),
             .IndexedAccess => |indexed| {
                 self.eraseTypeNode(indexed.object_type);
