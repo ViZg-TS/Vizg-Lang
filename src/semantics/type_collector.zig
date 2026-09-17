@@ -521,6 +521,7 @@ fn resolveRemainingAnnotations(context: *TypeResolutionContext, bind: binder.Bin
                 _ = try resolveTypeAnnotation(context, annotation);
             },
             .ClassMethod => |method| if (method.return_type) |annotation| {
+                context.scope = declarationTypeScope(context, node_id, context.scope);
                 _ = try resolveTypeAnnotation(context, annotation);
             },
             .Parameter => |parameter| if (parameter.type_annotation) |annotation| {
@@ -584,12 +585,25 @@ fn collectClassBody(
     defer static_members.deinit(context.allocator);
     var instance_members: std.ArrayList(types.SemanticMember) = .empty;
     defer instance_members.deinit(context.allocator);
+    var static_numeric_index: ?types.TypeId = null;
+    var instance_numeric_index: ?types.TypeId = null;
     var constructor_signature: ?types.TypeId = null;
 
     for (members) |member_id| {
         const node = context.tree.node(member_id);
         switch (node.data) {
             .ClassField => |field| {
+                if (field.index_key_type) |key_annotation| {
+                    const key_type = try resolveTypeAnnotation(context, key_annotation);
+                    const value_type = if (field.type_annotation) |annotation|
+                        try resolveTypeAnnotation(context, annotation)
+                    else
+                        context.type_store.builtins.unknown;
+                    if (key_type == context.type_store.builtins.number) {
+                        if (field.is_static) static_numeric_index = value_type else instance_numeric_index = value_type;
+                    }
+                    continue;
+                }
                 const member_symbol = findDeclarationSymbol(context.symbols, member_id, .field);
                 context.scope = if (member_symbol) |value| value.scope else class_scope;
                 const type_id = if (field.type_annotation) |annotation|
@@ -670,8 +684,8 @@ fn collectClassBody(
     };
     try context.type_store.completeClassSemanticType(
         identity,
-        .{ .members = static_members.items },
-        .{ .members = instance_members.items },
+        .{ .members = static_members.items, .numeric_index = static_numeric_index },
+        .{ .members = instance_members.items, .numeric_index = instance_numeric_index },
         constructor_signature,
         .{ .extends = extends },
     );
@@ -694,13 +708,22 @@ fn collectInterfaceMembers(context: *TypeResolutionContext, symbol: binder.Symbo
     const body = context.tree.typeNode(declaration.body);
     var members: std.ArrayList(types.SemanticMember) = .empty;
     defer members.deinit(context.allocator);
+    var numeric_index: ?types.TypeId = null;
     switch (body.data) {
-        .Object => |properties| for (properties) |property| try members.append(context.allocator, .{
-            .name = property.name,
-            .type_id = try resolveTypeNode(context, property.type_node, property.span, false),
-            .readonly = property.readonly,
-            .optional = property.optional,
-        }),
+        .Object => |properties| for (properties) |property| {
+            if (property.index_key_type) |key_node| {
+                const key_type = try resolveTypeNode(context, key_node, property.span, false);
+                if (key_type == context.type_store.builtins.number)
+                    numeric_index = try resolveTypeNode(context, property.type_node, property.span, false);
+                continue;
+            }
+            try members.append(context.allocator, .{
+                .name = property.name,
+                .type_id = try resolveTypeNode(context, property.type_node, property.span, false),
+                .readonly = property.readonly,
+                .optional = property.optional,
+            });
+        },
         else => {},
     }
     var heritage: std.ArrayList(types.TypeId) = .empty;
@@ -711,7 +734,7 @@ fn collectInterfaceMembers(context: *TypeResolutionContext, symbol: binder.Symbo
     );
     try context.type_store.completeInterfaceSemanticType(
         types.SemanticDeclId.init(context.current_module, symbol.declaration),
-        .{ .members = members.items },
+        .{ .members = members.items, .numeric_index = numeric_index },
         .{ .extends = heritage.items },
     );
 }
@@ -795,6 +818,11 @@ fn collectMethodSignature(
     forced_return_type: ?types.TypeId,
     signatures: *std.ArrayList(FunctionSignatureEntry),
 ) !types.TypeId {
+    if (method.type_parameters.len != 0) {
+        const declaration = if (method_symbol) |value| value.declaration else return error.InvalidTypeId;
+        context.scope = declarationTypeScope(context, declaration, fallback_scope);
+        _ = try resolveGenericParameterMetadata(context, declaration, method.type_parameters);
+    }
     var parameters: std.ArrayList(types.ParameterType) = .empty;
     defer parameters.deinit(context.allocator);
     for (method.params) |parameter_id| {
@@ -818,7 +846,10 @@ fn collectMethodSignature(
         if (parameter_symbol) |value| if (parameter.type_annotation != null)
             try putDeclared(context.semantic_symbol_types, context.allocator, value.id, type_id);
     }
-    context.scope = if (method_symbol) |value| value.scope else fallback_scope;
+    context.scope = if (method_symbol) |value|
+        declarationTypeScope(context, value.declaration, value.scope)
+    else
+        fallback_scope;
     var return_type = if (forced_return_type) |type_id|
         type_id
     else if (method.return_type) |annotation|
@@ -826,7 +857,7 @@ fn collectMethodSignature(
     else
         context.type_store.builtins.unknown;
     return_type = try type_inference.wrapFunctionReturn(return_type, method.flags, context.type_store);
-    const signature_id = try context.type_store.addFunctionDetailed(parameters.items, return_type, 0, .{
+    const signature_id = try context.type_store.addFunctionDetailed(parameters.items, return_type, @intCast(method.type_parameters.len), .{
         .is_async = method.flags.is_async,
         .is_generator = method.flags.is_generator,
     });
@@ -1261,6 +1292,19 @@ fn resolveTypeQuery(context: *TypeResolutionContext, name: []const u8, span: ast
 
 pub fn resolveTypeName(context: *TypeResolutionContext, name: []const u8) anyerror!TypeNameResolution {
     if (findVisibleSymbol(context, name, .type)) |symbol| {
+        if (symbol.source_module_id != null) {
+            if (findImportedType(context, name, symbol.id)) |imported| {
+                if (imported.type_available and !imported.namespace) return importedResolution(imported);
+            }
+            // Source globals are implicit project imports. During the initial
+            // single-module pass their target identity is not available yet;
+            // defer it exactly like an authored import instead of diagnosing a
+            // missing local type declaration.
+            return .{ .resolved = .{
+                .type_id = context.type_store.builtins.unknown,
+                .symbol_id = symbol.id,
+            } };
+        }
         if (symbol.kind == .import) {
             if (findImportedType(context, name, symbol.id)) |imported| {
                 if (imported.type_available and !imported.namespace) return importedResolution(imported);

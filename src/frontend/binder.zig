@@ -292,14 +292,17 @@ const Binder = struct {
                 for (class_expr.members) |member| try self.bindNode(member, class_scope);
             },
             .ClassField => |field| {
-                const symbol_id = try self.declare(scope, field.name, .field, node_id, node.span, true);
-                try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                if (field.index_key_type == null) {
+                    const symbol_id = try self.declare(scope, field.name, .field, node_id, node.span, true);
+                    try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
+                }
                 if (field.initializer) |initializer| try self.bindNode(initializer, scope);
             },
             .ClassMethod => |method| {
                 const symbol_id = try self.declare(scope, method.name, .method, node_id, node.span, true);
                 try self.node_symbols.append(self.allocator, .{ .node = node_id, .symbol = symbol_id });
-                const function_scope = try self.addScope(.function, scope);
+                const declaration_scope = try self.bindTypeParameters(method.type_parameters, scope, node_id);
+                const function_scope = try self.addScope(.function, declaration_scope);
                 for (method.params) |param_id| switch (self.ast.node(param_id).data) {
                     .Parameter => |param| {
                         if (param.pattern) |pattern| {
@@ -401,7 +404,8 @@ const Binder = struct {
                             try self.declarePattern(catch_scope, pattern, .variable, false, true);
                             try self.bindPatternExpressions(pattern, catch_scope, false);
                         } else {
-                            _ = try self.declare(catch_scope, parameter.name, .variable, parameter_id, parameter_node.span, true);
+                            const symbol_id = try self.declare(catch_scope, parameter.name, .variable, parameter_id, parameter_node.span, true);
+                            try self.node_symbols.append(self.allocator, .{ .node = parameter_id, .symbol = symbol_id });
                         },
                         else => {},
                     }

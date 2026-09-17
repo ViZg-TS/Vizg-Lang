@@ -250,7 +250,7 @@ pub fn createFieldInitializer(
 ) !?ids.FunctionId {
     var count: usize = 0;
     for (members) |member_id| switch (inputs.local.frontend.ast.node(member_id).data) {
-        .ClassField => |field| if (field.is_static == static_fields) {
+        .ClassField => |field| if (field.index_key_type == null and field.is_static == static_fields) {
             count += 1;
         },
         else => {},
@@ -274,7 +274,7 @@ pub fn createFieldInitializer(
     try context.visible.appendSlice(inputs.builder.allocator, outer);
     const receiver = try context.emitValue(.load_this, inputs.builder.result.semanticResult().type_store.builtins.unknown);
     for (members) |member_id| switch (inputs.local.frontend.ast.node(member_id).data) {
-        .ClassField => |field| if (field.is_static == static_fields) {
+        .ClassField => |field| if (field.index_key_type == null and field.is_static == static_fields) {
             if (field.type_annotation) |annotation| context.eraseTypeNode(annotation.root);
             const value = if (field.initializer) |initializer|
                 try context.lowerExpression(initializer)

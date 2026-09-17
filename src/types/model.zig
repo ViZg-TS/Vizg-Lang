@@ -124,6 +124,7 @@ pub const SemanticMember = struct {
 
 pub const MemberTable = struct {
     members: []const SemanticMember = &.{},
+    numeric_index: ?TypeId = null,
 };
 
 /// Type of values produced by constructing a class.

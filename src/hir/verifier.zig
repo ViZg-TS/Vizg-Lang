@@ -90,9 +90,12 @@ pub fn verifyBuilder(allocator: std.mem.Allocator, builder: *const builder_mod.B
     for (builder.regions.items, 0..) |region, index| {
         if (!ownedAt(builder, region.id, index) or !validFunction(builder, region.function) or !validOrigin(builder, region.origin)) return .invalid_region;
     }
+    var function_scratch = std.heap.ArenaAllocator.init(allocator);
+    defer function_scratch.deinit();
     for (builder.functions.items, 0..) |*function, index| {
         if (!ownedAt(builder, function.id, index) or !hasModule(&modules, function.module_id)) return .internal_invariant;
-        if (try verifyFunction(allocator, builder, &modules, function, phase)) |code| return code;
+        if (try verifyFunction(function_scratch.allocator(), builder, &modules, function, phase)) |code| return code;
+        _ = function_scratch.reset(.retain_capacity);
     }
     return null;
 }

@@ -527,6 +527,8 @@ const canonical_boolean_language_item_id: u64 = 0x0007;
 const canonical_bigint_language_item_id: u64 = 0x0008;
 const canonical_symbol_language_item_id: u64 = 0x0009;
 const canonical_function_language_item_id: u64 = 0x000a;
+const canonical_regexp_language_item_id: u64 = 0x000b;
+const canonical_promise_language_item_id: u64 = 0x000d;
 
 fn registerCanonicalLanguageItemSurfaces(
     graph: *const modules_mod.ModuleGraph,
@@ -541,7 +543,9 @@ fn registerCanonicalLanguageItemSurfaces(
             item.id != canonical_boolean_language_item_id and
             item.id != canonical_bigint_language_item_id and
             item.id != canonical_symbol_language_item_id and
-            item.id != canonical_function_language_item_id) continue;
+            item.id != canonical_function_language_item_id and
+            item.id != canonical_regexp_language_item_id and
+            item.id != canonical_promise_language_item_id) continue;
         for (exports) |exported| {
             if (exported.module_id != item.module or
                 !std.mem.eql(u8, exported.name, item.exported_name)) continue;
@@ -564,6 +568,14 @@ fn registerCanonicalLanguageItemSurfaces(
                 type_store.registerCanonicalSymbolSurface(exported.identity.type_id);
             } else if (item.id == canonical_function_language_item_id and item.type_only) {
                 type_store.registerCanonicalFunctionSurface(exported.identity.type_id);
+            } else if (item.id == canonical_regexp_language_item_id and item.type_only) {
+                const identity = exported.type_identity orelse exported.identity;
+                type_store.registerCanonicalRegExpSurface(identity.type_id);
+            } else if (item.id == canonical_promise_language_item_id and item.type_only) {
+                const identity = exported.type_identity orelse exported.identity;
+                type_store.registerCanonicalPromiseSurface(identity.declaration) catch |err| switch (err) {
+                    error.InvalidCanonicalPromiseSurface => {},
+                };
             }
             break;
         }

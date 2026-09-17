@@ -197,7 +197,7 @@ fn inferNode(
         else
             null,
         .TemplateExpression => .{ .type_id = b.string },
-        .RegExpLiteral => .{ .type_id = b.object },
+        .RegExpLiteral => .{ .type_id = store.canonicalRegExpSurface() orelse b.object },
         .TaggedTemplateExpression => |expression| inferTaggedTemplate(expression.tag, entries, store),
         .ImportExpression => .{ .type_id = try store.intern(.{ .promise = .{ .value_type = b.unknown } }) },
         .MetaProperty => |meta| switch (meta.kind) {
@@ -392,17 +392,80 @@ fn inferCall(
             .valid = false,
             .issue = .invalid_constructor,
         };
-        const signature_id = class.constructor_signature orelse return .{
+
+        var result_type = class.instance_type;
+        var substitution_parameters: []const types.GenericParameter = &.{};
+        var substitution_arguments: []const types.TypeId = &.{};
+        if (store.lookupGenericDeclaration(identity)) |generic| {
+            if (explicit_type_arguments.len > generic.parameters.len) return .{
+                .type_id = class.instance_type,
+                .valid = false,
+                .issue = .invalid_argument_type,
+            };
+            const generic_arguments = try allocator.alloc(types.TypeId, generic.parameters.len);
+            var generic_index: usize = 0;
+            while (generic_index < explicit_type_arguments.len) : (generic_index += 1) {
+                generic_arguments[generic_index] = lookupResolvedTypeNode(
+                    explicit_type_arguments[generic_index],
+                    resolved_type_nodes,
+                ) orelse store.builtins.unknown;
+            }
+            var can_instantiate = true;
+            while (generic_index < generic.parameters.len) : (generic_index += 1) {
+                const default = generic.parameters[generic_index].default orelse {
+                    can_instantiate = false;
+                    break;
+                };
+                generic_arguments[generic_index] = try store.substitute(
+                    default,
+                    generic.parameters[0..generic_index],
+                    generic_arguments[0..generic_index],
+                );
+            }
+            if (explicit_type_arguments.len != 0 and !can_instantiate) return .{
+                .type_id = class.instance_type,
+                .valid = false,
+                .issue = .invalid_argument_type,
+            };
+            if (can_instantiate) {
+                for (generic.parameters, generic_arguments, 0..) |parameter, argument, parameter_index| {
+                    const raw_constraint = parameter.constraint orelse continue;
+                    const constraint = try store.substitute(
+                        raw_constraint,
+                        generic.parameters[0..parameter_index],
+                        generic_arguments[0..parameter_index],
+                    );
+                    if (!type_compat.isAssignableInStore(argument, constraint, store)) return .{
+                        .type_id = class.instance_type,
+                        .valid = false,
+                        .issue = .invalid_argument_type,
+                    };
+                }
+                result_type = try store.instantiateGeneric(identity, generic_arguments);
+                substitution_parameters = generic.parameters;
+                substitution_arguments = generic_arguments;
+            }
+        } else if (explicit_type_arguments.len != 0) return .{
             .type_id = class.instance_type,
+            .valid = false,
+            .issue = .invalid_argument_type,
+        };
+
+        const signature_id = class.constructor_signature orelse return .{
+            .type_id = result_type,
             .valid = arguments.len == 0,
             .issue = if (arguments.len == 0) .none else .invalid_argument_count,
         };
-        const signature = store.lookupFunction(signature_id) orelse return .{
+        const effective_signature_id = if (substitution_parameters.len != 0)
+            try store.substitute(signature_id, substitution_parameters, substitution_arguments)
+        else
+            signature_id;
+        const signature = store.lookupFunction(effective_signature_id) orelse return .{
             .type_id = store.builtins.unknown,
             .valid = false,
             .issue = .invalid_constructor,
         };
-        return validateCallArguments(signature, class.instance_type, arguments, null, entries, store);
+        return validateCallArguments(signature, result_type, arguments, null, entries, store);
     }
     if (callee_type == store.builtins.any or callee_type == store.builtins.unknown)
         return .{ .type_id = callee_type };
@@ -643,6 +706,13 @@ fn lookupAccessSingleWithCanonicalSurfaces(
                 break :blk invalidAccess(key, b.unknown);
             break :blk lookupAccessSingleWithCanonicalSurfaces(surface, key, tree, store, use_array_surface, use_string_surface, false);
         },
+        .promise => |promise| blk: {
+            if (!use_foundational_surface) break :blk invalidAccess(key, b.unknown);
+            const surface = try store.canonicalPromiseSurface(promise.value_type) orelse
+                break :blk invalidAccess(key, b.unknown);
+            const target = try store.resolveAppliedTarget(surface);
+            break :blk lookupAccessSingleWithCanonicalSurfaces(target, key, tree, store, use_array_surface, use_string_surface, false);
+        },
         else => invalidAccess(key, b.unknown),
     };
 }
@@ -653,6 +723,11 @@ fn lookupDeclaredMember(
     tree: ast_mod.Ast,
     store: *types.TypeStore,
 ) !OperatorResult {
+    if (isNumericIndex(key, tree, store)) {
+        if (lookupNumericIndexSignature(object_type, store, store.count() + 1)) |type_id|
+            return .{ .type_id = type_id };
+        return invalidAccess(key, store.builtins.unknown);
+    }
     const name = accessPropertyName(key, tree) orelse return invalidAccess(key, store.builtins.unknown);
     const member = lookupSemanticMember(object_type, name, store, store.count() + 1) orelse
         return .{ .type_id = store.builtins.unknown, .valid = false, .issue = .unknown_property };
@@ -661,6 +736,34 @@ fn lookupDeclaredMember(
             try store.unionOf(&.{ member.type_id, store.builtins.undefined })
         else
             member.type_id,
+    };
+}
+
+fn lookupNumericIndexSignature(
+    type_id: types.TypeId,
+    store: *types.TypeStore,
+    remaining: usize,
+) ?types.TypeId {
+    if (remaining == 0) return null;
+    const ty = store.lookup(type_id) orelse return null;
+    return switch (ty.kind) {
+        .interface => |interface| blk: {
+            const semantic = store.lookupInterfaceSemanticType(interface.identity) orelse break :blk null;
+            if (semantic.members.numeric_index) |result| break :blk result;
+            for (semantic.inheritance.extends) |base|
+                if (lookupNumericIndexSignature(base, store, remaining - 1)) |result| break :blk result;
+            break :blk null;
+        },
+        .class => |instance| blk: {
+            const semantic = store.lookupClassSemanticType(instance.identity) orelse break :blk null;
+            if (semantic.instance_members.numeric_index) |result| break :blk result;
+            break :blk if (semantic.inheritance.extends) |base|
+                lookupNumericIndexSignature(base, store, remaining - 1)
+            else
+                null;
+        },
+        .applied_generic => lookupNumericIndexSignature(store.resolveAppliedTarget(type_id) catch return null, store, remaining - 1),
+        else => null,
     };
 }
 

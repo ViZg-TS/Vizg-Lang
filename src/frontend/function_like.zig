@@ -80,6 +80,7 @@ pub fn describe(tree: ast.Ast, node_id: ast.NodeId) ?Descriptor {
             .body = method.body,
             .return_type = method.return_type,
             .flags = method.flags,
+            .type_parameters = method.type_parameters,
             .receiver = if (method.is_static) .class_static else .class_instance,
             .kind = switch (method.kind) {
                 .method => .method,

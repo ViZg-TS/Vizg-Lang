@@ -32,6 +32,8 @@ pub const TypeStore = struct {
     canonical_bigint_surface: ?model.TypeId,
     canonical_symbol_surface: ?model.TypeId,
     canonical_function_surface: ?model.TypeId,
+    canonical_regexp_surface: ?model.TypeId,
+    canonical_promise_declaration: ?model.SemanticDeclId,
 
     const StoredType = struct {
         id: model.TypeId,
@@ -64,6 +66,8 @@ pub const TypeStore = struct {
             .canonical_bigint_surface = null,
             .canonical_symbol_surface = null,
             .canonical_function_surface = null,
+            .canonical_regexp_surface = null,
+            .canonical_promise_declaration = null,
         };
     }
 
@@ -111,6 +115,8 @@ pub const TypeStore = struct {
         copy.canonical_bigint_surface = self.canonical_bigint_surface;
         copy.canonical_symbol_surface = self.canonical_symbol_surface;
         copy.canonical_function_surface = self.canonical_function_surface;
+        copy.canonical_regexp_surface = self.canonical_regexp_surface;
+        copy.canonical_promise_declaration = self.canonical_promise_declaration;
         return copy;
     }
 
@@ -192,6 +198,29 @@ pub const TypeStore = struct {
 
     pub fn canonicalFunctionSurface(self: *const TypeStore) ?model.TypeId {
         return self.canonical_function_surface;
+    }
+
+    pub fn registerCanonicalRegExpSurface(self: *TypeStore, type_id: model.TypeId) void {
+        self.canonical_regexp_surface = type_id;
+    }
+
+    pub fn canonicalRegExpSurface(self: *const TypeStore) ?model.TypeId {
+        return self.canonical_regexp_surface;
+    }
+
+    /// Binds the host-selected generic Promise member surface. The semantic
+    /// `promise<T>` kind remains canonical; only observable members are
+    /// projected through this language-item declaration.
+    pub fn registerCanonicalPromiseSurface(self: *TypeStore, declaration: model.SemanticDeclId) !void {
+        const generic = self.lookupGenericDeclaration(declaration) orelse
+            return error.InvalidCanonicalPromiseSurface;
+        if (generic.parameters.len != 1) return error.InvalidCanonicalPromiseSurface;
+        self.canonical_promise_declaration = declaration;
+    }
+
+    pub fn canonicalPromiseSurface(self: *TypeStore, value_type: model.TypeId) !?model.TypeId {
+        const declaration = self.canonical_promise_declaration orelse return null;
+        return try self.instantiateGeneric(declaration, &.{value_type});
     }
 
     fn findArrayType(self: *const TypeStore, type_id: model.TypeId, depth: usize) ?model.TypeId {
@@ -990,7 +1019,10 @@ pub const TypeStore = struct {
             members[index] = member;
             members[index].name = try self.allocator.dupe(u8, member.name);
         }
-        return .{ .members = members };
+        return .{
+            .members = members,
+            .numeric_index = table.numeric_index,
+        };
     }
 };
 

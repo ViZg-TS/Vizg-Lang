@@ -221,6 +221,7 @@ fn exceptionLoweringProject() !project_mod.Project {
         .bytes =
         \\let moduleMarker = 0;
         \\try { moduleMarker = 1; } finally { moduleMarker = 2; }
+        \\try { throw 5; } catch (moduleCaught) { moduleMarker = moduleCaught; }
         \\function caught(): number {
         \\  try { throw 7; } catch (caughtValue) { return caughtValue; }
         \\}
@@ -2494,6 +2495,8 @@ test "HIR exception lowering uses catch entry and resumable cleanup regions" {
         if (hasBinding(function, "moduleMarker")) {
             saw_module_finally = true;
             try std.testing.expectEqual(@as(usize, 1), finally_count);
+            try std.testing.expectEqual(@as(usize, 1), catch_count);
+            try std.testing.expect(hasBinding(function, "moduleCaught"));
             try std.testing.expectEqual(@as(usize, 1), normal_count);
             try std.testing.expectEqual(@as(usize, 1), resume_count);
         }
@@ -2909,6 +2912,61 @@ test "HIR verifier rejects corrupted ID and operation families deterministically
     instructions[0].effects = saved_effects;
 
     try std.testing.expect((try hir.verifier.verifyBuilder(std.testing.allocator, &builder, .raw)) == null);
+}
+
+test "HIR verifier reclaims transient scratch between functions" {
+    var project = try completedProject();
+    defer project.deinit();
+    var result = try hir.HirResult.initEmpty(std.testing.allocator, project.semanticResult().?);
+    defer result.deinit();
+    var builder = hir.builder.Builder.init(&result, .{});
+    const unknown_type = project.semanticResult().?.type_store.builtins.unknown;
+    const function_count = 64;
+    const blocks_per_function = 16;
+
+    for (0..function_count) |_| {
+        try builder.reserve(.functions, 1);
+        const function_id = try builder.makeId(hir.FunctionId, builder.functions.items.len);
+        var anf = try hir.anf_builder.AnfBuilder.init(&builder);
+        var blocks: [blocks_per_function]hir.BlockId = undefined;
+        blocks[0] = anf.entry;
+        for (1..blocks_per_function) |index| blocks[index] = try anf.createBlock();
+        for (blocks, 0..) |block, index| {
+            try anf.beginBlock(block);
+            const value = try anf.emitValue(.{ .constant = .{ .number = @floatFromInt(index) } }, unknown_type);
+            if (index + 1 < blocks.len)
+                try anf.terminate(.{ .branch = .{
+                    .condition = value,
+                    .true_target = blocks[index + 1],
+                    .false_target = blocks[index + 1],
+                } })
+            else
+                try anf.terminate(.{ .return_ = value });
+        }
+        try builder.appendFunction(.{
+            .id = function_id,
+            .module_id = .init(1),
+            .symbol = null,
+            .kind = .ordinary,
+            .flags = .{},
+            .signature_type = unknown_type,
+            .blocks = try anf.finish(),
+            .entry = blocks[0],
+            .origin = .invalid,
+        });
+    }
+    try builder.appendModule(.{
+        .module_id = .init(1),
+        .logical_name = "hir:verifier-scratch",
+        .initialization = builder.functions.items[0].id,
+        .origin = .invalid,
+    });
+
+    var storage: [4 * 1024 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var outer_scratch = std.heap.ArenaAllocator.init(fixed.allocator());
+    defer outer_scratch.deinit();
+    try std.testing.expectEqual(@as(?hir.DiagnosticCode, null), try hir.verifier.verifyBuilder(outer_scratch.allocator(), &builder, .canonical));
 }
 
 test "HIR provenance levels preserve executable shape and full trace records erased syntax" {

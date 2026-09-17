@@ -851,7 +851,12 @@ const Parser = struct {
                 self.recoverUnsupportedClassMember();
                 continue;
             }
+            const before = self.index;
             try members.append(self.allocator, try self.parseClassMember());
+            if (self.index == before and !self.at(.RBrace) and !self.at(.EOF)) {
+                self.report("class member parser made no progress", .unexpected_token);
+                _ = self.advance();
+            }
         }
         _ = self.expect(.RBrace, "expected }");
         return .{ .super_class = super_class, .members = try members.toOwnedSlice(self.allocator) };
@@ -866,6 +871,26 @@ const Parser = struct {
         while (self.at(.Identifier)) {
             if (self.atIdentifierText("static")) is_static = true else if (self.atIdentifierText("readonly")) readonly = true else if (self.atIdentifierText("public")) access = .public else if (self.atIdentifierText("private")) access = .private else if (self.atIdentifierText("protected")) access = .protected else break;
             _ = self.advance();
+        }
+        if (self.eat(.LBracket)) {
+            const parameter = self.expectIdentifierLike("expected index signature parameter name");
+            _ = self.expect(.Colon, "expected ':' after index signature parameter");
+            const key_root = try self.parseType();
+            _ = self.expect(.RBracket, "expected ']' after index signature parameter");
+            _ = self.expect(.Colon, "expected ':' after class index signature");
+            const value_root = try self.parseType();
+            _ = self.eat(.Semicolon);
+            return self.addNode(.{
+                .span = joinSpans(start, self.typeSpan(value_root)),
+                .data = .{ .ClassField = .{
+                    .name = parameter.lexeme,
+                    .readonly = readonly,
+                    .is_static = is_static,
+                    .access = access,
+                    .type_annotation = .{ .root = value_root, .span = self.typeSpan(value_root) },
+                    .index_key_type = .{ .root = key_root, .span = self.typeSpan(key_root) },
+                } },
+            });
         }
         const accessor_kind: ?ast_mod.ClassMethodKind = if (self.atIdentifierText("get") and
             (self.peek(1).kind == .Identifier or self.peek(1).kind == .PrivateIdentifier) and
@@ -889,6 +914,7 @@ const Parser = struct {
         }
         const is_generator = self.eat(.Asterisk);
         const name_token = self.expectPropertyName("expected class member name");
+        const type_parameters = try self.parseGenericTypeParameters();
         if (self.eat(.LParen)) {
             var params: std.ArrayList(NodeId) = .empty;
             errdefer params.deinit(self.allocator);
@@ -905,6 +931,7 @@ const Parser = struct {
                 .span = joinSpans(start, self.previousOrCurrent().span),
                 .data = .{ .ClassMethod = .{
                     .name = name_token.lexeme,
+                    .type_parameters = type_parameters,
                     .params = try params.toOwnedSlice(self.allocator),
                     .body = body,
                     .return_type = return_type,
@@ -1124,6 +1151,24 @@ const Parser = struct {
                     _ = self.advance();
                     break :blk true;
                 } else false;
+                if (self.eat(.LBracket)) {
+                    const index_start = self.previousOrCurrent();
+                    const parameter = self.expectIdentifierLike("expected index signature parameter name");
+                    _ = self.expect(.Colon, "expected ':' after index signature parameter");
+                    const key_type = try self.parseType();
+                    _ = self.expect(.RBracket, "expected ']' after index signature parameter");
+                    _ = self.expect(.Colon, "expected ':' after index signature");
+                    const value_type = try self.parseType();
+                    try members.append(self.allocator, .{
+                        .name = parameter.lexeme,
+                        .readonly = readonly,
+                        .type_node = value_type,
+                        .index_key_type = key_type,
+                        .span = joinSpans(index_start.span, self.typeSpan(value_type)),
+                    });
+                    if (!self.eat(.Semicolon) and !self.eat(.Comma) and !self.at(.RBrace)) self.recoverTypeMember();
+                    continue;
+                }
                 const name = self.expectPropertyName("expected property name in object type");
                 const optional = self.eat(.Question);
                 const member_type = if (self.eat(.LParen)) blk: {
@@ -2981,6 +3026,31 @@ test "parser rejects token streams without exactly one terminal EOF" {
         .span = .{ .start = 0, .end = 5, .line = 1, .column = 1 },
     };
     try std.testing.expectError(error.InvalidTokenStream, parse(std.testing.allocator, &.{token}, .{}));
+}
+
+test "parser preserves generic class method type parameters" {
+    const scanner = @import("scanner.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\class Promise<T> {
+        \\  then<TResult = any>(value: TResult): Promise<TResult> { return this; }
+        \\}
+    ;
+    const scanned = try scanner.scanAll(allocator, source, true);
+    const parsed = try parse(allocator, scanned.tokens, .{});
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+    try std.testing.expectEqual(scanned.tokens.len - 1, parsed.consumed_tokens);
+
+    const statements = parsed.ast.node(parsed.ast.root).data.Program.statements;
+    const class = parsed.ast.node(statements[0]).data.ClassDeclaration;
+    try std.testing.expectEqual(@as(usize, 1), class.members.len);
+    const method = parsed.ast.node(class.members[0]).data.ClassMethod;
+    try std.testing.expectEqualStrings("then", method.name);
+    try std.testing.expectEqual(@as(usize, 1), method.type_parameters.len);
+    try std.testing.expectEqualStrings("TResult", method.type_parameters[0].name);
+    try std.testing.expect(method.type_parameters[0].default_type != null);
 }
 
 test "parser recovery option controls top-level continuation" {

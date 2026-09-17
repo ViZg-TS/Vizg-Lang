@@ -107,6 +107,7 @@ const Resolver = struct {
                 if (field.initializer) |initializer| try self.resolveNode(initializer, scope);
             },
             .ClassMethod => |method| {
+                if (method.type_parameters.len != 0) _ = self.takeScope();
                 const function_scope = self.takeScope();
                 try self.resolveParameterInitializers(method.params, function_scope);
                 try self.resolveNode(method.body, function_scope);

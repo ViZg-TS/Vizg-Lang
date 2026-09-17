@@ -1193,6 +1193,17 @@ test "frontend suite: catch binding resolves only inside catch scope" {
     try std.testing.expectEqual(diagnostics.DiagnosticCode.cannot_find_name, resolved.diagnostics[0].code);
     try expectReference(resolved, "caught", .read, symbol.id);
     try std.testing.expectEqual(@as(usize, 2), countReferences(resolved, "caught", .read));
+
+    const program = parsed.ast.node(parsed.ast.root).data.Program;
+    const try_statement = parsed.ast.node(program.statements[0]).data.TryStatement;
+    const catch_clause = parsed.ast.node(try_statement.handler.?).data.CatchClause;
+    const parameter_id = catch_clause.parameter.?;
+    var projected_symbol: ?binder.SymbolId = null;
+    for (bound.node_symbols) |entry| {
+        if (entry.node == parameter_id) projected_symbol = entry.symbol;
+    }
+    try std.testing.expect(projected_symbol != null);
+    try std.testing.expectEqual(symbol.id, projected_symbol.?);
 }
 
 test "frontend suite: cfg routes try and catch fallthrough through finally" {

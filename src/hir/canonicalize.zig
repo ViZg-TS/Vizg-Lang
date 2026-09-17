@@ -13,21 +13,59 @@ const trace = @import("trace.zig");
 
 pub const Error = error{ CanonicalizationBudget, ResourceLimit } || std.mem.Allocator.Error;
 
+const Scratch = struct {
+    allocator: std.mem.Allocator,
+    constants: []?model.HirConstant,
+    uses: []usize,
+    reachable: []bool,
+    replacements: std.ArrayList(rewrite.ValueReplacement) = .empty,
+    worklist: std.ArrayList(ids.BlockId) = .empty,
+
+    fn init(builder: *builder_mod.Builder) !Scratch {
+        const allocator = builder.allocator;
+        const constants = try allocator.alloc(?model.HirConstant, builder.budget.usage.values);
+        errdefer allocator.free(constants);
+        const uses = try allocator.alloc(usize, builder.budget.usage.values);
+        errdefer allocator.free(uses);
+        var max_function_blocks: usize = 0;
+        for (builder.functions.items) |function|
+            max_function_blocks = @max(max_function_blocks, function.blocks.len);
+        const reachable = try allocator.alloc(bool, max_function_blocks);
+        errdefer allocator.free(reachable);
+        return .{
+            .allocator = allocator,
+            .constants = constants,
+            .uses = uses,
+            .reachable = reachable,
+        };
+    }
+
+    fn deinit(self: *Scratch) void {
+        self.worklist.deinit(self.allocator);
+        self.replacements.deinit(self.allocator);
+        self.allocator.free(self.reachable);
+        self.allocator.free(self.uses);
+        self.allocator.free(self.constants);
+    }
+};
+
 pub fn run(builder: *builder_mod.Builder) Error!void {
+    var scratch = try Scratch.init(builder);
+    defer scratch.deinit();
     var function_index: usize = 0;
     while (function_index < builder.functions.items.len) : (function_index += 1) {
-        while (try canonicalizeFunction(builder, function_index)) {}
+        while (try canonicalizeFunction(builder, function_index, &scratch)) {}
     }
 }
 
-fn canonicalizeFunction(builder: *builder_mod.Builder, function_index: usize) Error!bool {
-    if (try eliminateCopies(builder, function_index)) return true;
-    if (try foldOneLiteral(builder, function_index)) return true;
-    if (try simplifyOneBranch(builder, function_index)) return true;
-    if (try normalizeOneReturn(builder, function_index)) return true;
+fn canonicalizeFunction(builder: *builder_mod.Builder, function_index: usize, scratch: *Scratch) Error!bool {
+    if (try eliminateCopies(builder, function_index, scratch)) return true;
+    if (try foldOneLiteral(builder, function_index, scratch)) return true;
+    if (try simplifyOneBranch(builder, function_index, scratch)) return true;
+    if (try normalizeOneReturn(builder, function_index, scratch)) return true;
     if (try collapseOneMergeValue(builder, function_index)) return true;
-    if (try removeOneUnusedPure(builder, function_index)) return true;
-    if (try removeUnreachable(builder, function_index)) return true;
+    if (try removeOneUnusedPure(builder, function_index, scratch)) return true;
+    if (try removeUnreachable(builder, function_index, scratch)) return true;
     if (try mergeOneJumpBlock(builder, function_index)) return true;
     return false;
 }
@@ -40,13 +78,13 @@ fn noteRewrite(builder: *builder_mod.Builder, kind: trace.EventKind, source: ids
     }
 }
 
-fn eliminateCopies(builder: *builder_mod.Builder, function_index: usize) Error!bool {
+fn eliminateCopies(builder: *builder_mod.Builder, function_index: usize, scratch: *Scratch) Error!bool {
     const function = &builder.functions.items[function_index];
-    var replacements: std.ArrayList(rewrite.ValueReplacement) = .empty;
-    defer replacements.deinit(builder.allocator);
+    scratch.replacements.clearRetainingCapacity();
+    const replacements = &scratch.replacements;
     for (function.blocks) |block| for (block.instructions) |instruction| {
         if (instruction.operation == .copy and copyCanBeEliminated(function, instruction)) {
-            try replacements.append(builder.allocator, .{
+            try replacements.append(scratch.allocator, .{
                 .from = instruction.result.?,
                 .to = rewrite.value(replacements.items, instruction.operation.copy),
             });
@@ -101,8 +139,8 @@ fn hasReplacement(replacements: []const rewrite.ValueReplacement, value_id: ids.
     return false;
 }
 
-fn constantDefinitions(builder: *builder_mod.Builder, function: model.HirFunction) ![]?model.HirConstant {
-    const constants = try builder.allocator.alloc(?model.HirConstant, builder.budget.usage.values);
+fn constantDefinitions(scratch: *Scratch, function: model.HirFunction) []?model.HirConstant {
+    const constants = scratch.constants;
     @memset(constants, null);
     for (function.blocks) |block| for (block.instructions) |instruction| {
         if (instruction.operation == .constant) constants[instruction.result.?.index().?] = instruction.operation.constant;
@@ -110,9 +148,9 @@ fn constantDefinitions(builder: *builder_mod.Builder, function: model.HirFunctio
     return constants;
 }
 
-fn foldOneLiteral(builder: *builder_mod.Builder, function_index: usize) Error!bool {
+fn foldOneLiteral(builder: *builder_mod.Builder, function_index: usize, scratch: *Scratch) Error!bool {
     var function = builder.functions.items[function_index];
-    const constants = try constantDefinitions(builder, function);
+    const constants = constantDefinitions(scratch, function);
     for (function.blocks, 0..) |block, block_index| for (block.instructions, 0..) |instruction, instruction_index| {
         const folded = foldOperation(constants, instruction.operation) orelse continue;
         try noteRewrite(builder, .constant_folded, instruction.origin);
@@ -198,9 +236,9 @@ fn constantEqual(left: model.HirConstant, right: model.HirConstant) bool {
     };
 }
 
-fn simplifyOneBranch(builder: *builder_mod.Builder, function_index: usize) Error!bool {
+fn simplifyOneBranch(builder: *builder_mod.Builder, function_index: usize, scratch: *Scratch) Error!bool {
     var function = builder.functions.items[function_index];
-    const constants = try constantDefinitions(builder, function);
+    const constants = constantDefinitions(scratch, function);
     for (function.blocks, 0..) |block, index| if (block.terminator == .branch) {
         const branch = block.terminator.branch;
         const condition = known(constants, branch.condition) orelse continue;
@@ -214,9 +252,9 @@ fn simplifyOneBranch(builder: *builder_mod.Builder, function_index: usize) Error
     return false;
 }
 
-fn normalizeOneReturn(builder: *builder_mod.Builder, function_index: usize) Error!bool {
+fn normalizeOneReturn(builder: *builder_mod.Builder, function_index: usize, scratch: *Scratch) Error!bool {
     var function = builder.functions.items[function_index];
-    const constants = try constantDefinitions(builder, function);
+    const constants = constantDefinitions(scratch, function);
     for (function.blocks, 0..) |block, index| if (block.terminator == .return_) {
         const returned = block.terminator.return_ orelse continue;
         const item = known(constants, returned) orelse continue;
@@ -286,9 +324,9 @@ fn removeAt(comptime T: type, allocator: std.mem.Allocator, input: []const T, re
     return output;
 }
 
-fn removeOneUnusedPure(builder: *builder_mod.Builder, function_index: usize) Error!bool {
+fn removeOneUnusedPure(builder: *builder_mod.Builder, function_index: usize, scratch: *Scratch) Error!bool {
     var function = builder.functions.items[function_index];
-    const uses = try builder.allocator.alloc(usize, builder.budget.usage.values);
+    const uses = scratch.uses;
     @memset(uses, 0);
     for (function.places) |place| countUses(@TypeOf(place.kind), place.kind, uses);
     for (function.blocks) |block| {
@@ -358,25 +396,25 @@ fn countUses(comptime T: type, input: T, uses: []usize) void {
     }
 }
 
-fn removeUnreachable(builder: *builder_mod.Builder, function_index: usize) Error!bool {
+fn removeUnreachable(builder: *builder_mod.Builder, function_index: usize, scratch: *Scratch) Error!bool {
     var function = builder.functions.items[function_index];
     if (function.blocks.len == 0) return false;
-    const reachable = try builder.allocator.alloc(bool, function.blocks.len);
+    const reachable = scratch.reachable[0..function.blocks.len];
     @memset(reachable, false);
-    var worklist: std.ArrayList(ids.BlockId) = .empty;
-    defer worklist.deinit(builder.allocator);
-    try worklist.append(builder.allocator, function.entry);
+    scratch.worklist.clearRetainingCapacity();
+    const worklist = &scratch.worklist;
+    try worklist.append(scratch.allocator, function.entry);
     for (builder.regions.items) |region| if (region.function.eql(function.id)) {
-        try worklist.append(builder.allocator, region.handler);
-        if (region.continuation) |item| try worklist.append(builder.allocator, item);
-        try worklist.appendSlice(builder.allocator, region.protected_blocks);
+        try worklist.append(scratch.allocator, region.handler);
+        if (region.continuation) |item| try worklist.append(scratch.allocator, item);
+        try worklist.appendSlice(scratch.allocator, region.protected_blocks);
     };
     var cursor: usize = 0;
     while (cursor < worklist.items.len) : (cursor += 1) {
         const index = blockIndex(function.blocks, worklist.items[cursor]) orelse continue;
         if (reachable[index]) continue;
         reachable[index] = true;
-        try appendSuccessors(builder.allocator, &worklist, function.blocks[index].terminator);
+        try appendSuccessors(scratch.allocator, worklist, function.blocks[index].terminator);
     }
     var removed: usize = 0;
     for (reachable) |item| if (!item) {

@@ -36,6 +36,7 @@ pub const TypeMember = struct {
     optional: bool = false,
     readonly: bool = false,
     type_node: TypeNodeId,
+    index_key_type: ?TypeNodeId = null,
     span: tokens.Span,
 };
 
@@ -295,6 +296,7 @@ pub const ClassExpression = struct {
 pub const ClassField = struct {
     name: []const u8,
     type_annotation: ?TypeAnnotation = null,
+    index_key_type: ?TypeAnnotation = null,
     initializer: ?NodeId = null,
     is_static: bool = false,
     readonly: bool = false,
@@ -307,6 +309,7 @@ pub const ClassMethodKind = enum { method, constructor, getter, setter };
 
 pub const ClassMethod = struct {
     name: []const u8,
+    type_parameters: []const GenericTypeParameter = &.{},
     params: []const NodeId,
     body: NodeId,
     return_type: ?TypeAnnotation = null,

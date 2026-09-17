@@ -13,11 +13,12 @@ pub const trigger_primitive_boolean_base: u32 = 1 << 5;
 pub const trigger_primitive_bigint_base: u32 = 1 << 6;
 pub const trigger_primitive_symbol_base: u32 = 1 << 7;
 pub const trigger_function_base: u32 = 1 << 8;
+pub const trigger_promise_base: u32 = 1 << 9;
 const known_trigger_flags = trigger_canonical_array_base | trigger_place_deleted |
     trigger_primitive_string_base | trigger_string_concat_add |
     trigger_primitive_number_base | trigger_primitive_boolean_base |
     trigger_primitive_bigint_base | trigger_primitive_symbol_base |
-    trigger_function_base;
+    trigger_function_base | trigger_promise_base;
 
 /// Host-defined hidden semantic dependency. `operation_tag` is the stable HIR
 /// operation ordinal exported by the HIR ABI; `language_item_id` is opaque to
@@ -918,6 +919,15 @@ const State = struct {
         const foundational_flags = trigger.flags & (trigger_primitive_number_base |
             trigger_primitive_boolean_base | trigger_primitive_bigint_base |
             trigger_primitive_symbol_base | trigger_function_base);
+        if ((trigger.flags & trigger_promise_base) != 0) {
+            const base = switch (operation) {
+                .make_property_place => |value| value.base,
+                .make_element_place => |value| value.base,
+                .call_method, .call_super_method => |value| value.receiver,
+                else => return false,
+            };
+            if (!try self.valueIsPromise(base)) return false;
+        }
         if (foundational_flags != 0) {
             const base = switch (operation) {
                 .make_property_place => |value| value.base,
@@ -957,6 +967,12 @@ const State = struct {
     fn valueIsCanonicalArray(self: *State, value: ids.ValueId) !bool {
         const type_id = self.index.valueType(value) orelse return error.InconsistentProjection;
         return self.typeIsCanonicalArray(type_id, 0);
+    }
+
+    fn valueIsPromise(self: *State, value: ids.ValueId) !bool {
+        const type_id = self.index.valueType(value) orelse return error.InconsistentProjection;
+        const ty = self.type_store.lookup(type_id) orelse return error.InconsistentProjection;
+        return ty.kind == .promise;
     }
 
     fn valueIsPrimitiveString(self: *State, value: ids.ValueId) !bool {

@@ -730,3 +730,28 @@ test "P10-G009 generic Array alias resolves to the canonical array target" {
     try testing.expectEqual(direct, try type_store.resolveAppliedTarget(via));
     try testing.expect(type_store.lookup(direct).?.kind == .array);
 }
+
+test "numeric interface index signature is collected as semantic index policy" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var type_store = types.TypeStore.init(arena.allocator());
+    const result = try frontend.analyze(arena.allocator(), .{ .text =
+        \\interface ByteView {
+        \\  readonly length: number;
+        \\  [index: number]: number;
+        \\}
+    }, .{});
+    const collected = try type_collector.collectDeclaredTypes(
+        arena.allocator(),
+        result.source,
+        result.ast,
+        result.bind,
+        &type_store,
+    );
+    try testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try testing.expectEqual(@as(usize, 0), collected.diagnostics.len);
+    const symbol = symbolByName(result, "ByteView", .type).?;
+    const shape = type_store.lookupInterfaceSemanticType(.init(0, symbol.declaration)).?;
+    try testing.expectEqual(type_store.builtins.number, shape.members.numeric_index.?);
+    try testing.expectEqual(type_store.builtins.number, semanticMember(shape.members, "length").?.type_id);
+}

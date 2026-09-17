@@ -674,10 +674,23 @@ pub const Project = struct {
         const logical_name = if (module.source) |source| source.logical_name else "";
         for (result.frontend.bind.module.exports) |exported| {
             if (std.mem.eql(u8, exported.name, "default")) continue;
-            const namespace: contracts.ExternalNamespace = if (exported.type_only)
+            var namespace: contracts.ExternalNamespace = if (exported.type_only)
                 .{ .type = true }
             else
                 .{ .value = true };
+            // Declaration exports may inhabit both TypeScript namespaces
+            // (classes and enums). Derive that fact from binder identities;
+            // the export spelling alone deliberately carries no type policy.
+            if (exported.kind == .declaration) {
+                for (result.frontend.bind.symbols) |symbol| {
+                    if (symbol.declaration != exported.node or
+                        !std.mem.eql(u8, symbol.name, exported.local_name)) continue;
+                    switch (symbol.namespace) {
+                        .value => namespace.value = true,
+                        .type => namespace.type = true,
+                    }
+                }
+            }
             const span = result.frontend.ast.node(exported.node).span;
             // A derived global that collides with an ambient global of the same
             // name and namespace is a configuration error (section 10.6): report
@@ -1096,14 +1109,24 @@ pub const Project = struct {
         for (graph_modules.items) |module| {
             for (module.result.bind.symbols) |symbol| {
                 const source_module_id = symbol.source_module_id orelse continue;
-                var referenced = false;
-                for (module.result.resolve.references) |reference| {
-                    if (reference.symbol == symbol.id) {
-                        referenced = true;
-                        break;
+                // Source globals are ordinary implicit imports in both the
+                // value and type namespaces. Type-name uses are resolved by
+                // the type collector and deliberately do not appear in the
+                // value resolver's reference list, so filtering here by value
+                // references dropped the type-side import of classes/enums.
+                // Type-only links never create runtime dependencies. Value
+                // links remain demand-driven so unused global modules do not
+                // become initialization dependencies.
+                if (symbol.namespace == .value) {
+                    var referenced = false;
+                    for (module.result.resolve.references) |reference| {
+                        if (reference.symbol == symbol.id) {
+                            referenced = true;
+                            break;
+                        }
                     }
+                    if (!referenced) continue;
                 }
-                if (!referenced) continue;
                 const target = findSemanticModule(graph_modules.items, source_module_id.value()) orelse continue;
                 const edge_id: modules_mod.graph.ImportEdgeId = @intCast(graph_edges.items.len);
                 try graph_edges.append(allocator, .{
@@ -3325,6 +3348,55 @@ test "authorized renamed foundational language items supply primitive and functi
     try std.testing.expectEqual(@as(usize, 5), found);
 }
 
+test "authorized renamed RegExp language item supplies literal semantic members" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.registerSourceLanguageItems(&.{.{
+        .id = .init(11),
+        .module_id = .init(39),
+        .exported_name = "RenamedPatternSurface",
+        .namespace = .type,
+    }});
+    try project.addRoot(.{
+        .id = .init(39),
+        .logical_name = "replacement-regexp-std.ts",
+        .bytes = "export interface RenamedPatternSurface { accepts(value: string): boolean; readonly sourceText: string; }",
+    });
+    try project.addRoot(.{
+        .id = .init(40),
+        .logical_name = "regexp-consumer.ts",
+        .bytes =
+        \\const pattern = /ab+c/i;
+        \\const accepted = pattern.accepts("ABBC");
+        \\const sourceText = pattern.sourceText;
+        ,
+    });
+    while (try project.step() != .complete) {}
+    const finished = try project.finish();
+    try std.testing.expect(!finished.has_failures);
+    try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+
+    const semantic = project.semanticResult().?;
+    try std.testing.expect(semantic.type_store.canonicalRegExpSurface() != null);
+    const consumer = semantic.lookupModule(40) orelse return error.TestExpectedConsumerModule;
+    const source = project.find(.init(40)).?.semantic_result.?;
+    var saw_accepted = false;
+    var saw_source = false;
+    for (source.frontend.bind.symbols) |symbol| {
+        const info = consumer.type_info.lookupSymbol(symbol.id) orelse continue;
+        if (std.mem.eql(u8, symbol.name, "accepted")) {
+            try std.testing.expectEqual(semantic.type_store.builtins.boolean, info.effective());
+            saw_accepted = true;
+        }
+        if (std.mem.eql(u8, symbol.name, "sourceText")) {
+            try std.testing.expectEqual(semantic.type_store.builtins.string, info.effective());
+            saw_source = true;
+        }
+    }
+    try std.testing.expect(saw_accepted);
+    try std.testing.expect(saw_source);
+}
+
 test "canonical Array constructor accepts explicit element type arguments" {
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
@@ -3695,27 +3767,36 @@ test "global source module: type-only and value exports occupy disjoint namespac
     var project = Project.init(std.testing.allocator);
     defer project.deinit();
     try project.addGlobalRoot(.{
+        .id = .init(2),
+        .logical_name = "other-global.ts",
+        .bytes = "export const OtherGlobal = 1;",
+    });
+    try project.addGlobalRoot(.{
         .id = .init(0),
         .logical_name = "global.ts",
         .bytes =
         \\export type FooType = number;
         \\export const FooValue = 1;
+        \\export class Error {}
+        \\export class ReferenceError extends Error {}
         \\export default 5;
         ,
     });
     try project.addRoot(.{
         .id = .init(1),
         .logical_name = "app.ts",
-        .bytes = "export {};",
+        .bytes = "const instance: ReferenceError = new ReferenceError(); export { instance };",
     });
     _ = try project.step();
 
     var type_global: ?binder.SourceGlobal = null;
     var value_global: ?binder.SourceGlobal = null;
+    var class_global: ?binder.SourceGlobal = null;
     var default_count: usize = 0;
     for (project.source_globals.items) |global| {
         if (std.mem.eql(u8, global.name, "FooType")) type_global = global;
         if (std.mem.eql(u8, global.name, "FooValue")) value_global = global;
+        if (std.mem.eql(u8, global.name, "ReferenceError")) class_global = global;
         if (std.mem.eql(u8, global.name, "default")) default_count += 1;
     }
     try std.testing.expect(type_global != null);
@@ -3724,9 +3805,15 @@ test "global source module: type-only and value exports occupy disjoint namespac
     try std.testing.expect(value_global != null);
     try std.testing.expect(value_global.?.namespace.value);
     try std.testing.expect(!value_global.?.namespace.type);
+    try std.testing.expect(class_global != null);
+    try std.testing.expect(class_global.?.namespace.value);
+    try std.testing.expect(class_global.?.namespace.type);
     try std.testing.expectEqual(@as(usize, 0), default_count);
 
     _ = try project.finish();
+    for (project.diagnostics()) |diagnostic| {
+        if (diagnostic.code == .unknown_type_name) return error.UnexpectedUnknownTypeName;
+    }
 }
 
 test "global source module: derivation precedes application module analysis" {

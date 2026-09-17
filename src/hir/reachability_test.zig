@@ -90,6 +90,10 @@ fn expectCanonicalOrdinals(bits: []const u64, ordinals: []const u32) !void {
         try std.testing.expect(bitSet(bits, ordinal_index));
         previous = ordinal;
     }
+
+    var reached_count: usize = 0;
+    for (bits) |word| reached_count += @popCount(word);
+    try std.testing.expectEqual(reached_count, ordinals.len);
 }
 
 fn loweredRoot(id: u64, source: []const u8) !hir.HirResult {
