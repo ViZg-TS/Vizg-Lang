@@ -57,6 +57,16 @@ pub fn inferBinaryOperator(
     store: *types.TypeStore,
 ) !OperatorResult {
     const b = &store.builtins;
+    switch (operator) {
+        .EqualsEquals,
+        .EqualsEqualsEquals,
+        .ExclamationEquals,
+        .ExclamationEqualsEquals,
+        .Keyword_in,
+        .Keyword_instanceof,
+        => return .{ .type_id = b.boolean },
+        else => {},
+    }
     if (left == b.any or right == b.any) return .{ .type_id = b.any };
     if (left == b.unknown or right == b.unknown) return .{ .type_id = b.unknown };
     return switch (operator) {
@@ -89,13 +99,6 @@ pub fn inferBinaryOperator(
             .{ .type_id = b.boolean }
         else
             .{ .type_id = b.boolean, .valid = false, .issue = .invalid_operator },
-        .EqualsEquals,
-        .EqualsEqualsEquals,
-        .ExclamationEquals,
-        .ExclamationEqualsEquals,
-        .Keyword_in,
-        .Keyword_instanceof,
-        => .{ .type_id = b.boolean },
         .AmpersandAmpersand, .BarBar, .QuestionQuestion => .{ .type_id = if (left == right) left else try store.unionOf(&.{ left, right }) },
         else => .{ .type_id = b.unknown, .valid = false, .issue = .invalid_operator },
     };

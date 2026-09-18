@@ -3188,6 +3188,22 @@ test "Goal 144 optional method and callable union calls retain validation" {
     try std.testing.expectEqual(@as(usize, 1), callee_errors);
 }
 
+test "strict equality with unknown operands still infers boolean" {
+    var result = try analyze(std.testing.allocator,
+        \\let value: unknown;
+        \\const same = value === 42;
+        \\function accept(condition: boolean): void {}
+        \\accept(value === 42);
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+    try std.testing.expectEqual(
+        result.type_store.builtins.boolean,
+        result.lookupNodeType(testVariableInitializer(&result, "same").?).?,
+    );
+}
+
 test "callable intersections expose function calls and object members" {
     var result = try analyze(std.testing.allocator,
         \\type CallableObject = ((value?: any) => any) & {
