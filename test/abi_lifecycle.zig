@@ -454,7 +454,6 @@ test "missing source language item fails closed with a stable project diagnostic
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE), c.vizg_hir_language_item_count(result, c.VIZG_HIR_DETAIL_API_VERSION, &count));
 }
 
-
 test "C HIR reachability uses caller-owned buffers and canonical ordinals" {
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();
@@ -465,7 +464,7 @@ test "C HIR reachability uses caller-owned buffers and canonical ordinals" {
         \\function unused(): number { return 123; }
         \\function used(): number { return 456; }
         \\used();
-        ,
+    ,
         true,
     );
     var result: ?*c.Vizg_ProjectResult = null;
@@ -514,6 +513,22 @@ test "C HIR reachability uses caller-owned buffers and canonical ordinals" {
     defer allocator.free(binding_ordinals);
     const external_ids = try allocator.alloc(u64, requirements.external_module_capacity);
     defer allocator.free(external_ids);
+    const module_ids = try allocator.alloc(u64, requirements.module_ordinal_capacity);
+    defer allocator.free(module_ids);
+    const function_ids = try allocator.alloc(u64, requirements.function_ordinal_capacity);
+    defer allocator.free(function_ids);
+    const block_ids = try allocator.alloc(u64, requirements.block_ordinal_capacity);
+    defer allocator.free(block_ids);
+    const block_function_ids = try allocator.alloc(u64, requirements.block_ordinal_capacity);
+    defer allocator.free(block_function_ids);
+    const instruction_ids = try allocator.alloc(u64, requirements.instruction_ordinal_capacity);
+    defer allocator.free(instruction_ids);
+    const instruction_block_ids = try allocator.alloc(u64, requirements.instruction_ordinal_capacity);
+    defer allocator.free(instruction_block_ids);
+    const binding_ids = try allocator.alloc(u64, requirements.binding_ordinal_capacity);
+    defer allocator.free(binding_ids);
+    const binding_function_ids = try allocator.alloc(u64, requirements.binding_ordinal_capacity);
+    defer allocator.free(binding_function_ids);
 
     const application_modules = [_]u64{1700};
     var request: c.Vizg_HirReachabilityRequest = .{
@@ -551,6 +566,14 @@ test "C HIR reachability uses caller-owned buffers and canonical ordinals" {
         .binding_ordinal_capacity = binding_ordinals.len,
         .external_module_ids_ptr = if (external_ids.len == 0) null else external_ids.ptr,
         .external_module_capacity = external_ids.len,
+        .module_ids_ptr = if (module_ids.len == 0) null else module_ids.ptr,
+        .function_ids_ptr = if (function_ids.len == 0) null else function_ids.ptr,
+        .block_ids_ptr = if (block_ids.len == 0) null else block_ids.ptr,
+        .block_function_ids_ptr = if (block_function_ids.len == 0) null else block_function_ids.ptr,
+        .instruction_ids_ptr = if (instruction_ids.len == 0) null else instruction_ids.ptr,
+        .instruction_block_ids_ptr = if (instruction_block_ids.len == 0) null else instruction_block_ids.ptr,
+        .binding_ids_ptr = if (binding_ids.len == 0) null else binding_ids.ptr,
+        .binding_function_ids_ptr = if (binding_function_ids.len == 0) null else binding_function_ids.ptr,
     };
     var reachability_summary: c.Vizg_HirReachabilitySummary = undefined;
     try std.testing.expectEqual(

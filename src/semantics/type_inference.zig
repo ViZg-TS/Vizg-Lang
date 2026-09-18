@@ -1882,17 +1882,45 @@ fn putContextualType(
 fn looksNumeric(text: []const u8) bool {
     if (text.len == 0) return false;
     var i: usize = 0;
-    if (text[0] == '-' or text[0] == '+') i += 1;
-    var seen_digit: bool = false;
+    if (text[0] == '-' or text[0] == '+') {
+        i += 1;
+        if (i == text.len) return false;
+    }
+
+    if (i + 2 <= text.len and text[i] == '0') {
+        const radix = text[i + 1];
+        if (radix == 'x' or radix == 'X' or
+            radix == 'b' or radix == 'B' or
+            radix == 'o' or radix == 'O')
+        {
+            i += 2;
+            var saw_digit = false;
+            while (i < text.len) : (i += 1) {
+                const c = text[i];
+                if (c == '_') continue;
+                const valid = switch (radix) {
+                    'x', 'X' => tokens.isHexDigit(c),
+                    'b', 'B' => tokens.isBinaryDigit(c),
+                    'o', 'O' => tokens.isOctalDigit(c),
+                    else => unreachable,
+                };
+                if (!valid) return false;
+                saw_digit = true;
+            }
+            return saw_digit;
+        }
+    }
+
+    var seen_digit = false;
     while (i < text.len) : (i += 1) {
         const c = text[i];
         if (std.ascii.isDigit(c)) {
             seen_digit = true;
-        } else if (c == '.' or c == 'e' or c == 'E') {
-            // Decimal / exponent — allowed inside a number. Parser already
-            // balances these, so we don't re-validate.
+        } else if (c == '_' or c == '.' or c == 'e' or c == 'E' or c == '+' or c == '-') {
+            // Scanner validation owns separator/exponent placement. This helper
+            // only classifies an already-valid Literal AST node.
         } else {
-            return seen_digit and (c == '.' or c == 'e' or c == 'E');
+            return false;
         }
     }
     return seen_digit;

@@ -10,7 +10,7 @@
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
 #define VIZG_HIR_DETAIL_API_VERSION 9u
-#define VIZG_HIR_REACHABILITY_API_VERSION 3u
+#define VIZG_HIR_REACHABILITY_API_VERSION 4u
 #define VIZG_HIR_CONSUMER_API_VERSION 1u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
 #define VIZG_INTRINSIC_CONTRACT_VERSION 3u
@@ -991,6 +991,16 @@ typedef struct Vizg_HirReachabilityBuffers {
     size_t binding_ordinal_capacity;
     uint64_t *external_module_ids_ptr;
     size_t external_module_capacity;
+
+    /* Reachability v4 physical snapshot, parallel to reached ordinals. */
+    uint64_t *module_ids_ptr;
+    uint64_t *function_ids_ptr;
+    uint64_t *block_ids_ptr;
+    uint64_t *block_function_ids_ptr;
+    uint64_t *instruction_ids_ptr;
+    uint64_t *instruction_block_ids_ptr;
+    uint64_t *binding_ids_ptr;
+    uint64_t *binding_function_ids_ptr;
 } Vizg_HirReachabilityBuffers;
 
 typedef struct Vizg_HirReachabilitySummary {

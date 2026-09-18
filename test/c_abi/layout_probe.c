@@ -300,7 +300,15 @@ size_t vizg_c_fields_Vizg_HirReachabilityBuffers(void) {
         F(Vizg_HirReachabilityBuffers, binding_ordinals_ptr, 21) +
         F(Vizg_HirReachabilityBuffers, binding_ordinal_capacity, 22) +
         F(Vizg_HirReachabilityBuffers, external_module_ids_ptr, 23) +
-        F(Vizg_HirReachabilityBuffers, external_module_capacity, 24);
+        F(Vizg_HirReachabilityBuffers, external_module_capacity, 24) +
+        F(Vizg_HirReachabilityBuffers, module_ids_ptr, 25) +
+        F(Vizg_HirReachabilityBuffers, function_ids_ptr, 26) +
+        F(Vizg_HirReachabilityBuffers, block_ids_ptr, 27) +
+        F(Vizg_HirReachabilityBuffers, block_function_ids_ptr, 28) +
+        F(Vizg_HirReachabilityBuffers, instruction_ids_ptr, 29) +
+        F(Vizg_HirReachabilityBuffers, instruction_block_ids_ptr, 30) +
+        F(Vizg_HirReachabilityBuffers, binding_ids_ptr, 31) +
+        F(Vizg_HirReachabilityBuffers, binding_function_ids_ptr, 32);
 }
 size_t vizg_c_fields_Vizg_HirReachabilitySummary(void) {
     return F(Vizg_HirReachabilitySummary, module_count, 1) +

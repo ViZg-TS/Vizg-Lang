@@ -2713,6 +2713,24 @@ test "Goal 118 arrays infer homogeneous unions and contextual tuples" {
     // the declared annotation shape without source-side hole fill.
 }
 
+test "hexadecimal literals keep numeric node types inside contextual any arrays" {
+    var result = try analyze(std.testing.allocator,
+        \\const ranges: any[] = [0x41, 0x5A];
+    );
+    defer result.deinit();
+
+    const initializer_id = testVariableInitializer(&result, "ranges").?;
+    const initializer = result.frontend.ast.node(initializer_id);
+    try std.testing.expect(initializer.data == .ArrayExpression);
+    for (initializer.data.ArrayExpression.elements) |maybe_element| {
+        const element_id = maybe_element orelse return error.TestFailed;
+        try std.testing.expectEqual(
+            result.type_store.builtins.number,
+            result.lookupNodeType(element_id).?,
+        );
+    }
+}
+
 test "Goal 137 annotated array mismatch reports per-element diagnostic" {
     var result = try analyze(std.testing.allocator,
         \\const values: number[] = ["wrong"];

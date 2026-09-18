@@ -8,7 +8,7 @@ pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
 pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 9;
-pub const VIZG_HIR_REACHABILITY_API_VERSION: u32 = 3;
+pub const VIZG_HIR_REACHABILITY_API_VERSION: u32 = 4;
 pub const VIZG_HIR_CONSUMER_API_VERSION: u32 = 1;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
 pub const VIZG_LANGUAGE_ITEM_CONTRACT_VERSION: u32 = vizg.language_item_contract_version;
@@ -607,6 +607,17 @@ pub const Vizg_HirReachabilityBuffers = extern struct {
     binding_ordinal_capacity: usize,
     external_module_ids_ptr: [*c]u64,
     external_module_capacity: usize,
+
+    // Reachability v4 physical snapshot. Each array is parallel to the
+    // corresponding reached ordinal array and uses the same capacity.
+    module_ids_ptr: [*c]u64,
+    function_ids_ptr: [*c]u64,
+    block_ids_ptr: [*c]u64,
+    block_function_ids_ptr: [*c]u64,
+    instruction_ids_ptr: [*c]u64,
+    instruction_block_ids_ptr: [*c]u64,
+    binding_ids_ptr: [*c]u64,
+    binding_function_ids_ptr: [*c]u64,
 };
 
 pub const Vizg_HirReachabilitySummary = extern struct {
@@ -2672,7 +2683,15 @@ pub fn hirReachabilityAnalyze(
         !validAlignedMutableHostArray(u32, buffers.block_ordinals_ptr, buffers.block_ordinal_capacity) or
         !validAlignedMutableHostArray(u32, buffers.instruction_ordinals_ptr, buffers.instruction_ordinal_capacity) or
         !validAlignedMutableHostArray(u32, buffers.binding_ordinals_ptr, buffers.binding_ordinal_capacity) or
-        !validAlignedMutableHostArray(u64, buffers.external_module_ids_ptr, buffers.external_module_capacity))
+        !validAlignedMutableHostArray(u64, buffers.external_module_ids_ptr, buffers.external_module_capacity) or
+        !validAlignedMutableHostArray(u64, buffers.module_ids_ptr, buffers.module_ordinal_capacity) or
+        !validAlignedMutableHostArray(u64, buffers.function_ids_ptr, buffers.function_ordinal_capacity) or
+        !validAlignedMutableHostArray(u64, buffers.block_ids_ptr, buffers.block_ordinal_capacity) or
+        !validAlignedMutableHostArray(u64, buffers.block_function_ids_ptr, buffers.block_ordinal_capacity) or
+        !validAlignedMutableHostArray(u64, buffers.instruction_ids_ptr, buffers.instruction_ordinal_capacity) or
+        !validAlignedMutableHostArray(u64, buffers.instruction_block_ids_ptr, buffers.instruction_ordinal_capacity) or
+        !validAlignedMutableHostArray(u64, buffers.binding_ids_ptr, buffers.binding_ordinal_capacity) or
+        !validAlignedMutableHostArray(u64, buffers.binding_function_ids_ptr, buffers.binding_ordinal_capacity))
         return .INVALID_ARGUMENT;
 
     const output_ranges = [_]struct { ptr: [*c]u8, len: usize }{
@@ -2687,6 +2706,14 @@ pub fn hirReachabilityAnalyze(
         .{ .ptr = @ptrCast(buffers.instruction_ordinals_ptr), .len = checkedByteLen(u32, buffers.instruction_ordinal_capacity) orelse return .INVALID_ARGUMENT },
         .{ .ptr = @ptrCast(buffers.binding_ordinals_ptr), .len = checkedByteLen(u32, buffers.binding_ordinal_capacity) orelse return .INVALID_ARGUMENT },
         .{ .ptr = @ptrCast(buffers.external_module_ids_ptr), .len = checkedByteLen(u64, buffers.external_module_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.module_ids_ptr), .len = checkedByteLen(u64, buffers.module_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.function_ids_ptr), .len = checkedByteLen(u64, buffers.function_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.block_ids_ptr), .len = checkedByteLen(u64, buffers.block_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.block_function_ids_ptr), .len = checkedByteLen(u64, buffers.block_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.instruction_ids_ptr), .len = checkedByteLen(u64, buffers.instruction_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.instruction_block_ids_ptr), .len = checkedByteLen(u64, buffers.instruction_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.binding_ids_ptr), .len = checkedByteLen(u64, buffers.binding_ordinal_capacity) orelse return .INVALID_ARGUMENT },
+        .{ .ptr = @ptrCast(buffers.binding_function_ids_ptr), .len = checkedByteLen(u64, buffers.binding_ordinal_capacity) orelse return .INVALID_ARGUMENT },
         .{ .ptr = @ptrCast(summary), .len = @sizeOf(Vizg_HirReachabilitySummary) },
     };
     const input_ranges = [_]struct { ptr: [*c]const u8, len: usize }{
@@ -2744,6 +2771,38 @@ pub fn hirReachabilityAnalyze(
         error.UnknownArtifactRoot, error.InvalidTrigger, error.OutputTooSmall => .INVALID_ARGUMENT,
         else => .INTERNAL_ERROR,
     };
+
+    // v4: expose the physical identity snapshot corresponding exactly to the
+    // canonical reached ordinals returned above. ViZG already owns this index;
+    // downstream consumers must not reconstruct it with one ABI query per
+    // entity.
+    for (buffers.module_ordinals_ptr[0..reachability_summary.module_count], 0..) |ordinal, output_index| {
+        if (@as(usize, ordinal) >= hir_result.project.modules.len) return .INTERNAL_ERROR;
+        buffers.module_ids_ptr[output_index] = hir_result.project.modules[ordinal].module_id.value();
+    }
+    for (buffers.function_ordinals_ptr[0..reachability_summary.function_count], 0..) |ordinal, output_index| {
+        if (@as(usize, ordinal) >= hir_result.project.functions.len) return .INTERNAL_ERROR;
+        buffers.function_ids_ptr[output_index] = idIndex(hir_result.project.functions[ordinal].id);
+    }
+    for (buffers.block_ordinals_ptr[0..reachability_summary.block_count], 0..) |ordinal, output_index| {
+        const block = index.block(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+        const function = index.blockFunction(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+        buffers.block_ids_ptr[output_index] = idIndex(block.id);
+        buffers.block_function_ids_ptr[output_index] = idIndex(function.id);
+    }
+    for (buffers.instruction_ordinals_ptr[0..reachability_summary.instruction_count], 0..) |ordinal, output_index| {
+        const instruction = index.instruction(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+        const block = index.instructionBlock(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+        buffers.instruction_ids_ptr[output_index] = idIndex(instruction.id);
+        buffers.instruction_block_ids_ptr[output_index] = idIndex(block.id);
+    }
+    for (buffers.binding_ordinals_ptr[0..reachability_summary.binding_count], 0..) |ordinal, output_index| {
+        const binding = index.binding(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+        const function = index.bindingFunction(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+        buffers.binding_ids_ptr[output_index] = idIndex(binding.id);
+        buffers.binding_function_ids_ptr[output_index] = idIndex(function.id);
+    }
+
     summary.* = .{
         .module_count = reachability_summary.module_count,
         .function_count = reachability_summary.function_count,

@@ -111,7 +111,7 @@ if (api.vizg_hir_payload_api_version() !== 1) {
 if (api.vizg_hir_detail_api_version() !== 9) {
   throw new Error(`unexpected HIR detail ABI version: ${api.vizg_hir_detail_api_version()}`);
 }
-if (api.vizg_hir_reachability_api_version() !== 2) {
+if (api.vizg_hir_reachability_api_version() !== 4) {
   throw new Error(`unexpected HIR reachability ABI version: ${api.vizg_hir_reachability_api_version()}`);
 }
 if (api.vizg_hir_consumer_api_version() !== 1) {

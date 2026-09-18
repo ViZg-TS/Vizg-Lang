@@ -786,7 +786,7 @@ fn collectEnumMembers(context: *TypeResolutionContext, symbol: binder.Symbol) !v
                         string_members = true;
                         break :blk try context.type_store.intern(.{ .literal = .{ .string = spelling } });
                     }
-                    if (parseEnumNumber(context.allocator, spelling)) |number| {
+                    if (parseNumberLiteral(context.allocator, spelling)) |number| {
                         next_numeric = number + 1;
                         break :blk try context.type_store.intern(.{ .literal = .{ .number = number } });
                     }
@@ -812,7 +812,7 @@ fn collectEnumMembers(context: *TypeResolutionContext, symbol: binder.Symbol) !v
     );
 }
 
-fn parseEnumNumber(allocator: std.mem.Allocator, spelling: []const u8) ?f64 {
+fn parseNumberLiteral(allocator: std.mem.Allocator, spelling: []const u8) ?f64 {
     var cleaned: std.ArrayList(u8) = .empty;
     defer cleaned.deinit(allocator);
     for (spelling) |byte| if (byte != '_') cleaned.append(allocator, byte) catch return null;
@@ -1023,7 +1023,7 @@ fn resolveLiteralType(context: *TypeResolutionContext, literal: ast_mod.LiteralT
             break :blk try context.type_store.intern(.{ .literal = .{ .string = literal.spelling[1 .. literal.spelling.len - 1] } });
         },
         .number => blk: {
-            const value = std.fmt.parseFloat(f64, literal.spelling) catch {
+            const value = parseNumberLiteral(context.allocator, literal.spelling) orelse {
                 try emitTypeOperationOnce(context, "invalid number literal type", literal.spelling, span);
                 break :blk context.type_store.builtins.unknown;
             };
@@ -1570,4 +1570,11 @@ fn findTypeParameterSymbol(symbols: []const binder.Symbol, declaration: ast_mod.
     for (symbols) |symbol| if (symbol.declaration == declaration and symbol.kind == .type_parameter and
         symbol.namespace == .type and std.mem.eql(u8, symbol.name, name)) return symbol;
     return null;
+}
+
+test "number literal type parser accepts radix-prefixed and separated literals" {
+    try std.testing.expectEqual(@as(?f64, 65), parseNumberLiteral(std.testing.allocator, "0x41"));
+    try std.testing.expectEqual(@as(?f64, 10), parseNumberLiteral(std.testing.allocator, "0b1010"));
+    try std.testing.expectEqual(@as(?f64, 493), parseNumberLiteral(std.testing.allocator, "0o755"));
+    try std.testing.expectEqual(@as(?f64, 1000), parseNumberLiteral(std.testing.allocator, "1_000"));
 }
