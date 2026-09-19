@@ -117,7 +117,7 @@ pub fn lower(
     try builder.appendModule(.{
         .module_id = module.id,
         .logical_name = try builder.copyString(source.logical_name),
-        .tree_shakeable = project.isStandardModule(module.id),
+        .tree_shakeable = inputs.tree_shakeable,
         .initialization = function_id,
         .dependencies = dependencies,
         .imports = imports,
@@ -126,7 +126,6 @@ pub fn lower(
         .origin = .invalid,
     });
 }
-
 
 fn bodyContainsAwait(blocks: []const model.HirBlock) bool {
     for (blocks) |block| for (block.instructions) |instruction| {

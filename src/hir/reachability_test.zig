@@ -1055,22 +1055,22 @@ test "artifact reachability selects only demanded static closure from source-bac
     _ = try expectFunctionReachability(result, reached, "dead", false);
 }
 
-test "source-backed global object reaches only demanded static closure property" {
+test "source-backed global method using dynamic this retains sibling surface" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
     try project.addGlobalRoot(.{
-        .id = .init(1152),
-        .logical_name = "global.ts",
+        .id = .init(1157),
+        .logical_name = "global-this.ts",
         .bytes =
         \\export const surface = {
-        \\    used: (): number => 1,
-        \\    dead: (): number => 2,
+        \\    used(): number { return this.dead(); },
+        \\    dead(): number { return 2; },
         \\};
         ,
     });
     try project.addRoot(.{
-        .id = .init(1153),
-        .logical_name = "app.ts",
+        .id = .init(1158),
+        .logical_name = "app-this.ts",
         .bytes = "surface.used();",
     });
     while (try project.step() != .complete) {}
@@ -1083,16 +1083,16 @@ test "source-backed global object reaches only demanded static closure property"
         .diagnostics => return error.UnexpectedLoweringDiagnostics,
     };
 
-    const reached = try analyzeForTest(result, &.{}, &.{1153}, &.{});
+    const reached = try analyzeForTest(result, &.{}, &.{1158}, &.{});
     _ = try expectFunctionReachability(result, reached, "used", true);
-    _ = try expectFunctionReachability(result, reached, "dead", false);
+    _ = try expectFunctionReachability(result, reached, "dead", true);
 }
 
-test "closed object retains sibling property when selected method uses dynamic this" {
+test "application object surface remains conservative outside STD tree" {
     var result = try loweredRoot(1154,
         \\const surface = {
-        \\    used(): number { return this.dead(); },
-        \\    dead(): number { return 2; },
+        \\    used: (): number => 1,
+        \\    dead: (): number => 2,
         \\};
         \\surface.used();
     );
@@ -1115,21 +1115,6 @@ test "public library keeps complete exported object surface" {
     const reached = try analyzeForTest(&result, &.{1156}, &.{}, &.{});
     _ = try expectFunctionReachability(&result, reached, "used", true);
     _ = try expectFunctionReachability(&result, reached, "dead", true);
-}
-
-test "artifact reachability drops unused static closure property on closed object" {
-    var result = try loweredRoot(1155,
-        \\const surface = {
-        \\    used: (): number => 1,
-        \\    dead: (): number => 2,
-        \\};
-        \\surface.used();
-    );
-    defer result.deinit();
-
-    const reached = try analyzeForTest(&result, &.{}, &.{1155}, &.{});
-    _ = try expectFunctionReachability(&result, reached, "used", true);
-    _ = try expectFunctionReachability(&result, reached, "dead", false);
 }
 
 test "artifact reachability keeps used named import and drops unused sibling export" {

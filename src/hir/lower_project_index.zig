@@ -23,6 +23,7 @@ pub const DynamicImportResolution = struct {
 };
 
 pub const ModuleInputs = struct {
+    tree_shakeable: bool,
     projection_targets: []const project_mod.ModuleId,
     dependencies: []const DependencySeed,
     imports: []const semantics.SemanticImport,
@@ -31,6 +32,7 @@ pub const ModuleInputs = struct {
 };
 
 const Bucket = struct {
+    tree_shakeable: bool = false,
     projection_targets: std.ArrayList(project_mod.ModuleId) = .empty,
     dependencies: std.ArrayList(DependencySeed) = .empty,
     imports: std.ArrayList(semantics.SemanticImport) = .empty,
@@ -70,6 +72,7 @@ pub const Index = struct {
             const entry = try result.module_ordinals.getOrPut(module.id.value());
             if (entry.found_existing) return error.DuplicateModule;
             entry.value_ptr.* = ordinal;
+            result.buckets[ordinal].tree_shakeable = project.isStandardModule(module.id);
         }
 
         // Project graph edges are authoritative explicit request resolution.
@@ -167,6 +170,7 @@ pub const Index = struct {
         const ordinal = self.module_ordinals.get(module_id.value()) orelse return null;
         const bucket = self.buckets[ordinal];
         return .{
+            .tree_shakeable = bucket.tree_shakeable,
             .projection_targets = bucket.projection_targets.items,
             .dependencies = bucket.dependencies.items,
             .imports = bucket.imports.items,
