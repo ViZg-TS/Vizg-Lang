@@ -390,17 +390,16 @@ const State = struct {
                             if (!try self.staticPropertyValueIsPure(value.value, 0)) continue;
                             break :blk .{ .object = value.object, .key = key };
                         },
-                        .define_method => |value| blk: {
-                            const key = switch (value.key) {
-                                .static => |name| name,
-                                else => continue,
-                            };
-                            break :blk .{ .object = value.object, .key = key };
-                        },
+                        // Method/prototype registrations are owned by the
+                        // existing property-surface reachability. Treating them
+                        // like closed object-literal fields is unsound because
+                        // class instances observe them through prototype
+                        // dispatch and iterator protocols.
+                        .define_method => continue,
                         else => continue,
                     };
                     const identity = try self.surfaceIdentity(payload.object, 0);
-                    if (!try self.surfaceIdentityIsFreshObject(identity)) continue;
+                    if (!try self.surfaceIdentityIsExportedFreshObject(identity, module_ordinal)) continue;
                     const ordinal = self.index.instructionOrdinal(instruction.id) orelse
                         return error.InconsistentProjection;
                     if (self.static_property_candidate_len >= self.static_property_candidates.len)
@@ -434,9 +433,10 @@ const State = struct {
         };
     }
 
-    fn surfaceIdentityIsFreshObject(
+    fn surfaceIdentityIsExportedFreshObject(
         self: *State,
         identity: SurfaceIdentity,
+        module_ordinal: u32,
     ) !bool {
         const ordinal = switch (identity) {
             .value => |value| value,
@@ -447,7 +447,22 @@ const State = struct {
         const producer_ordinal = self.index.value_producers[ordinal] orelse return false;
         const producer = self.index.instruction(self.project, producer_ordinal) orelse
             return error.InconsistentProjection;
-        return producer.operation == .create_object;
+        if (producer.operation != .create_object) return false;
+        if (@as(usize, module_ordinal) >= self.project.modules.len)
+            return error.InconsistentProjection;
+
+        // Only exported top-level object surfaces are closed enough for this
+        // optimization. Local object literals may escape through arrays,
+        // iterators, closures, or other containers in ways that do not retain
+        // a direct surface identity. Pruning their apparently-unused constant
+        // fields is therefore unsound.
+        for (self.project.modules[module_ordinal].exports) |exported| {
+            if (exported.type_only) continue;
+            const binding = exported.binding orelse continue;
+            const exported_identity = try self.surfaceIdentityForBinding(binding, 0);
+            if (sameSurfaceIdentity(identity, exported_identity)) return true;
+        }
+        return false;
     }
 
     fn isStaticPropertyCandidate(self: *const State, instruction_ordinal: u32) bool {
@@ -546,12 +561,7 @@ const State = struct {
                 try self.traceValue(value.object);
                 try self.traceValue(value.value);
             },
-            .define_method => |value| {
-                if (try self.functionUsesDynamicThis(value.function))
-                    try self.activateStaticPropertyIdentity(candidate.identity, null);
-                try self.traceValue(value.object);
-                try self.reachFunction(value.function);
-            },
+            .define_method => return error.InconsistentProjection,
             else => return error.InconsistentProjection,
         }
     }

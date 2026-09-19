@@ -1055,6 +1055,52 @@ test "artifact reachability selects only demanded static closure from source-bac
     _ = try expectFunctionReachability(result, reached, "dead", false);
 }
 
+test "STD local object fields are not property-pruning candidates" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(1159),
+        .logical_name = "global-local-object.ts",
+        .bytes =
+        \\const local = { active: true };
+        \\export function live(): boolean { return true; }
+        ,
+    });
+    try project.addRoot(.{
+        .id = .init(1169),
+        .logical_name = "app-local-object.ts",
+        .bytes = "live();",
+    });
+    while (try project.step() != .complete) {}
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    const reached = try analyzeForTest(result, &.{}, &.{1169}, &.{});
+    _ = try expectFunctionReachability(result, reached, "live", true);
+
+    var saw_active = false;
+    for (result.project.functions) |function| {
+        for (function.blocks) |block| for (block.instructions) |instruction| switch (instruction.operation) {
+            .define_property => |property| switch (property.key) {
+                .static => |key| if (std.mem.eql(u8, key, "active")) {
+                    const ordinal = result.consumerIndex().instructionOrdinal(instruction.id) orelse
+                        return error.TestExpectedInstruction;
+                    try std.testing.expect(bitSet(reached.instruction_bits[0..], ordinal));
+                    saw_active = true;
+                },
+                else => {},
+            },
+            else => {},
+        };
+    }
+    try std.testing.expect(saw_active);
+}
+
 test "source-backed global method using dynamic this retains sibling surface" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
@@ -1115,6 +1161,48 @@ test "public library keeps complete exported object surface" {
     const reached = try analyzeForTest(&result, &.{1156}, &.{}, &.{});
     _ = try expectFunctionReachability(&result, reached, "used", true);
     _ = try expectFunctionReachability(&result, reached, "dead", true);
+}
+
+test "unused user named import preserves provider evaluation but prunes dead export body" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(1157),
+        .logical_name = "app-unused-user-import.ts",
+        .bytes =
+        \\import { dead } from "./dep";
+        \\42;
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| {
+            try std.testing.expectEqualStrings("./dep", request.raw_specifier);
+            try project.respondSource(request.id, .{
+                .id = .init(1158),
+                .logical_name = "dep-unused-user-import.ts",
+                .bytes =
+                \\export function effect(): number { return 1; }
+                \\effect();
+                \\export function dead(): number { return 9; }
+                ,
+            });
+        },
+    };
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const reached = try analyzeForTest(result, &.{}, &.{1157}, &.{});
+    const dep_module = result.consumerIndex().module_ordinals.get(1158) orelse return error.TestExpectedDependencyModule;
+    try std.testing.expect(bitSet(reached.module_bits[0..], dep_module));
+    _ = try expectFunctionReachability(result, reached, "effect", true);
+    _ = try expectFunctionReachability(result, reached, "dead", false);
 }
 
 test "artifact reachability keeps used named import and drops unused sibling export" {
