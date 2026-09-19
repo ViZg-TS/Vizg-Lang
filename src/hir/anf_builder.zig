@@ -300,6 +300,13 @@ pub const AnfBuilder = struct {
                 try self.requireValue(item.array);
                 try self.requireValue(item.iterable);
             },
+            .array_initialize => |item| {
+                try self.requireValue(item.array);
+                switch (item.source) {
+                    .dynamic => |values| try self.requireValues(values),
+                    .constant => {},
+                }
+            },
             .build_string => |parts| for (parts) |part| if (part == .value) try self.requireValue(part.value),
             .apply_pattern => |plan| {
                 try self.requireValue(plan.source);

@@ -484,8 +484,68 @@ fn lowerObject(context: anytype, node_id: ast.NodeId, expression: ast.ObjectExpr
     return object;
 }
 
+fn constantForValueSpan(context: anytype, node_id: ast.NodeId) anyerror!?model.HirConstant {
+    const node = context.local.frontend.ast.node(node_id);
+    if (node.data != .Literal) return null;
+    const operation = try context.lowerLiteral(node.data.Literal.value);
+    if (operation != .constant) return null;
+    return switch (operation.constant) {
+        .undefined, .null_, .boolean, .number => operation.constant,
+        .bigint, .string => null,
+    };
+}
+
 fn lowerArray(context: anytype, node_id: ast.NodeId, expression: ast.ArrayExpression) anyerror!ids.ValueId {
     const array = try context.emitValue(.create_array, context.nodeType(node_id));
+
+    var dense = expression.elements.len != 0;
+    if (dense) {
+        for (expression.elements) |maybe_element| {
+            const element = maybe_element orelse {
+                dense = false;
+                break;
+            };
+            if (context.local.frontend.ast.node(element).data == .SpreadElement) {
+                dense = false;
+                break;
+            }
+        }
+    }
+
+    if (dense) {
+        var constants: std.ArrayList(model.HirConstant) = .empty;
+        defer constants.deinit(context.builder.allocator);
+        try constants.ensureTotalCapacity(context.builder.allocator, expression.elements.len);
+
+        var all_constants = true;
+        for (expression.elements) |maybe_element| {
+            const constant = try constantForValueSpan(context, maybe_element.?) orelse {
+                all_constants = false;
+                break;
+            };
+            constants.appendAssumeCapacity(constant);
+        }
+        if (all_constants) {
+            const span = try context.builder.addValueSpan(constants.items);
+            try context.emitVoid(.{ .array_initialize = .{
+                .array = array,
+                .source = .{ .constant = span },
+            } });
+            return array;
+        }
+
+        var values: std.ArrayList(ids.ValueId) = .empty;
+        defer values.deinit(context.builder.allocator);
+        try values.ensureTotalCapacity(context.builder.allocator, expression.elements.len);
+        for (expression.elements) |maybe_element|
+            values.appendAssumeCapacity(try lower(context, maybe_element.?));
+        try context.emitVoid(.{ .array_initialize = .{
+            .array = array,
+            .source = .{ .dynamic = try values.toOwnedSlice(context.builder.allocator) },
+        } });
+        return array;
+    }
+
     for (expression.elements) |maybe_element| {
         const element = maybe_element orelse {
             try context.emitVoid(.{ .array_append_hole = array });

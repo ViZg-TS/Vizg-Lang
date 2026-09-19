@@ -172,7 +172,7 @@ test "HIR reachability operation trigger ordinals remain ABI stable" {
         .get_async_iterator,     .iterator_next,           .iterator_done,        .iterator_value,         .iterator_close,
         .enumerate_properties,   .enumerator_next,         .enumerator_done,      .enumerator_value,       .collect_rest_arguments,
         .read_argument,          .create_arguments_object, .await_,               .yield_,                 .yield_delegate,
-        .debugger_trap,          .apply_pattern,           .intrinsic_call,
+        .debugger_trap,          .apply_pattern,           .intrinsic_call,       .array_initialize,
     };
     const fields = @typeInfo(Tag).@"enum".fields;
     try std.testing.expectEqual(@as(usize, expected.len), fields.len);

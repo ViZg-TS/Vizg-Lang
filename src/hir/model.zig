@@ -22,6 +22,7 @@ pub const HirProject = struct {
     entities: []const HirEntity = &.{},
     functions: []const HirFunction = &.{},
     constants: []const HirConstant = &.{},
+    value_spans: []const HirValueSpan = &.{},
     regions: []const HirRegion = &.{},
     origins: origin_mod.OriginTable = .{},
     lowering_trace: ?trace.LoweringTrace = null,
@@ -363,6 +364,18 @@ pub const HirConstant = union(enum) {
     string: []const u8,
 };
 
+/// Project-owned semantic constant sequence. Physical packing is selected by
+/// the downstream consumer; this HIR record intentionally carries no target
+/// layout and is reusable by any operation that consumes a value sequence.
+pub const HirValueSpan = struct {
+    values: []const HirConstant,
+};
+
+pub const ValueSpanSource = union(enum) {
+    dynamic: []const ids.ValueId,
+    constant: ids.ValueSpanId,
+};
+
 pub const HirTerminator = union(enum) {
     jump: Jump,
     branch: Branch,
@@ -606,6 +619,7 @@ pub const HirOperation = union(enum) {
     debugger_trap,
     apply_pattern: PatternPlan,
     intrinsic_call: IntrinsicCall,
+    array_initialize: struct { array: ids.ValueId, source: ValueSpanSource },
 
     pub fn checked(self: HirOperation) OperationError!HirOperation {
         switch (self) {
@@ -625,6 +639,13 @@ pub const HirOperation = union(enum) {
             .apply_pattern => |plan| {
                 if (plan.items.len == 0) return error.EmptyPatternPlan;
                 try checkArity(plan.items.len);
+            },
+            .array_initialize => |payload| switch (payload.source) {
+                .dynamic => |values| {
+                    if (values.len == 0) return error.EmptyArrayInitialization;
+                    try checkArity(values.len);
+                },
+                .constant => {},
             },
             else => {},
         }
@@ -646,6 +667,7 @@ pub const HirOperation = union(enum) {
             .array_append,
             .array_append_hole,
             .array_append_iterable,
+            .array_initialize,
             .iterator_close,
             .debugger_trap,
             .apply_pattern,
@@ -688,6 +710,7 @@ pub const HirOperation = union(enum) {
             .array_append,
             .array_append_hole,
             .array_append_iterable,
+            .array_initialize,
             => EffectSet.user_write_effect,
             .get_iterator,
             .iterator_next,
@@ -711,6 +734,7 @@ pub const OperationError = error{
     ArityOverflow,
     EmptyStringBuild,
     EmptyPatternPlan,
+    EmptyArrayInitialization,
     TemplateArityMismatch,
     ResultPresenceMismatch,
     ResultTypeMismatch,

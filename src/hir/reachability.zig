@@ -850,6 +850,13 @@ const State = struct {
                 try self.traceValue(value.array);
                 try self.traceValue(value.iterable);
             },
+            .array_initialize => |value| {
+                try self.traceValue(value.array);
+                switch (value.source) {
+                    .dynamic => |elements| for (elements) |element| try self.traceValue(element),
+                    .constant => {},
+                }
+            },
             .build_string => |parts| for (parts) |part| switch (part) {
                 .text => {},
                 .value => |value| try self.traceValue(value),

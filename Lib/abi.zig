@@ -2776,31 +2776,41 @@ pub fn hirReachabilityAnalyze(
     // canonical reached ordinals returned above. ViZG already owns this index;
     // downstream consumers must not reconstruct it with one ABI query per
     // entity.
-    for (buffers.module_ordinals_ptr[0..reachability_summary.module_count], 0..) |ordinal, output_index| {
-        if (@as(usize, ordinal) >= hir_result.project.modules.len) return .INTERNAL_ERROR;
-        buffers.module_ids_ptr[output_index] = hir_result.project.modules[ordinal].module_id.value();
+    if (reachability_summary.module_count != 0) {
+        for (buffers.module_ordinals_ptr[0..reachability_summary.module_count], 0..) |ordinal, output_index| {
+            if (@as(usize, ordinal) >= hir_result.project.modules.len) return .INTERNAL_ERROR;
+            buffers.module_ids_ptr[output_index] = hir_result.project.modules[ordinal].module_id.value();
+        }
     }
-    for (buffers.function_ordinals_ptr[0..reachability_summary.function_count], 0..) |ordinal, output_index| {
-        if (@as(usize, ordinal) >= hir_result.project.functions.len) return .INTERNAL_ERROR;
-        buffers.function_ids_ptr[output_index] = idIndex(hir_result.project.functions[ordinal].id);
+    if (reachability_summary.function_count != 0) {
+        for (buffers.function_ordinals_ptr[0..reachability_summary.function_count], 0..) |ordinal, output_index| {
+            if (@as(usize, ordinal) >= hir_result.project.functions.len) return .INTERNAL_ERROR;
+            buffers.function_ids_ptr[output_index] = idIndex(hir_result.project.functions[ordinal].id);
+        }
     }
-    for (buffers.block_ordinals_ptr[0..reachability_summary.block_count], 0..) |ordinal, output_index| {
-        const block = index.block(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
-        const function = index.blockFunction(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
-        buffers.block_ids_ptr[output_index] = idIndex(block.id);
-        buffers.block_function_ids_ptr[output_index] = idIndex(function.id);
+    if (reachability_summary.block_count != 0) {
+        for (buffers.block_ordinals_ptr[0..reachability_summary.block_count], 0..) |ordinal, output_index| {
+            const block = index.block(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+            const function = index.blockFunction(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+            buffers.block_ids_ptr[output_index] = idIndex(block.id);
+            buffers.block_function_ids_ptr[output_index] = idIndex(function.id);
+        }
     }
-    for (buffers.instruction_ordinals_ptr[0..reachability_summary.instruction_count], 0..) |ordinal, output_index| {
-        const instruction = index.instruction(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
-        const block = index.instructionBlock(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
-        buffers.instruction_ids_ptr[output_index] = idIndex(instruction.id);
-        buffers.instruction_block_ids_ptr[output_index] = idIndex(block.id);
+    if (reachability_summary.instruction_count != 0) {
+        for (buffers.instruction_ordinals_ptr[0..reachability_summary.instruction_count], 0..) |ordinal, output_index| {
+            const instruction = index.instruction(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+            const block = index.instructionBlock(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+            buffers.instruction_ids_ptr[output_index] = idIndex(instruction.id);
+            buffers.instruction_block_ids_ptr[output_index] = idIndex(block.id);
+        }
     }
-    for (buffers.binding_ordinals_ptr[0..reachability_summary.binding_count], 0..) |ordinal, output_index| {
-        const binding = index.binding(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
-        const function = index.bindingFunction(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
-        buffers.binding_ids_ptr[output_index] = idIndex(binding.id);
-        buffers.binding_function_ids_ptr[output_index] = idIndex(function.id);
+    if (reachability_summary.binding_count != 0) {
+        for (buffers.binding_ordinals_ptr[0..reachability_summary.binding_count], 0..) |ordinal, output_index| {
+            const binding = index.binding(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+            const function = index.bindingFunction(hir_result.project, ordinal) orelse return .INTERNAL_ERROR;
+            buffers.binding_ids_ptr[output_index] = idIndex(binding.id);
+            buffers.binding_function_ids_ptr[output_index] = idIndex(function.id);
+        }
     }
 
     summary.* = .{
@@ -4004,7 +4014,19 @@ fn setConstant(output: *Vizg_HirPayload, constant: vizg.hir.HirConstant) void {
     }
 }
 
-fn operationPayload(operation: vizg.hir.HirOperation) Vizg_HirPayload {
+fn valueSpanAt(
+    project: vizg.hir.HirProject,
+    id: vizg.hir.ids.ValueSpanId,
+) ?vizg.hir.model.HirValueSpan {
+    const index = id.index() orelse return null;
+    if (index >= project.value_spans.len) return null;
+    return project.value_spans[index];
+}
+
+fn operationPayload(
+    project: vizg.hir.HirProject,
+    operation: vizg.hir.HirOperation,
+) Vizg_HirPayload {
     var output = std.mem.zeroes(Vizg_HirPayload);
     output.tag = @intFromEnum(std.meta.activeTag(operation));
     switch (operation) {
@@ -4133,6 +4155,20 @@ fn operationPayload(operation: vizg.hir.HirOperation) Vizg_HirPayload {
             output.operand0 = idIndex(value.array);
             output.operand1 = idIndex(value.iterable);
         },
+        .array_initialize => |value| {
+            output.operand0 = idIndex(value.array);
+            switch (value.source) {
+                .dynamic => |values| output.item_count = values.len,
+                .constant => |span_id| {
+                    output.flags |= 1;
+                    output.operand1 = idIndex(span_id);
+                    output.item_count = if (valueSpanAt(project, span_id)) |value_span|
+                        value_span.values.len
+                    else
+                        0;
+                },
+            }
+        },
         .build_string => |parts| output.item_count = parts.len,
         .to_string,
         .get_iterator,
@@ -4167,7 +4203,22 @@ fn callArgumentItem(argument: vizg.hir.model.CallArgument) Vizg_HirPayloadItem {
     return output;
 }
 
-fn operationPayloadItem(operation: vizg.hir.HirOperation, index: usize) ?Vizg_HirPayloadItem {
+fn setConstantItem(output: *Vizg_HirPayloadItem, constant: vizg.hir.HirConstant) void {
+    output.flags |= 1;
+    output.tag = @intFromEnum(std.meta.activeTag(constant));
+    switch (constant) {
+        .undefined, .null_ => {},
+        .boolean => |value| output.operand0 = @intFromBool(value),
+        .number => |value| output.operand0 = @bitCast(value),
+        .bigint, .string => |value| setString0(output, value),
+    }
+}
+
+fn operationPayloadItem(
+    project: vizg.hir.HirProject,
+    operation: vizg.hir.HirOperation,
+    index: usize,
+) ?Vizg_HirPayloadItem {
     var output = std.mem.zeroes(Vizg_HirPayloadItem);
     switch (operation) {
         .call, .construct => |value| {
@@ -4208,6 +4259,17 @@ fn operationPayloadItem(operation: vizg.hir.HirOperation, index: usize) ?Vizg_Hi
                 .text => |value| setString0(&output, value),
                 .value => |value| output.operand0 = idIndex(value),
             }
+        },
+        .array_initialize => |value| switch (value.source) {
+            .dynamic => |values| {
+                if (index >= values.len) return null;
+                output.operand0 = idIndex(values[index]);
+            },
+            .constant => |span_id| {
+                const value_span = valueSpanAt(project, span_id) orelse return null;
+                if (index >= value_span.values.len) return null;
+                setConstantItem(&output, value_span.values[index]);
+            },
         },
         .apply_pattern => |plan| {
             if (index >= plan.items.len) return null;
@@ -4290,7 +4352,7 @@ pub fn hirOperationAt(
     if (!validAlignedMutableHostArray(Vizg_HirPayload, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirPayload))) return .INVALID_ARGUMENT;
     const instruction = hirInstructionAt(&owned.hir_result.?, index) orelse return .INVALID_ARGUMENT;
-    output.* = operationPayload(instruction.operation);
+    output.* = operationPayload(owned.hir_result.?.project, instruction.operation);
     return .OK;
 }
 
@@ -4306,7 +4368,11 @@ pub fn hirOperationItemAt(
     if (!validAlignedMutableHostArray(Vizg_HirPayloadItem, output, 1) or
         !outputOutsideWorkspace(owned, output, @sizeOf(Vizg_HirPayloadItem))) return .INVALID_ARGUMENT;
     const instruction = hirInstructionAt(&owned.hir_result.?, operation_index) orelse return .INVALID_ARGUMENT;
-    output.* = operationPayloadItem(instruction.operation, item_index) orelse return .INVALID_ARGUMENT;
+    output.* = operationPayloadItem(
+        owned.hir_result.?.project,
+        instruction.operation,
+        item_index,
+    ) orelse return .INVALID_ARGUMENT;
     return .OK;
 }
 
@@ -4485,19 +4551,19 @@ test "ordered pattern plans have stable public payload mappings" {
         .items = &items,
     } };
 
-    const payload = operationPayload(operation);
+    const payload = operationPayload(.{}, operation);
     try std.testing.expectEqual(@as(u32, 61), payload.tag);
     try std.testing.expectEqual(@as(u32, 0), payload.tag0);
     try std.testing.expectEqual(@as(u64, 7), payload.operand0);
     try std.testing.expectEqual(@as(usize, items.len), payload.item_count);
 
-    const default_item = operationPayloadItem(operation, 2).?;
+    const default_item = operationPayloadItem(.{}, operation, 2).?;
     try std.testing.expectEqual(@as(u32, 9), default_item.tag);
     try std.testing.expectEqual(@as(u64, 11), default_item.operand0);
-    const target_item = operationPayloadItem(operation, 3).?;
+    const target_item = operationPayloadItem(.{}, operation, 3).?;
     try std.testing.expectEqual(@as(u32, 10), target_item.tag);
     try std.testing.expectEqual(@as(u64, 13), target_item.operand0);
-    try std.testing.expect(operationPayloadItem(operation, items.len) == null);
+    try std.testing.expect(operationPayloadItem(.{}, operation, items.len) == null);
 }
 
 test "public diagnostic ABI mappings are stable" {

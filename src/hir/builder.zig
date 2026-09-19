@@ -20,6 +20,7 @@ pub const Builder = struct {
     entities: std.ArrayList(model.HirEntity) = .empty,
     functions: std.ArrayList(model.HirFunction) = .empty,
     regions: std.ArrayList(model.HirRegion) = .empty,
+    value_spans: std.ArrayList(model.HirValueSpan) = .empty,
     source_sites: usize = 0,
     debug_level: origin.DebugLevel = .none,
     origins: std.ArrayList(origin.OriginRecord) = .empty,
@@ -52,6 +53,17 @@ pub const Builder = struct {
     pub fn makeId(self: *Builder, comptime IdType: type, index: usize) !IdType {
         if (index >= std.math.maxInt(u32)) return error.IdOverflow;
         return self.result.makeId(IdType, @intCast(index));
+    }
+
+    pub fn addValueSpan(
+        self: *Builder,
+        values: []const model.HirConstant,
+    ) !ids.ValueSpanId {
+        const id = try self.makeId(ids.ValueSpanId, self.value_spans.items.len);
+        try self.value_spans.append(self.allocator, .{
+            .values = try self.allocator.dupe(model.HirConstant, values),
+        });
+        return id;
     }
 
     pub fn nextSourceSite(self: *Builder) !ids.SourceSiteId {
@@ -185,6 +197,7 @@ pub const Builder = struct {
             .language_items = try self.language_items.toOwnedSlice(self.allocator),
             .entities = try self.entities.toOwnedSlice(self.allocator),
             .functions = try self.functions.toOwnedSlice(self.allocator),
+            .value_spans = try self.value_spans.toOwnedSlice(self.allocator),
             .regions = try self.regions.toOwnedSlice(self.allocator),
             .origins = .{ .records = try self.origins.toOwnedSlice(self.allocator) },
             .lowering_trace = if (self.debug_level == .full) .{

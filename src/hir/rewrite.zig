@@ -103,6 +103,13 @@ pub fn operation(allocator: std.mem.Allocator, replacements: []const ValueReplac
         .array_append => |x| .{ .array_append = .{ .array = value(replacements, x.array), .value = value(replacements, x.value) } },
         .array_append_hole => |v| .{ .array_append_hole = value(replacements, v) },
         .array_append_iterable => |x| .{ .array_append_iterable = .{ .array = value(replacements, x.array), .iterable = value(replacements, x.iterable) } },
+        .array_initialize => |x| .{ .array_initialize = .{
+            .array = value(replacements, x.array),
+            .source = switch (x.source) {
+                .dynamic => |values| .{ .dynamic = try valueSlice(allocator, replacements, values) },
+                .constant => |span| .{ .constant = span },
+            },
+        } },
         .build_string => |parts| blk: {
             const output = try allocator.alloc(model.TemplatePart, parts.len);
             for (parts, 0..) |part, index| output[index] = switch (part) {

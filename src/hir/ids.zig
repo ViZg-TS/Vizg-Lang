@@ -49,3 +49,4 @@ pub const PlaceId = Id("PlaceId");
 pub const RegionId = Id("RegionId");
 pub const OriginId = Id("OriginId");
 pub const SourceSiteId = Id("SourceSiteId");
+pub const ValueSpanId = Id("ValueSpanId");
