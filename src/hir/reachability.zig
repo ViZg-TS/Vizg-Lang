@@ -111,6 +111,19 @@ pub fn wordCount(bit_count: usize) usize {
     return bit_count / 64 + @intFromBool(bit_count % 64 != 0);
 }
 
+fn effectPrunableDependencyCount(project: model.HirProject) !usize {
+    var count: usize = 0;
+    for (project.modules) |module| {
+        for (module.dependencies) |dependency| {
+            if (!dependency.initialization_required or
+                !dependency.module_evaluation or
+                !dependency.effect_prunable_evaluation) continue;
+            count = std.math.add(usize, count, 1) catch return error.IndexOverflow;
+        }
+    }
+    return count;
+}
+
 /// Exact scratch requirement when `scratch` begins at u64 alignment. The
 /// analysis uses bounded queues plus private bitsets only; no root-dependent
 /// allocation is retained by HirResult.
@@ -119,6 +132,10 @@ pub fn scratchSize(project: model.HirProject, index: *const consumer_index.Index
     bytes = try addBytes(bytes, u64, wordCount(index.value_producers.len));
     bytes = try addBytes(bytes, u64, wordCount(project.entities.len));
     bytes = try addBytes(bytes, u64, wordCount(index.external_module_ids.len));
+    bytes = try addBytes(bytes, u64, wordCount(project.modules.len));
+    bytes = try addBytes(bytes, u32, try std.math.add(usize, project.modules.len, 1));
+    bytes = try addBytes(bytes, u32, project.modules.len);
+    bytes = try addBytes(bytes, u32, try effectPrunableDependencyCount(project));
     bytes = try addBytes(bytes, u64, wordCount(index.instructions.len));
     bytes = try addBytes(bytes, u64, wordCount(index.instructions.len));
     bytes = try addBytes(bytes, u32, index.instructions.len);
@@ -154,6 +171,10 @@ pub fn analyze(
     const traced_value_bits = try allocator.alloc(u64, wordCount(index.value_producers.len));
     const traced_entity_bits = try allocator.alloc(u64, wordCount(project.entities.len));
     const external_bits = try allocator.alloc(u64, wordCount(index.external_module_ids.len));
+    const observable_module_evaluation_bits = try allocator.alloc(u64, wordCount(project.modules.len));
+    const reverse_module_offsets = try allocator.alloc(u32, try std.math.add(usize, project.modules.len, 1));
+    const reverse_module_positions = try allocator.alloc(u32, project.modules.len);
+    const reverse_module_importers = try allocator.alloc(u32, try effectPrunableDependencyCount(project));
     const selected_registration_bits = try allocator.alloc(u64, wordCount(index.instructions.len));
     const static_property_candidate_bits = try allocator.alloc(u64, wordCount(index.instructions.len));
     const conditional_registration_rules = try allocator.alloc(u32, index.instructions.len);
@@ -162,6 +183,9 @@ pub fn analyze(
     @memset(traced_value_bits, 0);
     @memset(traced_entity_bits, 0);
     @memset(external_bits, 0);
+    @memset(observable_module_evaluation_bits, 0);
+    @memset(reverse_module_offsets, 0);
+    @memset(reverse_module_positions, 0);
     @memset(conditional_registration_rules, std.math.maxInt(u32));
     @memset(selected_registration_bits, 0);
     @memset(static_property_candidate_bits, 0);
@@ -181,6 +205,10 @@ pub fn analyze(
         .traced_value_bits = traced_value_bits,
         .traced_entity_bits = traced_entity_bits,
         .external_bits = external_bits,
+        .observable_module_evaluation_bits = observable_module_evaluation_bits,
+        .reverse_module_offsets = reverse_module_offsets,
+        .reverse_module_positions = reverse_module_positions,
+        .reverse_module_importers = reverse_module_importers,
         .conditional_registration_rules = conditional_registration_rules,
         .selected_registration_bits = selected_registration_bits,
         .static_property_candidate_bits = static_property_candidate_bits,
@@ -194,6 +222,7 @@ pub fn analyze(
     };
     try state.catalogConditionalRegistrations();
     try state.catalogStaticPropertyCandidates();
+    try state.catalogObservableModuleEvaluations();
 
     for (request.application_modules) |raw| {
         const ordinal = index.module_ordinals.get(raw) orelse return error.UnknownArtifactRoot;
@@ -281,6 +310,10 @@ const State = struct {
     traced_value_bits: []u64,
     traced_entity_bits: []u64,
     external_bits: []u64,
+    observable_module_evaluation_bits: []u64,
+    reverse_module_offsets: []u32,
+    reverse_module_positions: []u32,
+    reverse_module_importers: []u32,
     conditional_registration_rules: []u32,
     selected_registration_bits: []u64,
     static_property_candidate_bits: []u64,
@@ -309,6 +342,231 @@ const State = struct {
             self.function_head < self.function_len or
             self.binding_head < self.binding_len or
             self.value_head < self.value_len;
+    }
+
+    fn catalogObservableModuleEvaluations(self: *State) !void {
+        const module_count = self.project.modules.len;
+        if (module_count > std.math.maxInt(u32)) return error.IndexOverflow;
+        if (self.reverse_module_offsets.len != module_count + 1 or
+            self.reverse_module_positions.len != module_count)
+            return error.InconsistentProjection;
+
+        // Build reverse adjacency only for user binding-import evaluation edges
+        // that are eligible for purity pruning. Unconditional ESM edges never
+        // need propagation through this table: their importer is a direct seed.
+        for (self.project.modules) |module| {
+            for (module.dependencies) |dependency| {
+                if (!dependency.initialization_required or
+                    !dependency.module_evaluation or
+                    !dependency.effect_prunable_evaluation) continue;
+                const target = self.index.moduleOrdinal(dependency.module_id) orelse
+                    return error.InconsistentProjection;
+                const offset_index = @as(usize, target) + 1;
+                self.reverse_module_offsets[offset_index] = std.math.add(
+                    u32,
+                    self.reverse_module_offsets[offset_index],
+                    1,
+                ) catch return error.IndexOverflow;
+            }
+        }
+
+        var running: u32 = 0;
+        for (1..self.reverse_module_offsets.len) |index| {
+            running = std.math.add(u32, running, self.reverse_module_offsets[index]) catch
+                return error.IndexOverflow;
+            self.reverse_module_offsets[index] = running;
+        }
+        if (@as(usize, running) != self.reverse_module_importers.len)
+            return error.InconsistentProjection;
+        for (0..module_count) |ordinal|
+            self.reverse_module_positions[ordinal] = self.reverse_module_offsets[ordinal];
+
+        for (self.project.modules, 0..) |module, importer_ordinal| {
+            for (module.dependencies) |dependency| {
+                if (!dependency.initialization_required or
+                    !dependency.module_evaluation or
+                    !dependency.effect_prunable_evaluation) continue;
+                const target = self.index.moduleOrdinal(dependency.module_id) orelse
+                    return error.InconsistentProjection;
+                const position = self.reverse_module_positions[target];
+                if (@as(usize, position) >= self.reverse_module_importers.len)
+                    return error.InconsistentProjection;
+                self.reverse_module_importers[position] = @intCast(importer_ordinal);
+                self.reverse_module_positions[target] = std.math.add(u32, position, 1) catch
+                    return error.IndexOverflow;
+            }
+        }
+
+        // Seed direct top-level effects and modules that own an unconditional
+        // ESM evaluation edge. The regular module queue is safe to reuse here:
+        // observable_module_evaluation_bits guarantees each module is enqueued
+        // at most once, and the queue is reset before artifact roots are added.
+        for (self.project.modules, 0..) |module, ordinal| {
+            var observable = try self.moduleHasDirectObservableEvaluation(@intCast(ordinal));
+            if (!observable) {
+                for (module.dependencies) |dependency| {
+                    if (!dependency.initialization_required or !dependency.module_evaluation) continue;
+                    if (dependency.effect_prunable_evaluation) continue;
+                    observable = true;
+                    break;
+                }
+            }
+            if (observable) try self.enqueueObservableModule(@intCast(ordinal));
+        }
+
+        // Linear reverse propagation: once a provider is known observable, only
+        // its prunable importers can become newly observable. Pure cycles never
+        // seed the queue and therefore remain removable as a group.
+        while (self.module_head < self.module_len) {
+            const provider = self.module_queue[self.module_head];
+            self.module_head += 1;
+            const begin = self.reverse_module_offsets[provider];
+            const end_offset = self.reverse_module_offsets[@as(usize, provider) + 1];
+            if (end_offset < begin or @as(usize, end_offset) > self.reverse_module_importers.len)
+                return error.InconsistentProjection;
+            for (self.reverse_module_importers[begin..end_offset]) |importer|
+                try self.enqueueObservableModule(importer);
+        }
+
+        self.module_head = 0;
+        self.module_len = 0;
+    }
+
+    fn enqueueObservableModule(self: *State, ordinal: u32) !void {
+        if (@as(usize, ordinal) >= self.project.modules.len) return error.InconsistentProjection;
+        if (!setBitNew(self.observable_module_evaluation_bits, ordinal)) return;
+        if (self.module_len >= self.module_queue.len) return error.InconsistentProjection;
+        self.module_queue[self.module_len] = ordinal;
+        self.module_len += 1;
+    }
+
+    fn moduleHasDirectObservableEvaluation(self: *State, module_ordinal: u32) !bool {
+        if (@as(usize, module_ordinal) >= self.project.modules.len)
+            return error.InconsistentProjection;
+        const module = self.project.modules[module_ordinal];
+        const function_ordinal = self.index.functionOrdinal(module.initialization) orelse
+            return error.InconsistentProjection;
+        if (@as(usize, function_ordinal) >= self.project.functions.len)
+            return error.InconsistentProjection;
+        const function = self.project.functions[function_ordinal];
+        for (function.blocks) |block| {
+            for (block.instructions) |instruction| {
+                if (try self.moduleInstructionHasObservableEffect(instruction)) return true;
+            }
+            if (moduleTerminatorHasObservableEffect(block.terminator)) return true;
+        }
+        return false;
+    }
+
+    fn moduleInstructionHasObservableEffect(
+        self: *State,
+        instruction: model.HirInstruction,
+    ) !bool {
+        return switch (instruction.operation) {
+            // Pure values, local storage shells, and fresh identities can be
+            // omitted when no exported/imported value demands them. Effects in
+            // their operand producers are classified independently by the same
+            // module scan.
+            .constant,
+            .copy,
+            .initialize_binding,
+            .store_binding,
+            .make_binding_place,
+            .make_property_place,
+            .make_element_place,
+            .make_super_place,
+            .to_boolean,
+            .is_nullish,
+            .void_value,
+            .create_object,
+            .create_array,
+            .create_closure,
+            .create_enum_object,
+            .create_regexp,
+            .create_template_site,
+            .collect_rest_arguments,
+            .read_argument,
+            .create_arguments_object,
+            .load_this,
+            .load_super,
+            .load_meta,
+            => false,
+
+            // An otherwise dead live-import/TDZ read may still throw under an
+            // import cycle and therefore participates in module evaluation.
+            .load_binding => |binding| try self.bindingReadMustExecuteWithoutValue(binding),
+
+            // Binding stores are local declaration mechanics. Property/element
+            // stores remain conservative until general escape analysis exists.
+            .store_place => |value| self.index.bindingForPlace(value.place) == null,
+
+            // Class heritage can throw even if the class value is discarded;
+            // static initialization may execute arbitrary source code.
+            .create_class => |value| blk: {
+                if (value.base != null) break :blk true;
+                const entity_ordinal = self.index.entityOrdinal(value.entity) orelse
+                    return error.InconsistentProjection;
+                if (@as(usize, entity_ordinal) >= self.project.entities.len)
+                    return error.InconsistentProjection;
+                break :blk switch (self.project.entities[entity_ordinal].kind) {
+                    .class => |class| class.static_initializer != null,
+                    else => return error.InconsistentProjection,
+                };
+            },
+
+            // Intrinsics are the only operation family carrying host-declared
+            // precise effects; a fully pure intrinsic does not anchor module
+            // evaluation merely because its result was computed.
+            .intrinsic_call => |call| effectSetIsObservable(call.effects),
+
+            // These operations can throw, invoke user code, mutate observable
+            // state, suspend, expose dynamic property behavior, or explicitly
+            // request debugging. Keep the classifier intentionally conservative
+            // until the corresponding escape/effect proof exists.
+            .delete_place,
+            .load_place,
+            .typeof_value,
+            .unary,
+            .binary,
+            .add,
+            .call,
+            .call_method,
+            .call_super_method,
+            .call_super_constructor,
+            .construct,
+            .tagged_template_call,
+            .dynamic_import,
+            .define_property,
+            .define_method,
+            .copy_object_properties,
+            .array_append,
+            .array_append_hole,
+            .array_append_iterable,
+            .array_initialize,
+            .build_string,
+            .to_string,
+            .get_iterator,
+            .get_async_iterator,
+            .iterator_next,
+            .iterator_done,
+            .iterator_value,
+            .iterator_close,
+            .enumerate_properties,
+            .enumerator_next,
+            .enumerator_done,
+            .enumerator_value,
+            .await_,
+            .yield_,
+            .yield_delegate,
+            .debugger_trap,
+            .apply_pattern,
+            => true,
+        };
+    }
+
+    fn moduleEvaluationIsObservable(self: *State, module_id: model.ModuleId) !bool {
+        const ordinal = self.index.moduleOrdinal(module_id) orelse return error.InconsistentProjection;
+        return bitIsSet(self.observable_module_evaluation_bits, ordinal);
     }
 
     fn catalogConditionalRegistrations(self: *State) !void {
@@ -982,7 +1240,11 @@ const State = struct {
         // module execution semantics from local import bindings.
         for (module.dependencies) |dependency| {
             if (!dependency.initialization_required or !dependency.module_evaluation) continue;
-            try self.reachModule(dependency.module_id);
+            if (!dependency.effect_prunable_evaluation or
+                try self.moduleEvaluationIsObservable(dependency.module_id))
+            {
+                try self.reachModule(dependency.module_id);
+            }
         }
     }
 
@@ -1511,6 +1773,23 @@ const State = struct {
     }
 };
 
+fn effectSetIsObservable(effects: model.EffectSet) bool {
+    return !effects.pure or effects.may_throw or effects.may_call_user_code or
+        effects.reads_state or effects.writes_state or effects.may_suspend or
+        effects.creates_identity;
+}
+
+fn moduleTerminatorHasObservableEffect(terminator: model.HirTerminator) bool {
+    return switch (terminator) {
+        .throw => true,
+        .leave_region => |leave| switch (leave.completion) {
+            .throw => true,
+            else => false,
+        },
+        .jump, .branch, .return_, .unreachable_, .resume_completion => false,
+    };
+}
+
 fn validateOutput(project: model.HirProject, index: *const consumer_index.Index, output: Output) !void {
     if (output.module_bits.len < wordCount(project.modules.len) or
         output.function_bits.len < wordCount(project.functions.len) or
@@ -1598,6 +1877,13 @@ fn bitIsSet(words: []const u64, ordinal: usize) bool {
 }
 
 fn addBytes(current: usize, comptime T: type, count: usize) !usize {
+    // FixedBufferAllocator aligns every raw allocation relative to the aligned
+    // scratch base. Account for that padding explicitly so scratchSize remains
+    // exact even when allocations switch between u32- and u64-aligned types.
+    const alignment = @alignOf(T);
+    const remainder = current % alignment;
+    const padding = if (remainder == 0) 0 else alignment - remainder;
+    const aligned = std.math.add(usize, current, padding) catch return error.IndexOverflow;
     const bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.IndexOverflow;
-    return std.math.add(usize, current, bytes) catch return error.IndexOverflow;
+    return std.math.add(usize, aligned, bytes) catch return error.IndexOverflow;
 }

@@ -69,11 +69,14 @@ pub const HirModule = struct {
 pub const HirModuleDependency = struct {
     module_id: ModuleId,
     initialization_required: bool,
-    /// True only for a source-module execution edge that follows directly
-    /// from ESM evaluation (static import/re-export). Source-backed globals
-    /// retain provider provenance as a dependency but become artifact roots
-    /// only when their semantic binding/value is reached.
+    /// Unconditional source-module execution edge (bare side-effect import or
+    /// re-export). It is preserved regardless of provider purity.
     module_evaluation: bool = false,
+    /// Internal reachability refinement for an ordinary user binding import.
+    /// `module_evaluation` remains true for the public ESM contract, while this
+    /// bit permits omission only when the provider evaluation closure is proven
+    /// unobservable. It is intentionally not exported through the HIR C ABI.
+    effect_prunable_evaluation: bool = false,
 };
 
 pub const HirModuleReference = union(enum) {

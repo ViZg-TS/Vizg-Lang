@@ -189,12 +189,16 @@ fn lowerDependencies(
     while (cursor < seeds.len) {
         const module_id = seeds[cursor].module_id;
         var module_evaluation = false;
-        while (cursor < seeds.len and seeds[cursor].module_id == module_id) : (cursor += 1)
+        var effect_prunable_evaluation = false;
+        while (cursor < seeds.len and seeds[cursor].module_id == module_id) : (cursor += 1) {
             module_evaluation = module_evaluation or seeds[cursor].module_evaluation;
+            effect_prunable_evaluation = effect_prunable_evaluation or seeds[cursor].effect_prunable_evaluation;
+        }
         dependencies[output_index] = .{
             .module_id = module_id,
             .initialization_required = true,
             .module_evaluation = module_evaluation,
+            .effect_prunable_evaluation = effect_prunable_evaluation,
         };
         output_index += 1;
     }

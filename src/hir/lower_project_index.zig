@@ -12,7 +12,12 @@ const semantics = @import("../semantics/root.zig");
 
 pub const DependencySeed = struct {
     module_id: project_mod.ModuleId,
+    /// Unconditional ESM evaluation edge (bare side-effect import/re-export).
     module_evaluation: bool,
+    /// Ordinary user binding import whose ESM evaluation may be omitted when
+    /// its provider evaluation closure is proven unobservable. Closed-world
+    /// STD bindings and unconditional side-effect/re-export edges leave false.
+    effect_prunable_evaluation: bool,
 };
 
 pub const DynamicImportResolution = struct {
@@ -92,21 +97,26 @@ pub const Index = struct {
                             .target = .{ .source = target },
                         });
                     } else if (!edge.type_only) {
-                        // Global/STD implementation modules are a closed,
-                        // compiler-selected source tree. Ordinary binding
-                        // imports inside that tree become executable only when
-                        // the binding itself is reached; otherwise an unused
-                        // API member would make its entire provider module an
-                        // artifact root. Bare side-effect imports and re-exports
-                        // retain ordinary ESM evaluation semantics. User
-                        // modules remain conservative/open-world here.
-                        const conditional_std_binding_import =
-                            project.isStandardModule(edge.importer) and
-                            edge.operation == .static_import and
+                        // Binding imports are represented as conditional
+                        // execution edges. Closed-world STD imports become live
+                        // only through exact binding demand. Ordinary user
+                        // imports additionally evaluate their provider when the
+                        // HIR reachability pass proves that provider evaluation
+                        // has observable effects. Bare side-effect imports and
+                        // re-exports remain unconditional ESM evaluation edges.
+                        const binding_import = edge.operation == .static_import and
                             edge.import_kind != .side_effect;
+                        const closed_world_binding_import = binding_import and
+                            project.isStandardModule(edge.importer);
                         try bucket.dependencies.append(allocator, .{
                             .module_id = target,
-                            .module_evaluation = !conditional_std_binding_import,
+                            // Preserve the ABI/public HIR meaning: ordinary
+                            // user imports are ESM evaluation edges even when
+                            // reachability may later prove that evaluation
+                            // observationally removable.
+                            .module_evaluation = !closed_world_binding_import,
+                            .effect_prunable_evaluation = binding_import and
+                                !closed_world_binding_import,
                         });
                     }
                 },
@@ -135,13 +145,12 @@ pub const Index = struct {
             try bucket.projection_targets.append(allocator, target_id);
             try bucket.dependencies.append(allocator, .{
                 .module_id = target_id,
-                // Semantic-import records carry exact provider provenance.
-                // Unconditional module evaluation is owned solely by the
-                // project graph edge above (bare imports, re-exports, and
-                // conservative user-module imports). Keeping this edge
-                // conditional prevents a dead binding alias from upgrading a
-                // tree-shakeable STD dependency back into an execution root.
+                // Semantic-import records carry exact provider provenance only.
+                // Evaluation policy is owned solely by the project-graph edge
+                // above; otherwise a dead source-backed/global alias could
+                // upgrade its provider back into an execution root.
                 .module_evaluation = false,
+                .effect_prunable_evaluation = false,
             });
         }
 

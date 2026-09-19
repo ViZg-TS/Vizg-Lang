@@ -851,7 +851,9 @@ test "artifact reachability preserves namespace semantics without source spellin
     try std.testing.expect(saw_namespace_metadata);
     const dep_module = unused_result.consumerIndex().module_ordinals.get(1121) orelse return error.TestExpectedDependencyModule;
     const unused = try analyzeForTest(&unused_result, &.{}, &.{1120}, &.{});
-    try std.testing.expect(bitSet(unused.module_bits[0..], dep_module));
+    // The namespace binding is unused and the provider has declaration-only
+    // evaluation, so the provider itself can now disappear before MIR.
+    try std.testing.expect(!bitSet(unused.module_bits[0..], dep_module));
     _ = try expectFunctionReachability(&unused_result, unused, "first", false);
     _ = try expectFunctionReachability(&unused_result, unused, "second", false);
 
@@ -938,9 +940,11 @@ test "STD binding imports are conditional while bare side-effect imports remain 
     for (api_module.dependencies) |dependency| {
         if (dependency.module_id.value() == 1142) {
             try std.testing.expect(!dependency.module_evaluation);
+            try std.testing.expect(!dependency.effect_prunable_evaluation);
             saw_dead = true;
         } else if (dependency.module_id.value() == 1143) {
             try std.testing.expect(dependency.module_evaluation);
+            try std.testing.expect(!dependency.effect_prunable_evaluation);
             saw_side = true;
         }
     }
@@ -981,6 +985,7 @@ test "artifact reachability reaches source-backed globals only through live sema
     for (result.project.modules[app_module].dependencies) |dependency| if (dependency.module_id.value() == 1150) {
         try std.testing.expect(dependency.initialization_required);
         try std.testing.expect(!dependency.module_evaluation);
+        try std.testing.expect(!dependency.effect_prunable_evaluation);
         saw_conditional_provider_dependency = true;
     };
     try std.testing.expect(saw_conditional_provider_dependency);
@@ -1163,6 +1168,234 @@ test "public library keeps complete exported object surface" {
     _ = try expectFunctionReachability(&result, reached, "dead", true);
 }
 
+test "unused user named import drops a declaration-only provider before MIR" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(1157),
+        .logical_name = "app-pure-user-import.ts",
+        .bytes =
+        \\import { dead } from "./pure";
+        \\42;
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| {
+            try std.testing.expectEqualStrings("./pure", request.raw_specifier);
+            try project.respondSource(request.id, .{
+                .id = .init(1158),
+                .logical_name = "pure-user-import.ts",
+                .bytes = "export function dead(): number { return 9; }",
+            });
+        },
+    };
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const reached = try analyzeForTest(result, &.{}, &.{1157}, &.{});
+    const index = result.consumerIndex();
+    const dep_module = index.module_ordinals.get(1158) orelse return error.TestExpectedDependencyModule;
+    const app_module = index.module_ordinals.get(1157) orelse return error.TestExpectedDependencyModule;
+    var saw_prunable_esm_edge = false;
+    for (result.project.modules[app_module].dependencies) |dependency| {
+        if (dependency.module_id.value() != 1158) continue;
+        try std.testing.expect(dependency.module_evaluation);
+        try std.testing.expect(dependency.effect_prunable_evaluation);
+        saw_prunable_esm_edge = true;
+    }
+    try std.testing.expect(saw_prunable_esm_edge);
+    try std.testing.expect(!bitSet(reached.module_bits[0..], dep_module));
+    _ = try expectFunctionReachability(result, reached, "dead", false);
+}
+
+test "unused user import preserves transitive observable provider evaluation" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(1170),
+        .logical_name = "app-transitive-user-import.ts",
+        .bytes =
+        \\import { dead } from "./middle";
+        \\42;
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| {
+            if (std.mem.eql(u8, request.raw_specifier, "./middle")) {
+                try project.respondSource(request.id, .{
+                    .id = .init(1171),
+                    .logical_name = "middle-transitive-user-import.ts",
+                    .bytes =
+                    \\import { leaf } from "./leaf";
+                    \\export function dead(): number { return leaf(); }
+                    ,
+                });
+            } else if (std.mem.eql(u8, request.raw_specifier, "./leaf")) {
+                try project.respondSource(request.id, .{
+                    .id = .init(1172),
+                    .logical_name = "leaf-transitive-user-import.ts",
+                    .bytes =
+                    \\export function effect(): number { return 1; }
+                    \\effect();
+                    \\export function leaf(): number { return 2; }
+                    ,
+                });
+            } else return error.UnexpectedModuleRequest;
+        },
+    };
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const reached = try analyzeForTest(result, &.{}, &.{1170}, &.{});
+    const index = result.consumerIndex();
+    try std.testing.expect(bitSet(reached.module_bits[0..], index.module_ordinals.get(1171).?));
+    try std.testing.expect(bitSet(reached.module_bits[0..], index.module_ordinals.get(1172).?));
+    _ = try expectFunctionReachability(result, reached, "effect", true);
+    _ = try expectFunctionReachability(result, reached, "leaf", false);
+    _ = try expectFunctionReachability(result, reached, "dead", false);
+}
+
+test "user import evaluation worklist handles pure and effectful cycles" {
+    const Case = struct {
+        fn lower(effectful_cycle: bool) !hir.HirResult {
+            var project = project_mod.Project.init(std.testing.allocator);
+            defer project.deinit();
+
+            const source_a: project_mod.ModuleSource = .{
+                .id = .init(1181),
+                .logical_name = "cycle-a.ts",
+                .bytes =
+                \\import { b } from "./b";
+                \\export function a(): number { return b(); }
+                ,
+            };
+            const source_b: project_mod.ModuleSource = .{
+                .id = .init(1182),
+                .logical_name = "cycle-b.ts",
+                .bytes = if (effectful_cycle)
+                    \\import { a } from "./a";
+                    \\function touch(): number { return 7; }
+                    \\touch();
+                    \\export function b(): number { return a(); }
+                else
+                    \\import { a } from "./a";
+                    \\export function b(): number { return a(); }
+                ,
+            };
+            try project.addRoot(.{
+                .id = .init(1180),
+                .logical_name = "cycle-main.ts",
+                .bytes =
+                \\import { a } from "./a";
+                \\42;
+                ,
+            });
+            try project.supplySource(source_a);
+            try project.supplySource(source_b);
+
+            while (true) switch (try project.step()) {
+                .complete => break,
+                .request => |request| {
+                    if (std.mem.eql(u8, request.raw_specifier, "./a")) {
+                        try project.respondSource(request.id, source_a);
+                    } else if (std.mem.eql(u8, request.raw_specifier, "./b")) {
+                        try project.respondSource(request.id, source_b);
+                    } else return error.UnexpectedModuleRequest;
+                },
+            };
+            if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+            var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+            return switch (outcome) {
+                .result => |result| result,
+                .diagnostics => |*report| {
+                    report.deinit();
+                    return error.UnexpectedLoweringDiagnostics;
+                },
+            };
+        }
+    };
+
+    var pure = try Case.lower(false);
+    defer pure.deinit();
+    const pure_reached = try analyzeForTest(&pure, &.{}, &.{1180}, &.{});
+    const pure_index = pure.consumerIndex();
+    try std.testing.expect(!bitSet(pure_reached.module_bits[0..], pure_index.module_ordinals.get(1181).?));
+    try std.testing.expect(!bitSet(pure_reached.module_bits[0..], pure_index.module_ordinals.get(1182).?));
+    _ = try expectFunctionReachability(&pure, pure_reached, "a", false);
+    _ = try expectFunctionReachability(&pure, pure_reached, "b", false);
+
+    var effectful = try Case.lower(true);
+    defer effectful.deinit();
+    const effectful_reached = try analyzeForTest(&effectful, &.{}, &.{1180}, &.{});
+    const effectful_index = effectful.consumerIndex();
+    try std.testing.expect(bitSet(effectful_reached.module_bits[0..], effectful_index.module_ordinals.get(1181).?));
+    try std.testing.expect(bitSet(effectful_reached.module_bits[0..], effectful_index.module_ordinals.get(1182).?));
+    _ = try expectFunctionReachability(&effectful, effectful_reached, "touch", true);
+    _ = try expectFunctionReachability(&effectful, effectful_reached, "a", false);
+    _ = try expectFunctionReachability(&effectful, effectful_reached, "b", false);
+}
+
+test "bare side-effect import remains unconditional even for declaration-only provider" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(1173),
+        .logical_name = "app-pure-side-effect.ts",
+        .bytes =
+        \\import "./pure-side";
+        \\42;
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| {
+            try std.testing.expectEqualStrings("./pure-side", request.raw_specifier);
+            try project.respondSource(request.id, .{
+                .id = .init(1174),
+                .logical_name = "pure-side-effect.ts",
+                .bytes = "export function dead(): number { return 1; }",
+            });
+        },
+    };
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const reached = try analyzeForTest(result, &.{}, &.{1173}, &.{});
+    const index = result.consumerIndex();
+    const dep_module = index.module_ordinals.get(1174) orelse return error.TestExpectedDependencyModule;
+    const app_module = index.module_ordinals.get(1173) orelse return error.TestExpectedDependencyModule;
+    var saw_unconditional_edge = false;
+    for (result.project.modules[app_module].dependencies) |dependency| {
+        if (dependency.module_id.value() != 1174) continue;
+        try std.testing.expect(dependency.module_evaluation);
+        try std.testing.expect(!dependency.effect_prunable_evaluation);
+        saw_unconditional_edge = true;
+    }
+    try std.testing.expect(saw_unconditional_edge);
+    try std.testing.expect(bitSet(reached.module_bits[0..], dep_module));
+    _ = try expectFunctionReachability(result, reached, "dead", false);
+}
+
 test "unused user named import preserves provider evaluation but prunes dead export body" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
@@ -1203,6 +1436,62 @@ test "unused user named import preserves provider evaluation but prunes dead exp
     try std.testing.expect(bitSet(reached.module_bits[0..], dep_module));
     _ = try expectFunctionReachability(result, reached, "effect", true);
     _ = try expectFunctionReachability(result, reached, "dead", false);
+}
+
+test "unused user import preserves transitive re-export evaluation without materializing dead export" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(1175),
+        .logical_name = "app-reexport-evaluation.ts",
+        .bytes =
+        \\import { facadeThing } from "./facade";
+        \\42;
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| {
+            if (std.mem.eql(u8, request.raw_specifier, "./facade")) {
+                try project.respondSource(request.id, .{
+                    .id = .init(1176),
+                    .logical_name = "facade-reexport-evaluation.ts",
+                    .bytes = "export { thing as facadeThing } from './dep';",
+                });
+            } else if (std.mem.eql(u8, request.raw_specifier, "./dep")) {
+                try project.respondSource(request.id, .{
+                    .id = .init(1177),
+                    .logical_name = "dep-reexport-evaluation.ts",
+                    .bytes = "export function thing(): number { return 1; }",
+                });
+            } else return error.UnexpectedModuleRequest;
+        },
+    };
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const reached = try analyzeForTest(result, &.{}, &.{1175}, &.{});
+    const index = result.consumerIndex();
+    const facade_ordinal = index.module_ordinals.get(1176) orelse return error.TestExpectedDependencyModule;
+    const dep_ordinal = index.module_ordinals.get(1177) orelse return error.TestExpectedDependencyModule;
+    try std.testing.expect(bitSet(reached.module_bits[0..], facade_ordinal));
+    try std.testing.expect(bitSet(reached.module_bits[0..], dep_ordinal));
+    _ = try expectFunctionReachability(result, reached, "thing", false);
+
+    var saw_reexport_evaluation = false;
+    for (result.project.modules[facade_ordinal].dependencies) |dependency| {
+        if (dependency.module_id.value() != 1177) continue;
+        try std.testing.expect(dependency.module_evaluation);
+        try std.testing.expect(!dependency.effect_prunable_evaluation);
+        saw_reexport_evaluation = true;
+    }
+    try std.testing.expect(saw_reexport_evaluation);
 }
 
 test "artifact reachability keeps used named import and drops unused sibling export" {
