@@ -96,6 +96,17 @@ const SurfaceInstall = struct {
     identity: SurfaceIdentity,
 };
 
+const StaticPropertyCandidate = struct {
+    instruction_ordinal: u32,
+    identity: SurfaceIdentity,
+    key: []const u8,
+};
+
+const StaticPropertyDefinition = struct {
+    object: ids.ValueId,
+    key: []const u8,
+};
+
 pub fn wordCount(bit_count: usize) usize {
     return bit_count / 64 + @intFromBool(bit_count % 64 != 0);
 }
@@ -109,8 +120,10 @@ pub fn scratchSize(project: model.HirProject, index: *const consumer_index.Index
     bytes = try addBytes(bytes, u64, wordCount(project.entities.len));
     bytes = try addBytes(bytes, u64, wordCount(index.external_module_ids.len));
     bytes = try addBytes(bytes, u64, wordCount(index.instructions.len));
+    bytes = try addBytes(bytes, u64, wordCount(index.instructions.len));
     bytes = try addBytes(bytes, u32, index.instructions.len);
     bytes = try addBytes(bytes, SurfaceInstall, index.instructions.len);
+    bytes = try addBytes(bytes, StaticPropertyCandidate, index.instructions.len);
     bytes = try addBytes(bytes, u32, project.modules.len);
     bytes = try addBytes(bytes, u32, project.functions.len);
     bytes = try addBytes(bytes, u32, index.bindings.len);
@@ -142,13 +155,16 @@ pub fn analyze(
     const traced_entity_bits = try allocator.alloc(u64, wordCount(project.entities.len));
     const external_bits = try allocator.alloc(u64, wordCount(index.external_module_ids.len));
     const selected_registration_bits = try allocator.alloc(u64, wordCount(index.instructions.len));
+    const static_property_candidate_bits = try allocator.alloc(u64, wordCount(index.instructions.len));
     const conditional_registration_rules = try allocator.alloc(u32, index.instructions.len);
     const surface_installs = try allocator.alloc(SurfaceInstall, index.instructions.len);
+    const static_property_candidates = try allocator.alloc(StaticPropertyCandidate, index.instructions.len);
     @memset(traced_value_bits, 0);
     @memset(traced_entity_bits, 0);
     @memset(external_bits, 0);
     @memset(conditional_registration_rules, std.math.maxInt(u32));
     @memset(selected_registration_bits, 0);
+    @memset(static_property_candidate_bits, 0);
 
     const module_queue = try allocator.alloc(u32, project.modules.len);
     const function_queue = try allocator.alloc(u32, project.functions.len);
@@ -167,7 +183,9 @@ pub fn analyze(
         .external_bits = external_bits,
         .conditional_registration_rules = conditional_registration_rules,
         .selected_registration_bits = selected_registration_bits,
+        .static_property_candidate_bits = static_property_candidate_bits,
         .surface_installs = surface_installs,
+        .static_property_candidates = static_property_candidates,
         .module_queue = module_queue,
         .function_queue = function_queue,
         .binding_queue = binding_queue,
@@ -175,6 +193,7 @@ pub fn analyze(
         .external_queue = external_queue,
     };
     try state.catalogConditionalRegistrations();
+    try state.catalogStaticPropertyCandidates();
 
     for (request.application_modules) |raw| {
         const ordinal = index.module_ordinals.get(raw) orelse return error.UnknownArtifactRoot;
@@ -264,8 +283,11 @@ const State = struct {
     external_bits: []u64,
     conditional_registration_rules: []u32,
     selected_registration_bits: []u64,
+    static_property_candidate_bits: []u64,
     surface_installs: []SurfaceInstall,
     surface_install_len: usize = 0,
+    static_property_candidates: []StaticPropertyCandidate,
+    static_property_candidate_len: usize = 0,
 
     module_queue: []u32,
     function_queue: []u32,
@@ -347,6 +369,226 @@ const State = struct {
         }
     }
 
+    fn catalogStaticPropertyCandidates(self: *State) !void {
+        for (self.project.functions) |function| {
+            for (function.blocks) |block| {
+                for (block.instructions) |instruction| {
+                    const payload: StaticPropertyDefinition = switch (instruction.operation) {
+                        .define_property => |value| blk: {
+                            const key = switch (value.key) {
+                                .static => |name| name,
+                                else => continue,
+                            };
+                            if (!try self.staticPropertyValueIsPure(value.value, 0)) continue;
+                            break :blk .{ .object = value.object, .key = key };
+                        },
+                        .define_method => |value| blk: {
+                            const key = switch (value.key) {
+                                .static => |name| name,
+                                else => continue,
+                            };
+                            break :blk .{ .object = value.object, .key = key };
+                        },
+                        else => continue,
+                    };
+                    const identity = try self.surfaceIdentity(payload.object, 0);
+                    if (!try self.surfaceIdentityIsFreshObject(identity)) continue;
+                    const ordinal = self.index.instructionOrdinal(instruction.id) orelse
+                        return error.InconsistentProjection;
+                    if (self.static_property_candidate_len >= self.static_property_candidates.len)
+                        return error.InconsistentProjection;
+                    self.static_property_candidates[self.static_property_candidate_len] = .{
+                        .instruction_ordinal = ordinal,
+                        .identity = identity,
+                        .key = payload.key,
+                    };
+                    self.static_property_candidate_len += 1;
+                    _ = setBitNew(self.static_property_candidate_bits, ordinal);
+                }
+            }
+        }
+    }
+
+    fn staticPropertyValueIsPure(
+        self: *State,
+        value: ids.ValueId,
+        depth: usize,
+    ) !bool {
+        if (depth > 64) return false;
+        const ordinal = self.index.valueOrdinal(value) orelse return error.InconsistentProjection;
+        const producer_ordinal = self.index.value_producers[ordinal] orelse return false;
+        const producer = self.index.instruction(self.project, producer_ordinal) orelse
+            return error.InconsistentProjection;
+        return switch (producer.operation) {
+            .constant, .create_closure => true,
+            .copy => |source| self.staticPropertyValueIsPure(source, depth + 1),
+            else => false,
+        };
+    }
+
+    fn surfaceIdentityIsFreshObject(
+        self: *State,
+        identity: SurfaceIdentity,
+    ) !bool {
+        const ordinal = switch (identity) {
+            .value => |value| value,
+            .binding => return false,
+        };
+        if (@as(usize, ordinal) >= self.index.value_producers.len)
+            return error.InconsistentProjection;
+        const producer_ordinal = self.index.value_producers[ordinal] orelse return false;
+        const producer = self.index.instruction(self.project, producer_ordinal) orelse
+            return error.InconsistentProjection;
+        return producer.operation == .create_object;
+    }
+
+    fn isStaticPropertyCandidate(self: *const State, instruction_ordinal: u32) bool {
+        return bitIsSet(self.static_property_candidate_bits, instruction_ordinal);
+    }
+
+    fn activateStaticPropertyIdentity(
+        self: *State,
+        identity: SurfaceIdentity,
+        key: ?[]const u8,
+    ) !void {
+        for (self.static_property_candidates[0..self.static_property_candidate_len]) |candidate| {
+            if (!sameSurfaceIdentity(identity, candidate.identity)) continue;
+            if (key) |wanted| {
+                if (!std.mem.eql(u8, wanted, candidate.key)) continue;
+            }
+            try self.selectStaticPropertyCandidate(candidate.instruction_ordinal);
+        }
+    }
+
+    fn activateStaticPropertyReceiver(
+        self: *State,
+        receiver: ids.ValueId,
+        key: ?[]const u8,
+    ) !void {
+        const identity = try self.surfaceIdentity(receiver, 0);
+        try self.activateStaticPropertyIdentity(identity, key);
+    }
+
+    fn exposeStaticPropertyValue(self: *State, value: ids.ValueId) !void {
+        const identity = try self.surfaceIdentity(value, 0);
+        try self.activateStaticPropertyIdentity(identity, null);
+    }
+
+    fn selectStaticPropertyCandidate(
+        self: *State,
+        instruction_ordinal: u32,
+    ) !void {
+        if (!setBitNew(self.selected_registration_bits, instruction_ordinal)) return;
+        const instruction = self.index.instruction(self.project, instruction_ordinal) orelse
+            return error.InconsistentProjection;
+        switch (instruction.operation) {
+            .define_property => |value| {
+                try self.traceValue(value.object);
+                try self.traceValue(value.value);
+            },
+            .define_method => |value| {
+                try self.traceValue(value.object);
+                try self.reachFunction(value.function);
+            },
+            else => return error.InconsistentProjection,
+        }
+    }
+
+    fn applyStaticPropertyDemands(
+        self: *State,
+        instruction: model.HirInstruction,
+    ) !void {
+        switch (instruction.operation) {
+            .make_property_place => |value| {
+                if (!self.index.placeIsConsumed(value.result)) return;
+                try self.activateStaticPropertyReceiver(
+                    value.base,
+                    try self.propertyDemandKey(value.key),
+                );
+            },
+            .make_element_place => |value| {
+                if (!self.index.placeIsConsumed(value.result)) return;
+                try self.activateStaticPropertyReceiver(
+                    value.base,
+                    try self.staticStringValue(value.key, 0),
+                );
+            },
+            .call_method, .call_super_method => |value| try self.activateStaticPropertyReceiver(
+                value.receiver,
+                try self.propertyDemandKey(value.key),
+            ),
+            .enumerate_properties => |value| try self.activateStaticPropertyReceiver(value, null),
+            .copy_object_properties => |value| {
+                try self.activateStaticPropertyReceiver(value.source, null);
+                try self.activateStaticPropertyReceiver(value.target, null);
+            },
+            .call, .construct => |value| {
+                try self.exposeStaticPropertyValue(value.callee);
+                for (value.arguments) |argument|
+                    try self.exposeStaticPropertyValue(argument.operand());
+            },
+            .call_super_constructor => |arguments| for (arguments) |argument|
+                try self.exposeStaticPropertyValue(argument.operand()),
+            .tagged_template_call => |value| {
+                try self.exposeStaticPropertyValue(value.tag);
+                if (value.receiver) |receiver|
+                    try self.exposeStaticPropertyValue(receiver);
+                for (value.substitutions) |substitution|
+                    try self.exposeStaticPropertyValue(substitution);
+            },
+            .dynamic_import => |value| {
+                try self.exposeStaticPropertyValue(value.source);
+                if (value.options) |options| try self.exposeStaticPropertyValue(options);
+            },
+            .store_place => |value| try self.exposeStaticPropertyValue(value.value),
+            .define_property => |value| {
+                if (!self.isStaticPropertyCandidate(
+                    self.index.instructionOrdinal(instruction.id) orelse
+                        return error.InconsistentProjection,
+                )) try self.exposeStaticPropertyValue(value.value);
+            },
+            .array_append => |value| try self.exposeStaticPropertyValue(value.value),
+            .array_append_iterable => |value| try self.exposeStaticPropertyValue(value.iterable),
+            .array_initialize => |value| switch (value.source) {
+                .dynamic => |elements| for (elements) |element|
+                    try self.exposeStaticPropertyValue(element),
+                .constant => {},
+            },
+            .to_string,
+            .get_iterator,
+            .get_async_iterator,
+            => |value| try self.exposeStaticPropertyValue(value),
+            .build_string => |parts| for (parts) |part| switch (part) {
+                .text => {},
+                .value => |value| try self.exposeStaticPropertyValue(value),
+            },
+            .intrinsic_call => |call| for (call.arguments) |argument|
+                try self.exposeStaticPropertyValue(argument.operand()),
+            .apply_pattern => |plan| try self.exposeStaticPropertyValue(plan.source),
+            else => {},
+        }
+    }
+
+    fn applyStaticPropertyTerminatorDemands(
+        self: *State,
+        terminator: model.HirTerminator,
+    ) !void {
+        switch (terminator) {
+            .jump => |jump| for (jump.arguments) |value|
+                try self.exposeStaticPropertyValue(value),
+            .return_ => |value| if (value) |present|
+                try self.exposeStaticPropertyValue(present),
+            .throw => |value| try self.exposeStaticPropertyValue(value),
+            .leave_region => |leave| switch (leave.completion) {
+                .return_ => |value| if (value) |present|
+                    try self.exposeStaticPropertyValue(present),
+                .throw => |value| try self.exposeStaticPropertyValue(value),
+                .normal, .break_, .continue_ => {},
+            },
+            .branch, .unreachable_, .resume_completion => {},
+        }
+    }
+
     fn surfaceInstalled(self: *const State, rule_index: u32, identity: SurfaceIdentity) bool {
         for (self.surface_installs[0..self.surface_install_len]) |install| {
             if (install.rule_index == rule_index and sameSurfaceIdentity(identity, install.identity)) return true;
@@ -354,16 +596,60 @@ const State = struct {
         return false;
     }
 
-    fn surfaceIdentity(self: *State, value: ids.ValueId, depth: usize) !SurfaceIdentity {
+    fn surfaceIdentity(self: *State, value: ids.ValueId, depth: usize) anyerror!SurfaceIdentity {
         if (depth > 64) return error.InconsistentProjection;
         const value_ordinal = self.index.valueOrdinal(value) orelse return error.InconsistentProjection;
         const producer_ordinal = self.index.value_producers[value_ordinal] orelse return .{ .value = value_ordinal };
         const producer = self.index.instruction(self.project, producer_ordinal) orelse return error.InconsistentProjection;
         return switch (producer.operation) {
             .copy => |source| self.surfaceIdentity(source, depth + 1),
-            .load_binding => |binding| .{ .binding = self.index.bindingOrdinal(binding) orelse return error.InconsistentProjection },
+            .load_binding => |binding| self.surfaceIdentityForBinding(binding, depth + 1),
             else => .{ .value = value_ordinal },
         };
+    }
+
+    fn surfaceIdentityForBinding(
+        self: *State,
+        binding: ids.BindingId,
+        depth: usize,
+    ) anyerror!SurfaceIdentity {
+        if (depth > 64) return error.InconsistentProjection;
+        const ordinal = self.index.bindingOrdinal(binding) orelse return error.InconsistentProjection;
+
+        // Imported and source-backed global bindings are semantic aliases, not
+        // independent runtime objects. Canonicalize through the exact provider
+        // binding so property demand in a consumer module selects registrations
+        // on the provider's object identity.
+        if (self.index.importForBinding(self.project, binding)) |import_binding| {
+            if (!import_binding.type_only and !import_binding.namespace and
+                import_binding.target.external_module_id == null)
+            {
+                if (self.index.semanticProvider(import_binding.target.declaration)) |provider| {
+                    if (provider.binding_ordinal) |provider_ordinal| {
+                        const provider_binding = self.index.binding(self.project, provider_ordinal) orelse
+                            return error.InconsistentProjection;
+                        if (!provider_binding.id.eql(binding))
+                            return self.surfaceIdentityForBinding(provider_binding.id, depth + 1);
+                    }
+                }
+            }
+        }
+
+        if (self.index.captureSource(binding)) |source|
+            return self.surfaceIdentityForBinding(source, depth + 1);
+
+        const writers = self.index.writersForBinding(binding);
+        if (writers.len == 1) {
+            const writer = self.index.instruction(self.project, writers[0]) orelse return error.InconsistentProjection;
+            const source = switch (writer.operation) {
+                .initialize_binding => |payload| payload.value,
+                .store_binding => |payload| payload.value,
+                .store_place => |payload| payload.value,
+                else => null,
+            };
+            if (source) |value| return self.surfaceIdentity(value, depth + 1);
+        }
+        return .{ .binding = ordinal };
     }
 
     fn staticStringValue(self: *State, value: ids.ValueId, depth: usize) !?[]const u8 {
@@ -601,11 +887,15 @@ const State = struct {
         for (function.blocks) |block| {
             const block_ordinal = self.index.blockOrdinal(block.id) orelse return error.InconsistentProjection;
             _ = setBitNew(self.output.block_bits, block_ordinal);
+            try self.applyStaticPropertyTerminatorDemands(block.terminator);
             try self.traceTerminator(block.terminator);
             for (block.instructions) |instruction| {
                 try self.applyPropertySurfaceDemands(instruction);
+                try self.applyStaticPropertyDemands(instruction);
                 const instruction_ordinal = self.index.instructionOrdinal(instruction.id) orelse return error.InconsistentProjection;
                 if (self.conditionalRuleForInstruction(instruction_ordinal) != null and
+                    !self.registrationSelected(instruction_ordinal)) continue;
+                if (self.isStaticPropertyCandidate(instruction_ordinal) and
                     !self.registrationSelected(instruction_ordinal)) continue;
                 try self.traceOperation(instruction.operation);
                 try self.applyLanguageItemTriggers(instruction);
@@ -1062,6 +1352,8 @@ const State = struct {
     fn omitInstruction(self: *State, instruction: model.HirInstruction) !bool {
         const instruction_ordinal = self.index.instructionOrdinal(instruction.id) orelse return error.InconsistentProjection;
         if (self.conditionalRuleForInstruction(instruction_ordinal) != null and
+            !self.registrationSelected(instruction_ordinal)) return true;
+        if (self.isStaticPropertyCandidate(instruction_ordinal) and
             !self.registrationSelected(instruction_ordinal)) return true;
         if (self.deadPlaceDefinition(instruction.operation)) return true;
         switch (instruction.operation) {

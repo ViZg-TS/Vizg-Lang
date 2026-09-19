@@ -944,6 +944,93 @@ test "artifact reachability reaches source-backed globals only through live sema
     try std.testing.expect(bitSet(live.function_bits[0..], live_provider));
 }
 
+test "artifact reachability selects only demanded static closure from source-backed global object" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(1152),
+        .logical_name = "global.ts",
+        .bytes =
+        \\export const surface = {
+        \\    used: (): number => 1,
+        \\    dead: (): number => 2,
+        \\};
+        ,
+    });
+    try project.addRoot(.{
+        .id = .init(1153),
+        .logical_name = "app.ts",
+        .bytes = "surface.used();",
+    });
+    while (try project.step() != .complete) {}
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const reached = try analyzeForTest(result, &.{}, &.{1153}, &.{});
+    _ = try expectFunctionReachability(result, reached, "used", true);
+    _ = try expectFunctionReachability(result, reached, "dead", false);
+}
+
+test "artifact reachability drops unused static closure property on closed object" {
+    var result = try loweredRoot(1155,
+        \\const surface = {
+        \\    used: (): number => 1,
+        \\    dead: (): number => 2,
+        \\};
+        \\surface.used();
+    );
+    defer result.deinit();
+
+    const reached = try analyzeForTest(&result, &.{}, &.{1155}, &.{});
+    _ = try expectFunctionReachability(&result, reached, "used", true);
+    _ = try expectFunctionReachability(&result, reached, "dead", false);
+}
+
+test "artifact reachability keeps used named import and drops unused sibling export" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(1160),
+        .logical_name = "app.ts",
+        .bytes =
+        \\import { used, dead } from "./dep";
+        \\used();
+        ,
+    });
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| {
+            try std.testing.expectEqualStrings("./dep", request.raw_specifier);
+            try project.respondSource(request.id, .{
+                .id = .init(1161),
+                .logical_name = "dep.ts",
+                .bytes =
+                \\export function used(): number { return 7; }
+                \\export function dead(): number { return 9; }
+                ,
+            });
+        },
+    };
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const reached = try analyzeForTest(result, &.{}, &.{1160}, &.{});
+    _ = try expectFunctionReachability(result, reached, "used", true);
+    _ = try expectFunctionReachability(result, reached, "dead", false);
+}
+
 test "artifact reachability does not pull external modules from dead bodies" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
