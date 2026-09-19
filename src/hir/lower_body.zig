@@ -811,7 +811,11 @@ pub fn lower(
     try lowerer.lowerFunctions();
     try lowerer.emitHoists();
     try lowerer.lowerStatement(local.frontend.ast.root);
-    try anf.terminate(.{ .return_ = null });
+    // A module body may finish with an abrupt completion (`throw`, or a
+    // structured cleanup replaying one). Do not overwrite that terminator with
+    // the synthetic implicit return: AnfBuilder correctly rejects a second
+    // terminator, and uncaught top-level throw is valid JavaScript semantics.
+    if (!anf.currentTerminated()) try anf.terminate(.{ .return_ = null });
     return .{
         .bindings = try lowerer.bindings.toOwnedSlice(builder.allocator),
         .places = try anf.finishPlaces(),

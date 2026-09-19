@@ -19,6 +19,39 @@ fn completedProject() !project_mod.Project {
     return project;
 }
 
+test "module body preserves an uncaught top-level throw terminator" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(2),
+        .logical_name = "top-level-throw.ts",
+        .bytes = "throw \"uncaught\";",
+    });
+    while (switch (try project.step()) {
+        .complete => false,
+        .request => return error.UnexpectedModuleRequest,
+    }) {}
+    try std.testing.expect(!(try project.finish()).has_failures);
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+    try std.testing.expectEqual(@as(usize, 1), result.project.modules.len);
+    const initializer = result.project.modules[0].initialization;
+    const function_ordinal = result.consumerIndex().functionOrdinal(initializer) orelse
+        return error.TestExpectedFunction;
+    const function = result.project.functions[function_ordinal];
+    var saw_throw = false;
+    for (function.blocks) |block| switch (block.terminator) {
+        .throw => saw_throw = true,
+        else => {},
+    };
+    try std.testing.expect(saw_throw);
+}
+
 fn multiModuleProject() !project_mod.Project {
     var project = project_mod.Project.init(std.testing.allocator);
     errdefer project.deinit();
