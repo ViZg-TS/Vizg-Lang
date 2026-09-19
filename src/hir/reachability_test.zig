@@ -870,6 +870,84 @@ test "artifact reachability preserves namespace semantics without source spellin
     _ = try expectFunctionReachability(&live_result, live, "second", true);
 }
 
+test "STD binding imports are conditional while bare side-effect imports remain roots" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+
+    try project.addGlobalRoot(.{
+        .id = .init(1140),
+        .logical_name = "global.ts",
+        .bytes = "export { live } from './api';",
+    });
+    try project.addRoot(.{
+        .id = .init(1144),
+        .logical_name = "app.ts",
+        .bytes = "live();",
+    });
+
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| {
+            if (std.mem.eql(u8, request.raw_specifier, "./api")) {
+                try project.respondSource(request.id, .{
+                    .id = .init(1141),
+                    .logical_name = "api.ts",
+                    .bytes =
+                    \\import { deadHelper } from "./dead";
+                    \\import "./side";
+                    \\export function live(): number { return 1; }
+                    \\export function unused(): number { return deadHelper(); }
+                    ,
+                });
+            } else if (std.mem.eql(u8, request.raw_specifier, "./dead")) {
+                try project.respondSource(request.id, .{
+                    .id = .init(1142),
+                    .logical_name = "dead.ts",
+                    .bytes = "export function deadHelper(): number { return 9; }",
+                });
+            } else if (std.mem.eql(u8, request.raw_specifier, "./side")) {
+                try project.respondSource(request.id, .{
+                    .id = .init(1143),
+                    .logical_name = "side.ts",
+                    .bytes = "let side = 0; side = side + 1;",
+                });
+            } else return error.UnexpectedModuleRequest;
+        },
+    };
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const reached = try analyzeForTest(result, &.{}, &.{1144}, &.{});
+    const index = result.consumerIndex();
+    try std.testing.expect(bitSet(reached.module_bits[0..], index.module_ordinals.get(1141).?));
+    try std.testing.expect(!bitSet(reached.module_bits[0..], index.module_ordinals.get(1142).?));
+    try std.testing.expect(bitSet(reached.module_bits[0..], index.module_ordinals.get(1143).?));
+    _ = try expectFunctionReachability(result, reached, "live", true);
+    _ = try expectFunctionReachability(result, reached, "unused", false);
+    _ = try expectFunctionReachability(result, reached, "deadHelper", false);
+
+    const api_module = result.project.modules[index.module_ordinals.get(1141).?];
+    var saw_dead = false;
+    var saw_side = false;
+    for (api_module.dependencies) |dependency| {
+        if (dependency.module_id.value() == 1142) {
+            try std.testing.expect(!dependency.module_evaluation);
+            saw_dead = true;
+        } else if (dependency.module_id.value() == 1143) {
+            try std.testing.expect(dependency.module_evaluation);
+            saw_side = true;
+        }
+    }
+    try std.testing.expect(saw_dead);
+    try std.testing.expect(saw_side);
+}
+
 test "artifact reachability reaches source-backed globals only through live semantic use" {
     var project = project_mod.Project.init(std.testing.allocator);
     defer project.deinit();
@@ -975,6 +1053,68 @@ test "artifact reachability selects only demanded static closure from source-bac
     const reached = try analyzeForTest(result, &.{}, &.{1153}, &.{});
     _ = try expectFunctionReachability(result, reached, "used", true);
     _ = try expectFunctionReachability(result, reached, "dead", false);
+}
+
+test "source-backed global object reaches only demanded static closure property" {
+    var project = project_mod.Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addGlobalRoot(.{
+        .id = .init(1152),
+        .logical_name = "global.ts",
+        .bytes =
+        \\export const surface = {
+        \\    used: (): number => 1,
+        \\    dead: (): number => 2,
+        \\};
+        ,
+    });
+    try project.addRoot(.{
+        .id = .init(1153),
+        .logical_name = "app.ts",
+        .bytes = "surface.used();",
+    });
+    while (try project.step() != .complete) {}
+    if ((try project.finish()).has_failures) return error.UnexpectedSemanticDiagnostics;
+
+    var outcome = try hir.lowerProject(std.testing.allocator, &project, .{});
+    defer outcome.deinit();
+    const result = switch (outcome) {
+        .result => |*value| value,
+        .diagnostics => return error.UnexpectedLoweringDiagnostics,
+    };
+
+    const reached = try analyzeForTest(result, &.{}, &.{1153}, &.{});
+    _ = try expectFunctionReachability(result, reached, "used", true);
+    _ = try expectFunctionReachability(result, reached, "dead", false);
+}
+
+test "closed object retains sibling property when selected method uses dynamic this" {
+    var result = try loweredRoot(1154,
+        \\const surface = {
+        \\    used(): number { return this.dead(); },
+        \\    dead(): number { return 2; },
+        \\};
+        \\surface.used();
+    );
+    defer result.deinit();
+
+    const reached = try analyzeForTest(&result, &.{}, &.{1154}, &.{});
+    _ = try expectFunctionReachability(&result, reached, "used", true);
+    _ = try expectFunctionReachability(&result, reached, "dead", true);
+}
+
+test "public library keeps complete exported object surface" {
+    var result = try loweredRoot(1156,
+        \\export const surface = {
+        \\    used: (): number => 1,
+        \\    dead: (): number => 2,
+        \\};
+    );
+    defer result.deinit();
+
+    const reached = try analyzeForTest(&result, &.{1156}, &.{}, &.{});
+    _ = try expectFunctionReachability(&result, reached, "used", true);
+    _ = try expectFunctionReachability(&result, reached, "dead", true);
 }
 
 test "artifact reachability drops unused static closure property on closed object" {

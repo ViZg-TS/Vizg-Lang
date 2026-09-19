@@ -89,9 +89,21 @@ pub const Index = struct {
                             .target = .{ .source = target },
                         });
                     } else if (!edge.type_only) {
+                        // Global/STD implementation modules are a closed,
+                        // compiler-selected source tree. Ordinary binding
+                        // imports inside that tree become executable only when
+                        // the binding itself is reached; otherwise an unused
+                        // API member would make its entire provider module an
+                        // artifact root. Bare side-effect imports and re-exports
+                        // retain ordinary ESM evaluation semantics. User
+                        // modules remain conservative/open-world here.
+                        const conditional_std_binding_import =
+                            project.isStandardModule(edge.importer) and
+                            edge.operation == .static_import and
+                            edge.import_kind != .side_effect;
                         try bucket.dependencies.append(allocator, .{
                             .module_id = target,
-                            .module_evaluation = true,
+                            .module_evaluation = !conditional_std_binding_import,
                         });
                     }
                 },
@@ -120,9 +132,13 @@ pub const Index = struct {
             try bucket.projection_targets.append(allocator, target_id);
             try bucket.dependencies.append(allocator, .{
                 .module_id = target_id,
-                // null edge_index is the retained signal for a synthetic
-                // source-backed provider, not unconditional ESM evaluation.
-                .module_evaluation = item.edge_index != null,
+                // Semantic-import records carry exact provider provenance.
+                // Unconditional module evaluation is owned solely by the
+                // project graph edge above (bare imports, re-exports, and
+                // conservative user-module imports). Keeping this edge
+                // conditional prevents a dead binding alias from upgrading a
+                // tree-shakeable STD dependency back into an execution root.
+                .module_evaluation = false,
             });
         }
 

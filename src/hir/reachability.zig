@@ -370,7 +370,15 @@ const State = struct {
     }
 
     fn catalogStaticPropertyCandidates(self: *State) !void {
+        // Public-library artifacts are an open world: consumers outside this
+        // compilation may read any exported object property. Only closed
+        // application artifacts may prune undemanded static property values.
+        if (self.request.public_modules.len != 0) return;
+
         for (self.project.functions) |function| {
+            const module_ordinal = self.index.moduleOrdinal(function.module_id) orelse
+                return error.InconsistentProjection;
+            if (!self.project.modules[module_ordinal].tree_shakeable) continue;
             for (function.blocks) |block| {
                 for (block.instructions) |instruction| {
                     const payload: StaticPropertyDefinition = switch (instruction.operation) {
@@ -450,7 +458,7 @@ const State = struct {
         self: *State,
         identity: SurfaceIdentity,
         key: ?[]const u8,
-    ) !void {
+    ) anyerror!void {
         for (self.static_property_candidates[0..self.static_property_candidate_len]) |candidate| {
             if (!sameSurfaceIdentity(identity, candidate.identity)) continue;
             if (key) |wanted| {
@@ -474,19 +482,73 @@ const State = struct {
         try self.activateStaticPropertyIdentity(identity, null);
     }
 
+    fn staticPropertyCandidate(
+        self: *const State,
+        instruction_ordinal: u32,
+    ) ?StaticPropertyCandidate {
+        for (self.static_property_candidates[0..self.static_property_candidate_len]) |candidate|
+            if (candidate.instruction_ordinal == instruction_ordinal) return candidate;
+        return null;
+    }
+
+    fn staticPropertyFunctionForValue(
+        self: *State,
+        value: ids.ValueId,
+        depth: usize,
+    ) !?ids.FunctionId {
+        if (depth > 64) return null;
+        const ordinal = self.index.valueOrdinal(value) orelse return error.InconsistentProjection;
+        const producer_ordinal = self.index.value_producers[ordinal] orelse return null;
+        const producer = self.index.instruction(self.project, producer_ordinal) orelse
+            return error.InconsistentProjection;
+        return switch (producer.operation) {
+            .create_closure => |function| function,
+            .copy => |source| self.staticPropertyFunctionForValue(source, depth + 1),
+            else => null,
+        };
+    }
+
+    fn functionUsesDynamicThis(
+        self: *State,
+        function_id: ids.FunctionId,
+    ) !bool {
+        const ordinal = self.index.functionOrdinal(function_id) orelse
+            return error.InconsistentProjection;
+        if (@as(usize, ordinal) >= self.project.functions.len)
+            return error.InconsistentProjection;
+        const function = self.project.functions[ordinal];
+        if (!function.flags.dynamic_this) return false;
+        for (function.blocks) |block|
+            for (block.instructions) |instruction|
+                if (instruction.operation == .load_this) return true;
+        return false;
+    }
+
     fn selectStaticPropertyCandidate(
         self: *State,
         instruction_ordinal: u32,
-    ) !void {
+    ) anyerror!void {
         if (!setBitNew(self.selected_registration_bits, instruction_ordinal)) return;
+        const candidate = self.staticPropertyCandidate(instruction_ordinal) orelse
+            return error.InconsistentProjection;
         const instruction = self.index.instruction(self.project, instruction_ordinal) orelse
             return error.InconsistentProjection;
         switch (instruction.operation) {
             .define_property => |value| {
+                if (try self.staticPropertyFunctionForValue(value.value, 0)) |function| {
+                    // Dynamic this can observe sibling members without an
+                    // explicit alias back to the receiver in HIR. Once such a
+                    // function is selected, conservatively retain the complete
+                    // closed surface for that object.
+                    if (try self.functionUsesDynamicThis(function))
+                        try self.activateStaticPropertyIdentity(candidate.identity, null);
+                }
                 try self.traceValue(value.object);
                 try self.traceValue(value.value);
             },
             .define_method => |value| {
+                if (try self.functionUsesDynamicThis(value.function))
+                    try self.activateStaticPropertyIdentity(candidate.identity, null);
                 try self.traceValue(value.object);
                 try self.reachFunction(value.function);
             },
@@ -557,7 +619,26 @@ const State = struct {
             .to_string,
             .get_iterator,
             .get_async_iterator,
+            .iterator_next,
+            .iterator_done,
+            .iterator_value,
+            .iterator_close,
+            .enumerator_next,
+            .enumerator_done,
+            .enumerator_value,
+            .await_,
+            .yield_,
+            .yield_delegate,
             => |value| try self.exposeStaticPropertyValue(value),
+            .unary => |value| try self.exposeStaticPropertyValue(value.operand),
+            .binary => |value| {
+                try self.exposeStaticPropertyValue(value.left);
+                try self.exposeStaticPropertyValue(value.right);
+            },
+            .add => |value| {
+                try self.exposeStaticPropertyValue(value.left);
+                try self.exposeStaticPropertyValue(value.right);
+            },
             .build_string => |parts| for (parts) |part| switch (part) {
                 .text => {},
                 .value => |value| try self.exposeStaticPropertyValue(value),
@@ -637,6 +718,24 @@ const State = struct {
 
         if (self.index.captureSource(binding)) |source|
             return self.surfaceIdentityForBinding(source, depth + 1);
+
+        // Source-backed globals may resolve directly to the provider declaration
+        // without materializing a HirImportBinding in the consumer module. The
+        // declaration identity is still exact, so canonicalize through its HIR
+        // provider before falling back to this binding's local storage.
+        const hir_binding = self.index.binding(self.project, ordinal) orelse
+            return error.InconsistentProjection;
+        if (hir_binding.declaration) |declaration| {
+            if (self.index.semanticProvider(declaration)) |provider| {
+                if (provider.binding_ordinal) |provider_ordinal| {
+                    if (provider_ordinal != ordinal) {
+                        const provider_binding = self.index.binding(self.project, provider_ordinal) orelse
+                            return error.InconsistentProjection;
+                        return self.surfaceIdentityForBinding(provider_binding.id, depth + 1);
+                    }
+                }
+            }
+        }
 
         const writers = self.index.writersForBinding(binding);
         if (writers.len == 1) {

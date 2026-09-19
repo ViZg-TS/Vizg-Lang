@@ -117,6 +117,7 @@ pub fn lower(
     try builder.appendModule(.{
         .module_id = module.id,
         .logical_name = try builder.copyString(source.logical_name),
+        .tree_shakeable = project.isStandardModule(module.id),
         .initialization = function_id,
         .dependencies = dependencies,
         .imports = imports,

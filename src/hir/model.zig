@@ -54,6 +54,10 @@ pub const HirExternalDeclaration = struct {
 pub const HirModule = struct {
     module_id: ModuleId,
     logical_name: []const u8,
+    /// Closed-world implementation module published beneath a registered
+    /// global source root. Artifact reachability may prune statically proven
+    /// unused internal object-surface members only for these modules.
+    tree_shakeable: bool = false,
     initialization: ids.FunctionId,
     dependencies: []const HirModuleDependency = &.{},
     imports: []const HirImportBinding = &.{},

@@ -760,7 +760,10 @@ pub const Project = struct {
         try self.global_derivation_diagnostics.append(self.allocator, owned);
     }
 
-    fn isStandardModule(self: *const Project, id: contracts.ModuleId) bool {
+    /// True when the module belongs to the source closure published by one
+    /// registered global root. This is structural project metadata; callers
+    /// must not infer standard-library identity from paths or source names.
+    pub fn isStandardModule(self: *const Project, id: contracts.ModuleId) bool {
         if (self.global_roots.items.len == 0) return false;
         for (self.global_roots.items) |global_root| if (id == global_root) return true;
         var pending: std.ArrayList(contracts.ModuleId) = .empty;
