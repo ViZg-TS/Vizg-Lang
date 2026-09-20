@@ -3818,6 +3818,35 @@ test "Goal 154 coalescing logical assignment and optional chains preserve only c
     try std.testing.expectEqual(string_or_number, testReferenceTypeAt(&result, after_optional).?);
 }
 
+test "assignment writes use stable storage types instead of narrowed read facts" {
+    const source =
+        \\function take(): number { return 7; }
+        \\function run(limit: number): number | undefined {
+        \\  let value: number | undefined = undefined;
+        \\  let i = 0;
+        \\  while (i < limit) {
+        \\    const next = take();
+        \\    if (value !== undefined) i = i + 1;
+        \\    else value = next;
+        \\    i = i + 1;
+        \\  }
+        \\  if (value === undefined) value = take();
+        \\  return value;
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+
+    var assignment_mismatches: usize = 0;
+    for (result.semantic_diagnostics) |diagnostic| {
+        if (diagnostic.code == .type_mismatch and
+            diagnostic.label != null and
+            std.mem.eql(u8, diagnostic.label.?, "incompatible assignment"))
+            assignment_mismatches += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), assignment_mismatches);
+}
+
 test "Goal 121 typeof narrowing follows early exits" {
     const source =
         \\function f(value: string | number) {

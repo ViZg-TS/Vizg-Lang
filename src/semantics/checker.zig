@@ -129,7 +129,11 @@ fn checkAssignment(
             return;
         }
     }
-    const expected = resolvedNode(type_info, assignment.left, store) orelse return;
+    // Writes are checked against the stable storage/declaration type, not
+    // the flow-narrowed read type at the current program point. A mutable
+    // union with undefined may be narrowed to undefined in an else branch
+    // and then assigned a value from another member of its declared union.
+    const expected = assignmentTargetType(result, type_info, assignment.left, store) orelse return;
     const actual_node = if (assignment.operator == .Equal) assignment.right else assignment_id;
     const actual = resolvedNode(type_info, actual_node, store) orelse return;
     if (type_compat.check(actual, expected, store).isCompatible()) return;
@@ -499,6 +503,30 @@ fn checkAggregateElementMismatch(
         },
         else => return false,
     }
+}
+
+fn assignmentTargetType(
+    result: frontend.FrontendResult,
+    type_info: type_info_mod.TypeInfo,
+    node_id: ast_mod.NodeId,
+    store: *const types.TypeStore,
+) ?types.TypeId {
+    // Identifier writes target the binding's declared/inferred storage type.
+    // Flow narrowing is a read-time overlay and must not constrain what values
+    // can be stored back into a mutable union binding.
+    if (assignmentTargetSymbol(result, node_id)) |symbol| {
+        const symbol_info = type_info.lookupSymbol(symbol.id) orelse return null;
+        const effective = symbol_info.declared_type orelse symbol_info.inferred_type orelse return null;
+        if (effective == store.builtins.unknown) return null;
+        return effective;
+    }
+
+    // Property/element writes have no direct binding symbol; their canonical
+    // node type is the stable write contract. Do not consult flow_types here.
+    const info = type_info.lookupNodeInfo(node_id) orelse return null;
+    const effective = info.effective() orelse return null;
+    if (effective == store.builtins.unknown) return null;
+    return effective;
 }
 
 fn resolvedNode(type_info: type_info_mod.TypeInfo, node_id: ast_mod.NodeId, store: *const types.TypeStore) ?types.TypeId {
