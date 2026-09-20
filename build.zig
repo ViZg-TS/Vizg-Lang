@@ -440,6 +440,8 @@ pub fn build(b: *std.Build) void {
         \\vizg_project_create
         \\vizg_project_destroy
         \\vizg_project_finish
+        \\vizg_project_frontend_cache_size
+        \\vizg_project_install_frontend_cache
         \\vizg_project_limit_kind
         \\vizg_project_register_ambient_globals
         \\vizg_project_register_ambient_globals_v2
@@ -460,7 +462,8 @@ pub fn build(b: *std.Build) void {
         \\vizg_project_result_summary
         \\vizg_project_step
         \\vizg_project_workspace_alignment
-        \\vizg_project_workspace_overhead'
+        \\vizg_project_workspace_overhead
+        \\vizg_project_write_frontend_cache'
         \\if [ "$actual" != "$expected" ]; then
         \\    echo "unexpected public ABI symbols:" >&2
         \\    printf '%s\n' "$actual" >&2

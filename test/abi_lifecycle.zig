@@ -2589,7 +2589,11 @@ test "official ABI v1 reports first-module diagnostic and semantic-growth limits
     var root = projectSource(1, "types.ts", "type Box = { value: number }; const box: Box = { value: 1 };", true);
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(semantic_handle, &root));
     var step: c.Vizg_ProjectStep = undefined;
-    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED), c.vizg_project_step(semantic_handle, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(semantic_handle, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STEP_COMPLETE), step.kind);
+    var semantic_result: ?*c.Vizg_ProjectResult = null;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED), c.vizg_project_finish(semantic_handle, &semantic_result));
+    try std.testing.expect(semantic_result == null);
     try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_SEMANTIC_GROWTH), c.vizg_project_limit_kind(semantic_handle));
 
     var diagnostic_workspace = try Workspace.init(8 * 1024 * 1024);
@@ -2602,7 +2606,11 @@ test "official ABI v1 reports first-module diagnostic and semantic-growth limits
     defer c.vizg_project_destroy(diagnostic_handle);
     root = projectSource(2, "diagnostics.ts", "const first: number = 'wrong'; const second: number = 'wrong';", true);
     try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_add_source(diagnostic_handle, &root));
-    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED), c.vizg_project_step(diagnostic_handle, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_OK), c.vizg_project_step(diagnostic_handle, &step));
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STEP_COMPLETE), step.kind);
+    var diagnostic_result: ?*c.Vizg_ProjectResult = null;
+    try std.testing.expectEqual(@as(u32, c.VIZG_PROJECT_STATUS_LIMIT_EXCEEDED), c.vizg_project_finish(diagnostic_handle, &diagnostic_result));
+    try std.testing.expect(diagnostic_result == null);
     try std.testing.expectEqual(@as(u32, c.VIZG_LIMIT_DIAGNOSTICS), c.vizg_project_limit_kind(diagnostic_handle));
 }
 

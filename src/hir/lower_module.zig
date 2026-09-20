@@ -24,7 +24,7 @@ pub fn lower(
     var bindings: std.ArrayList(model.HirBinding) = .empty;
     var imported_symbols: std.ArrayList(lower_body.SymbolBinding) = .empty;
     for (semantic_imports, 0..) |item, index| {
-        const target = item.target.?;
+        const target = item.target orelse return error.MissingSemanticIdentity;
         const local_id = if (item.runtime_binding) blk: {
             const id = try builder.makeId(@import("ids.zig").BindingId, builder.budget.usage.bindings);
             try builder.appendImportBinding(&bindings, .{

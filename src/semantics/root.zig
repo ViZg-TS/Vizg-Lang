@@ -1221,7 +1221,11 @@ fn collectSemanticImports(
                 if (exportIndex(exports, target_module, link.imported_name, true)) |type_index| {
                     type_target = exports[type_index].type_identity orelse exports[type_index].identity;
                 }
-                if (target != null or type_target != null) state = .resolved;
+                // A syntactic value import may carry type metadata for a
+                // value that also has a type-side identity, but a type-only
+                // export is not a value export. Do not silently reinterpret a
+                // value import as a type-only import.
+                if (target != null) state = .resolved;
             }
         }
         try imports.append(allocator, .{
@@ -3469,6 +3473,24 @@ fn testReferenceTypeAt(result: *const SemanticResult, offset: usize) ?types.Type
     return null;
 }
 
+fn testMemberTypeAt(result: *const SemanticResult, offset: usize) ?types.TypeId {
+    var best_node: ?ast.NodeId = null;
+    var best_end: usize = 0;
+    for (result.frontend.ast.nodes, 0..) |node, raw_id| {
+        if (node.span.start != offset) continue;
+        switch (node.data) {
+            .MemberExpression, .ElementAccessExpression => {
+                if (best_node == null or node.span.end > best_end) {
+                    best_node = @intCast(raw_id);
+                    best_end = node.span.end;
+                }
+            },
+            else => {},
+        }
+    }
+    return if (best_node) |node_id| result.lookupNodeType(node_id) else null;
+}
+
 fn testFlowEntryAt(result: *const SemanticResult, offset: usize) ?type_info.FlowTypeInfo {
     for (result.frontend.resolve.references) |reference| {
         if (reference.span.start != offset) continue;
@@ -3862,8 +3884,11 @@ test "Goal 121 property access narrowing follows early exits and invalidates des
     try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
     const text_return = std.mem.indexOf(u8, source, "return box.value;") orelse unreachable;
     const count_return = std.mem.lastIndexOf(u8, source, "return box.nested.count;") orelse unreachable;
-    try std.testing.expectEqual(result.type_store.builtins.string, testReferenceTypeAt(&result, text_return + "return ".len).?);
-    try std.testing.expectEqual(result.type_store.builtins.number, testReferenceTypeAt(&result, count_return + "return ".len).?);
+    // Access-path narrowing changes the member expression, not the root
+    // identifier. The root remains Box while the guarded members become
+    // string/number on their respective paths.
+    try std.testing.expectEqual(result.type_store.builtins.string, testMemberTypeAt(&result, text_return + "return ".len).?);
+    try std.testing.expectEqual(result.type_store.builtins.number, testMemberTypeAt(&result, count_return + "return ".len).?);
 }
 
 test "Goal 123 checker covers every diagnostic family from canonical types" {

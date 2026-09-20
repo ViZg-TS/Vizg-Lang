@@ -1279,6 +1279,33 @@ pub const Project = struct {
             });
         }
 
+        // A resolved source module can still fail to provide the namespace
+        // requested by an import. Keep that as a project-level missing-export
+        // error instead of allowing semantics/HIR to reinterpret the syntax.
+        for (result.imports) |item| {
+            if (item.state != .unresolved or item.target_module_id == null) continue;
+            const source_module = self.find(.init(item.module_id));
+            const logical_name = if (source_module) |value|
+                if (value.source) |source| source.logical_name else ""
+            else
+                "";
+            const message: []const u8 = if (!item.type_only and item.target == null and item.type_target != null)
+                "imported name is type-only; use import type { ... } or import { type ... }"
+            else if (item.type_only)
+                "source module is missing the requested type export"
+            else
+                "source module is missing the requested value export";
+            try self.appendProjectDiagnostic(.{
+                .module_id = .init(item.module_id),
+                .phase = .project,
+                .severity = .@"error",
+                .code = .missing_export,
+                .message = message,
+                .logical_name = logical_name,
+                .span = item.span,
+            });
+        }
+
         for (self.graph.diagnostics.items) |item| {
             const module = self.find(item.importer);
             const logical_name = if (module) |value|
@@ -2005,38 +2032,50 @@ test "project copies host buffers and analyzes one in-memory root" {
     try std.testing.expectEqual(@as(usize, 0), result.syntax_diagnostics.len);
 }
 
-test "first project module enforces exact semantic type and diagnostic boundaries" {
+test "project finish enforces exact semantic type and diagnostic boundaries" {
     const typed_source = "type Box = { value: number }; const box: Box = { value: 1 };";
-    var typed_baseline = try semantics.analyze(std.testing.allocator, typed_source);
-    const exact_type_count = typed_baseline.type_store.count();
-    typed_baseline.deinit();
+
+    var type_baseline = Project.init(std.testing.allocator);
+    defer type_baseline.deinit();
+    try type_baseline.addRoot(.{ .id = .init(1), .logical_name = "types.ts", .bytes = typed_source });
+    _ = try type_baseline.analyzeModule(.init(1));
+    _ = try type_baseline.finish();
+    const exact_type_count = type_baseline.semanticResult().?.type_store.count();
     try std.testing.expect(exact_type_count > 0);
 
     var exact_types = Project.initWithLimits(std.testing.allocator, .{ .max_semantic_types = exact_type_count });
     defer exact_types.deinit();
     try exact_types.addRoot(.{ .id = .init(1), .logical_name = "types.ts", .bytes = typed_source });
     _ = try exact_types.analyzeModule(.init(1));
+    _ = try exact_types.finish();
 
     var excess_types = Project.initWithLimits(std.testing.allocator, .{ .max_semantic_types = exact_type_count - 1 });
     defer excess_types.deinit();
     try excess_types.addRoot(.{ .id = .init(1), .logical_name = "types.ts", .bytes = typed_source });
-    try std.testing.expectError(error.SemanticTypeLimitExceeded, excess_types.analyzeModule(.init(1)));
+    _ = try excess_types.analyzeModule(.init(1));
+    try std.testing.expectError(error.SemanticTypeLimitExceeded, excess_types.finish());
 
     const diagnostic_source = "const first: number = 'wrong'; const second: number = 'wrong';";
-    var diagnostic_baseline = try semantics.analyze(std.testing.allocator, diagnostic_source);
-    const exact_diagnostic_count = diagnostic_baseline.diagnostics.len;
-    diagnostic_baseline.deinit();
+
+    var diagnostic_baseline = Project.init(std.testing.allocator);
+    defer diagnostic_baseline.deinit();
+    try diagnostic_baseline.addRoot(.{ .id = .init(2), .logical_name = "diagnostics.ts", .bytes = diagnostic_source });
+    _ = try diagnostic_baseline.analyzeModule(.init(2));
+    _ = try diagnostic_baseline.finish();
+    const exact_diagnostic_count = diagnostic_baseline.diagnostics().len;
     try std.testing.expect(exact_diagnostic_count > 0);
 
     var exact_diagnostics = Project.initWithLimits(std.testing.allocator, .{ .max_diagnostics = exact_diagnostic_count });
     defer exact_diagnostics.deinit();
     try exact_diagnostics.addRoot(.{ .id = .init(2), .logical_name = "diagnostics.ts", .bytes = diagnostic_source });
     _ = try exact_diagnostics.analyzeModule(.init(2));
+    _ = try exact_diagnostics.finish();
 
     var excess_diagnostics = Project.initWithLimits(std.testing.allocator, .{ .max_diagnostics = exact_diagnostic_count - 1 });
     defer excess_diagnostics.deinit();
     try excess_diagnostics.addRoot(.{ .id = .init(2), .logical_name = "diagnostics.ts", .bytes = diagnostic_source });
-    try std.testing.expectError(error.DiagnosticLimitExceeded, excess_diagnostics.analyzeModule(.init(2)));
+    _ = try excess_diagnostics.analyzeModule(.init(2));
+    try std.testing.expectError(error.DiagnosticLimitExceeded, excess_diagnostics.finish());
 }
 
 test "multiple roots share one requested dependency identity" {
@@ -2233,6 +2272,100 @@ test "all terminal response kinds are inspectable and finish rejects pending wor
     try std.testing.expectEqual(state_machine.ResponseKind.source, project.lookupRequest(source_id).?.resolution.?.kind);
     try std.testing.expectEqual(state_machine.ResponseKind.failed, project.lookupRequest(failed_id).?.resolution.?.kind);
     try std.testing.expect((try project.finish()).has_failures);
+}
+
+test "source type-only exports require explicit type import syntax" {
+    var project = Project.init(std.testing.allocator);
+    defer project.deinit();
+    try project.addRoot(.{
+        .id = .init(0x1010),
+        .logical_name = "root.ts",
+        .bytes =
+        \\import { Shape } from './types';
+        \\let value: Shape;
+        ,
+    });
+
+    while (true) switch (try project.step()) {
+        .complete => break,
+        .request => |request| {
+            try std.testing.expectEqualStrings("./types", request.raw_specifier);
+            try project.respondSource(request.id, .{
+                .id = .init(0x1011),
+                .logical_name = "types.ts",
+                .bytes = "export interface Shape { value: number; }",
+            });
+        },
+    };
+
+    _ = try project.finish();
+    const result = project.semanticResult().?;
+    try std.testing.expect(result.is_partial);
+
+    var saw_import = false;
+    for (result.imports) |item| {
+        if (!std.mem.eql(u8, item.local_name, "Shape")) continue;
+        try std.testing.expect(!item.type_only);
+        try std.testing.expect(!item.runtime_binding);
+        try std.testing.expectEqual(semantics.SemanticLinkState.unresolved, item.state);
+        try std.testing.expect(item.target == null);
+        try std.testing.expect(item.type_target != null);
+        saw_import = true;
+    }
+    try std.testing.expect(saw_import);
+
+    var saw_diagnostic = false;
+    for (project.diagnostics()) |diagnostic| {
+        if (diagnostic.code != .missing_export) continue;
+        try std.testing.expectEqual(ProjectDiagnosticPhase.project, diagnostic.phase);
+        try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "type-only") != null);
+        saw_diagnostic = true;
+    }
+    try std.testing.expect(saw_diagnostic);
+}
+
+test "source type-only exports accept declaration and specifier type syntax" {
+    const cases = [_][]const u8{
+        "import type { Shape } from './types'; let first: Shape;",
+        "import { type Shape } from './types'; let second: Shape;",
+    };
+    for (cases, 0..) |source, case_index| {
+        var project = Project.init(std.testing.allocator);
+        defer project.deinit();
+        try project.addRoot(.{
+            .id = .init(0x1020 + case_index * 2),
+            .logical_name = "root.ts",
+            .bytes = source,
+        });
+
+        while (true) switch (try project.step()) {
+            .complete => break,
+            .request => |request| {
+                try std.testing.expectEqualStrings("./types", request.raw_specifier);
+                try project.respondSource(request.id, .{
+                    .id = .init(0x1021 + case_index * 2),
+                    .logical_name = "types.ts",
+                    .bytes = "export interface Shape { value: number; }",
+                });
+            },
+        };
+
+        try std.testing.expect(!(try project.finish()).has_failures);
+        const result = project.semanticResult().?;
+        try std.testing.expect(!result.is_partial);
+        var saw_import = false;
+        for (result.imports) |item| {
+            if (!std.mem.eql(u8, item.local_name, "Shape")) continue;
+            try std.testing.expect(item.type_only);
+            try std.testing.expect(!item.runtime_binding);
+            try std.testing.expectEqual(semantics.SemanticLinkState.resolved, item.state);
+            try std.testing.expect(item.target != null);
+            try std.testing.expectEqual(binder.SymbolNamespace.type, item.target.?.namespace);
+            saw_import = true;
+        }
+        try std.testing.expect(saw_import);
+        try std.testing.expectEqual(@as(usize, 0), project.diagnostics().len);
+    }
 }
 
 test "source graph derives requests and preserves semantic identities with opaque module ids" {

@@ -404,6 +404,11 @@ const Analyzer = struct {
             return true;
         }
 
+        // Object-category narrowing stays conservative for static unions.
+        // The runtime object category also includes null and needs richer
+        // complement modeling than filterType currently provides.
+        if (std.mem.eql(u8, name, "object")) return true;
+
         try facts.set(key, try self.filterType(current, wanted, keep));
         return true;
     }
