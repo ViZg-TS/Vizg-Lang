@@ -213,9 +213,17 @@ pub const TypeInfo = struct {
     }
 
     pub fn lookupResolvedTypeNode(self: @This(), node_id: ast_mod.TypeNodeId) ?types.TypeId {
-        for (self.resolved_type_nodes) |entry| {
-            if (entry.node_id == node_id) return entry.type_id;
+        var low: usize = 0;
+        var high: usize = self.resolved_type_nodes.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (self.resolved_type_nodes[mid].node_id < node_id)
+                low = mid + 1
+            else
+                high = mid;
         }
+        if (low < self.resolved_type_nodes.len and self.resolved_type_nodes[low].node_id == node_id)
+            return self.resolved_type_nodes[low].type_id;
         return null;
     }
 

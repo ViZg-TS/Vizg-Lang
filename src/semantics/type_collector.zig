@@ -915,15 +915,29 @@ pub fn resolveTypeAnnotation(context: *TypeResolutionContext, annotation: ast_mo
     return resolveTypeNode(context, annotation.root, annotation.span, false);
 }
 
+fn resolvedTypeNodeLowerBound(entries: []const type_info_mod.ResolvedTypeNode, node_id: ast_mod.TypeNodeId) usize {
+    var low: usize = 0;
+    var high: usize = entries.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (entries[mid].node_id < node_id)
+            low = mid + 1
+        else
+            high = mid;
+    }
+    return low;
+}
+
 fn resolveTypeNode(
     context: *TypeResolutionContext,
     node_id: ast_mod.TypeNodeId,
     annotation_span: ast_mod.tokens.Span,
     readonly: bool,
 ) anyerror!types.TypeId {
-    for (context.resolved_type_nodes.items) |entry| {
-        if (entry.node_id == node_id) return entry.type_id;
-    }
+    const existing_index = resolvedTypeNodeLowerBound(context.resolved_type_nodes.items, node_id);
+    if (existing_index < context.resolved_type_nodes.items.len and
+        context.resolved_type_nodes.items[existing_index].node_id == node_id)
+        return context.resolved_type_nodes.items[existing_index].type_id;
 
     const node = context.tree.typeNode(node_id);
     const resolved = switch (node.data) {
@@ -1016,10 +1030,17 @@ fn resolveTypeNode(
             break :blk try context.type_store.intersectionOf(members);
         },
     };
-    try context.resolved_type_nodes.append(context.allocator, .{
-        .node_id = node_id,
-        .type_id = resolved,
-    });
+    const insert_index = resolvedTypeNodeLowerBound(context.resolved_type_nodes.items, node_id);
+    if (insert_index < context.resolved_type_nodes.items.len and
+        context.resolved_type_nodes.items[insert_index].node_id == node_id)
+    {
+        context.resolved_type_nodes.items[insert_index].type_id = resolved;
+    } else {
+        try context.resolved_type_nodes.insert(context.allocator, insert_index, .{
+            .node_id = node_id,
+            .type_id = resolved,
+        });
+    }
     return resolved;
 }
 
@@ -1546,27 +1567,44 @@ fn emitTypeOperationOnce(
     });
 }
 
-fn putDeclared(list: *std.ArrayList(DeclaredSymbolType), allocator: std.mem.Allocator, symbol_id: binder.SymbolId, type_id: types.TypeId) !void {
-    for (list.items) |*entry| {
-        if (entry.symbol_id == symbol_id) {
-            entry.declared_type = type_id;
-            return;
-        }
+fn declaredLowerBound(entries: []const DeclaredSymbolType, symbol_id: binder.SymbolId) usize {
+    var low: usize = 0;
+    var high: usize = entries.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (entries[mid].symbol_id < symbol_id)
+            low = mid + 1
+        else
+            high = mid;
     }
-    try list.append(allocator, .{ .symbol_id = symbol_id, .declared_type = type_id });
+    return low;
+}
+
+fn putDeclared(list: *std.ArrayList(DeclaredSymbolType), allocator: std.mem.Allocator, symbol_id: binder.SymbolId, type_id: types.TypeId) !void {
+    const index = declaredLowerBound(list.items, symbol_id);
+    if (index < list.items.len and list.items[index].symbol_id == symbol_id) {
+        list.items[index].declared_type = type_id;
+        return;
+    }
+    try list.insert(allocator, index, .{ .symbol_id = symbol_id, .declared_type = type_id });
 }
 
 fn declaredType(entries: []const DeclaredSymbolType, symbol_id: binder.SymbolId) ?types.TypeId {
-    for (entries) |entry| if (entry.symbol_id == symbol_id) return entry.declared_type;
+    const index = declaredLowerBound(entries, symbol_id);
+    if (index < entries.len and entries[index].symbol_id == symbol_id) return entries[index].declared_type;
     return null;
 }
 
 fn findSymbol(symbols: []const binder.Symbol, id: binder.SymbolId) ?binder.Symbol {
+    const index: usize = @intCast(id);
+    if (index < symbols.len and symbols[index].id == id) return symbols[index];
     for (symbols) |symbol| if (symbol.id == id) return symbol;
     return null;
 }
 
 fn findScope(scopes: []const binder.Scope, id: binder.ScopeId) ?binder.Scope {
+    const index: usize = @intCast(id);
+    if (index < scopes.len and scopes[index].id == id) return scopes[index];
     for (scopes) |scope| if (scope.id == id) return scope;
     return null;
 }

@@ -11,6 +11,8 @@ const type_inference = @import("type_inference.zig");
 
 pub const Result = struct { flow_types: []const type_info.FlowTypeInfo };
 
+const missing_index = std.math.maxInt(u32);
+
 const AccessPath = struct {
     root_symbol: binder.SymbolId,
     parent: ?u32,
@@ -24,6 +26,9 @@ const Analyzer = struct {
     store: *types.TypeStore,
     symbols: []const type_info.SymbolTypeInfo,
     nodes: *std.ArrayList(type_info.NodeTypeInfo),
+    reference_seen: []const bool,
+    reference_symbol_by_node: []const u32,
+    flow_index_by_node: []u32,
     flow: std.ArrayList(type_info.FlowTypeInfo) = .empty,
     access_paths: std.ArrayList(AccessPath) = .empty,
     function_node: ast.NodeId = ast.invalid_node,
@@ -166,14 +171,11 @@ const Analyzer = struct {
                         self.nodeType(node_id);
                     try self.replaceAssignmentFact(value.left, replacement, facts);
                     if (value.operator == .Equal) {
-                        var assignment_info = type_info.NodeTypeInfo{ .node_id = node_id, .type_id = replacement };
-                        for (self.nodes.items) |entry| if (entry.node_id == node_id) {
-                            assignment_info = entry;
-                            assignment_info.type_id = replacement;
-                            assignment_info.state = .resolved;
-                            assignment_info.issue = .none;
-                            break;
-                        };
+                        var assignment_info = self.nodeInfo(node_id) orelse
+                            type_info.NodeTypeInfo{ .node_id = node_id, .type_id = replacement };
+                        assignment_info.type_id = replacement;
+                        assignment_info.state = .resolved;
+                        assignment_info.issue = .none;
                         try self.putNode(assignment_info);
                     }
                 }
@@ -259,14 +261,11 @@ const Analyzer = struct {
                     consequent_type
                 else
                     try self.store.unionOf(&.{ consequent_type, alternate_type });
-                var conditional_info = type_info.NodeTypeInfo{ .node_id = node_id, .type_id = result_type };
-                for (self.nodes.items) |entry| if (entry.node_id == node_id) {
-                    conditional_info = entry;
-                    conditional_info.type_id = result_type;
-                    conditional_info.state = .resolved;
-                    conditional_info.issue = .none;
-                    break;
-                };
+                var conditional_info = self.nodeInfo(node_id) orelse
+                    type_info.NodeTypeInfo{ .node_id = node_id, .type_id = result_type };
+                conditional_info.type_id = result_type;
+                conditional_info.state = .resolved;
+                conditional_info.issue = .none;
                 try self.putNode(conditional_info);
                 try self.joinExpressionStates(facts, &yes, &no);
             },
@@ -590,13 +589,18 @@ const Analyzer = struct {
     }
 
     fn baseType(self: *Analyzer, symbol: binder.SymbolId) types.TypeId {
+        const symbol_index: usize = @intCast(symbol);
+        if (symbol_index < self.symbols.len and self.symbols[symbol_index].symbol_id == symbol)
+            return self.symbols[symbol_index].effective() orelse self.store.builtins.unknown;
         for (self.symbols) |entry| if (entry.symbol_id == symbol) return entry.effective() orelse self.store.builtins.unknown;
         return self.store.builtins.unknown;
     }
 
     fn symbolForNode(self: *Analyzer, node: ast.NodeId) ?binder.SymbolId {
-        for (self.frontend_result.resolve.references) |reference| if (reference.node == node) return reference.symbol;
-        return null;
+        const node_index: usize = @intCast(node);
+        if (node_index >= self.reference_seen.len or !self.reference_seen[node_index]) return null;
+        const symbol = self.reference_symbol_by_node[node_index];
+        return if (symbol == missing_index) null else symbol;
     }
 
     fn factKeyForNode(self: *Analyzer, node: ast.NodeId) !?dataflow.FactKey {
@@ -668,10 +672,7 @@ const Analyzer = struct {
             .issue = inferred.issue,
             .receiver_type = inferred.receiver_type,
         };
-        for (self.nodes.items) |entry| if (entry.node_id == node_id) {
-            node_info.contextual_type = entry.contextual_type;
-            break;
-        };
+        if (self.nodeInfo(node_id)) |entry| node_info.contextual_type = entry.contextual_type;
         try self.putNode(node_info);
     }
 
@@ -689,12 +690,9 @@ const Analyzer = struct {
             base
         else
             narrowed;
-        var node_info = type_info.NodeTypeInfo{ .node_id = node_id, .type_id = node_type };
-        for (self.nodes.items) |entry| if (entry.node_id == node_id) {
-            node_info = entry;
-            node_info.type_id = node_type;
-            break;
-        };
+        var node_info = self.nodeInfo(node_id) orelse
+            type_info.NodeTypeInfo{ .node_id = node_id, .type_id = node_type };
+        node_info.type_id = node_type;
         try self.putNode(node_info);
         try self.putFlow(.{
             .function_node = self.function_node,
@@ -708,23 +706,67 @@ const Analyzer = struct {
         self.program_point += 1;
     }
 
-    fn nodeType(self: *Analyzer, node: ast.NodeId) types.TypeId {
-        for (self.nodes.items) |entry| if (entry.node_id == node) return entry.type_id;
-        return self.store.builtins.unknown;
+    fn nodeLowerBound(self: *Analyzer, node: ast.NodeId) usize {
+        var low: usize = 0;
+        var high: usize = self.nodes.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (self.nodes.items[mid].node_id < node)
+                low = mid + 1
+            else
+                high = mid;
+        }
+        return low;
     }
+
+    fn nodeInfo(self: *Analyzer, node: ast.NodeId) ?type_info.NodeTypeInfo {
+        const index = self.nodeLowerBound(node);
+        if (index < self.nodes.items.len and self.nodes.items[index].node_id == node)
+            return self.nodes.items[index];
+        return null;
+    }
+
+    fn nodeType(self: *Analyzer, node: ast.NodeId) types.TypeId {
+        return if (self.nodeInfo(node)) |entry| entry.type_id else self.store.builtins.unknown;
+    }
+
     fn putNode(self: *Analyzer, value: type_info.NodeTypeInfo) !void {
-        for (self.nodes.items) |*entry| if (entry.node_id == value.node_id) {
-            entry.* = value;
+        const index = self.nodeLowerBound(value.node_id);
+        if (index < self.nodes.items.len and self.nodes.items[index].node_id == value.node_id) {
+            self.nodes.items[index] = value;
             return;
-        };
-        try self.nodes.append(self.allocator, value);
+        }
+        try self.nodes.insert(self.allocator, index, value);
     }
     fn putFlow(self: *Analyzer, value: type_info.FlowTypeInfo) !void {
-        for (self.flow.items) |*entry| if (entry.function_node == value.function_node and entry.block_id == value.block_id and entry.reference_node == value.reference_node) {
+        const node_index: usize = @intCast(value.reference_node);
+        if (node_index < self.flow_index_by_node.len) {
+            const mapped = self.flow_index_by_node[node_index];
+            if (mapped != missing_index and @as(usize, mapped) < self.flow.items.len) {
+                const entry = &self.flow.items[@intCast(mapped)];
+                if (entry.function_node == value.function_node and
+                    entry.block_id == value.block_id and
+                    entry.reference_node == value.reference_node)
+                {
+                    entry.* = value;
+                    return;
+                }
+            }
+        }
+
+        for (self.flow.items, 0..) |*entry, index| {
+            if (entry.function_node != value.function_node or
+                entry.block_id != value.block_id or
+                entry.reference_node != value.reference_node) continue;
             entry.* = value;
+            if (node_index < self.flow_index_by_node.len)
+                self.flow_index_by_node[node_index] = std.math.cast(u32, index) orelse missing_index;
             return;
-        };
+        }
+
         try self.flow.append(self.allocator, value);
+        if (node_index < self.flow_index_by_node.len and self.flow_index_by_node[node_index] == missing_index)
+            self.flow_index_by_node[node_index] = std.math.cast(u32, self.flow.items.len - 1) orelse missing_index;
     }
     fn literalText(self: *Analyzer, node: ast.NodeId) ?[]const u8 {
         const raw = switch (self.frontend_result.ast.node(node).data) {
@@ -750,6 +792,32 @@ const Analyzer = struct {
 };
 
 pub fn analyze(allocator: std.mem.Allocator, result: frontend.FrontendResult, store: *types.TypeStore, symbols: []const type_info.SymbolTypeInfo, nodes: *std.ArrayList(type_info.NodeTypeInfo)) !Result {
-    var analyzer: Analyzer = .{ .allocator = allocator, .frontend_result = result, .store = store, .symbols = symbols, .nodes = nodes };
+    const reference_seen = try allocator.alloc(bool, result.ast.nodes.len);
+    defer allocator.free(reference_seen);
+    @memset(reference_seen, false);
+    const reference_symbol_by_node = try allocator.alloc(u32, result.ast.nodes.len);
+    defer allocator.free(reference_symbol_by_node);
+    @memset(reference_symbol_by_node, missing_index);
+    for (result.resolve.references) |reference| {
+        const node_index: usize = @intCast(reference.node);
+        if (node_index >= reference_seen.len or reference_seen[node_index]) continue;
+        reference_seen[node_index] = true;
+        if (reference.symbol) |symbol| reference_symbol_by_node[node_index] = symbol;
+    }
+
+    const flow_index_by_node = try allocator.alloc(u32, result.ast.nodes.len);
+    defer allocator.free(flow_index_by_node);
+    @memset(flow_index_by_node, missing_index);
+
+    var analyzer: Analyzer = .{
+        .allocator = allocator,
+        .frontend_result = result,
+        .store = store,
+        .symbols = symbols,
+        .nodes = nodes,
+        .reference_seen = reference_seen,
+        .reference_symbol_by_node = reference_symbol_by_node,
+        .flow_index_by_node = flow_index_by_node,
+    };
     return analyzer.run();
 }

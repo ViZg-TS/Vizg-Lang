@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const ast = @import("../frontend/ast.zig");
 const binder = @import("../frontend/binder.zig");
 const frontend = @import("../frontend/frontend.zig");
@@ -497,26 +496,6 @@ pub fn analyzeBorrowedModuleGraphWithLimits(
     };
 }
 
-const project_semantics_profile_enabled = true;
-
-fn projectProfileNowNanos() u64 {
-    if (!project_semantics_profile_enabled or builtin.os.tag != .linux) return 0;
-    var ts: std.os.linux.timespec = undefined;
-    if (std.os.linux.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
-
-fn projectProfileStage(label: []const u8, started_ns: u64) void {
-    if (!project_semantics_profile_enabled or started_ns == 0) return;
-    const finished_ns = projectProfileNowNanos();
-    if (finished_ns < started_ns) return;
-    const elapsed_ns = finished_ns - started_ns;
-    std.debug.print(
-        "VIZG_PROFILE project_semantics.{s} duration_ms={d}.{d:0>3}\n",
-        .{ label, elapsed_ns / std.time.ns_per_ms, (elapsed_ns % std.time.ns_per_ms) / std.time.ns_per_us },
-    );
-}
-
 fn analyzeModuleGraphData(
     backing_allocator: std.mem.Allocator,
     graph: *const modules_mod.ModuleGraph,
@@ -526,14 +505,8 @@ fn analyzeModuleGraphData(
     errdefer destroyArena(arena);
     const allocator = arena.allocator();
     var type_store = types.TypeStore.initWithLimit(allocator, limits.max_types);
-    const profile_total_started = projectProfileNowNanos();
-    var profile_started = projectProfileNowNanos();
-
     var external_exports: std.ArrayList(ExternalSemanticExport) = .empty;
     try collectExternalExports(allocator, graph.external_modules, &type_store, &external_exports);
-    projectProfileStage("external_exports", profile_started);
-    profile_started = projectProfileNowNanos();
-
     var project_modules: std.ArrayList(ProjectSemanticModule) = .empty;
     for (graph.modules) |module| {
         try project_modules.append(allocator, .{
@@ -542,18 +515,12 @@ fn analyzeModuleGraphData(
             .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false, &.{}, &.{}, false, limits.max_diagnostics),
         });
     }
-    projectProfileStage("initial_type_info", profile_started);
-    profile_started = projectProfileNowNanos();
-
     var export_list: std.ArrayList(SemanticExport) = .empty;
     try collectDirectExports(allocator, graph.modules, project_modules.items, &type_store, &export_list);
     try resolveReExports(allocator, graph, external_exports.items, &export_list);
 
     var import_list: std.ArrayList(SemanticImport) = .empty;
     try collectSemanticImports(allocator, graph, &type_store, external_exports.items, export_list.items, &import_list);
-    projectProfileStage("link_exports_imports", profile_started);
-    profile_started = projectProfileNowNanos();
-
     // The first pass establishes exported identities. Once imports are linked,
     // complete nominal tables exactly once in dependency-first graph order so
     // inherited/imported shapes exist before any consumer lowers aliases.
@@ -580,9 +547,6 @@ fn analyzeModuleGraphData(
     }
 
     try registerCanonicalLanguageItemSurfaces(graph, export_list.items, &type_store);
-    projectProfileStage("complete_nominals", profile_started);
-    profile_started = projectProfileNowNanos();
-
     // Rebuild effective module types against the now-immutable nominal tables.
     // Missing/cyclic targets remain stable `unknown` placeholders.
     for (project_modules.items) |*module| {
@@ -600,9 +564,6 @@ fn analyzeModuleGraphData(
             limits.max_diagnostics,
         );
     }
-    projectProfileStage("rebuild_type_info", profile_started);
-    profile_started = projectProfileNowNanos();
-
     // Imported values may feed exported initializers. Iterate bounded propagation
     // over IDs; cycles settle as unknown or a stable canonical TypeId.
     var round: usize = 0;
@@ -621,18 +582,10 @@ fn analyzeModuleGraphData(
         changed = (try refreshNamespaceImportTargets(allocator, graph, &type_store, export_list.items, import_list.items)) or changed;
         if (!changed) break;
     }
-    projectProfileStage("propagation", profile_started);
-    if (project_semantics_profile_enabled)
-        std.debug.print("VIZG_PROFILE project_semantics.propagation_rounds count={d}\n", .{round + 1});
-    profile_started = projectProfileNowNanos();
-
     for (project_modules.items) |*module| {
         const graph_module = graphModule(graph, module.id) orelse continue;
         try finishProjectTypes(allocator, module.id, graph_module.result, &module.type_info, &type_store);
     }
-    projectProfileStage("finish_project_types", profile_started);
-    profile_started = projectProfileNowNanos();
-
     var all_diags = diagnostics.LimitedList.init(limits.max_diagnostics);
     try all_diags.appendSlice(allocator, graph.diagnostics);
     for (project_modules.items) |module| try all_diags.appendSlice(allocator, module.type_info.diagnostics);
@@ -641,8 +594,6 @@ fn analyzeModuleGraphData(
     const export_slice = try export_list.toOwnedSlice(allocator);
     const import_slice = try import_list.toOwnedSlice(allocator);
     const diagnostic_slice = try all_diags.toOwnedSlice(allocator);
-    projectProfileStage("finalize", profile_started);
-    projectProfileStage("total", profile_total_started);
     return .{
         .arena = arena,
         .type_store = type_store,
@@ -1599,16 +1550,18 @@ fn buildTypeInfo(
 
     const inferred_nodes = try type_inference.inferLiteralNodeTypes(allocator, result.ast, builtins);
     try node_types.appendSlice(allocator, inferred_nodes);
+    std.mem.sort(NodeTypeInfo, node_types.items, {}, lessNodeTypeInfoById);
     try seedClassContextExpressionTypes(allocator, module_id, result, type_store, &node_types);
 
     // Build declarations before references. Forward references therefore observe
     // the same stable SymbolId and TypeId as references after a declaration.
+    const has_duplicate_declarations = hasDuplicateDeclarationDiagnostic(result.bind.diagnostics);
     for (result.bind.symbols) |symbol| {
         var entry: SymbolTypeInfo = .{ .symbol_id = symbol.id };
         if (declaredType(collected.symbol_declared_types, symbol.id)) |declared| {
             entry.declared_type = declared;
         }
-        if (isDuplicateSymbol(result.bind.symbols, symbol)) entry.state = .@"error";
+        if (has_duplicate_declarations and isDuplicateSymbol(result.bind.symbols, symbol)) entry.state = .@"error";
 
         switch (symbol.kind) {
             .variable => if (entry.declared_type == null) {
@@ -1819,7 +1772,16 @@ fn buildTypeInfo(
 }
 
 fn declaredType(entries: []const type_collector.DeclaredSymbolType, symbol_id: binder.SymbolId) ?types.TypeId {
-    for (entries) |entry| if (entry.symbol_id == symbol_id) return entry.declared_type;
+    var low: usize = 0;
+    var high: usize = entries.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (entries[mid].symbol_id < symbol_id)
+            low = mid + 1
+        else
+            high = mid;
+    }
+    if (low < entries.len and entries[low].symbol_id == symbol_id) return entries[low].declared_type;
     return null;
 }
 
@@ -1906,11 +1868,23 @@ fn completeExpressionCoverage(
     builtins: *const types.Builtins,
     max_diagnostics: usize,
 ) ![]const diagnostics.Diagnostic {
+    const export_specifier_nodes = try allocator.alloc(bool, tree.nodes.len);
+    defer allocator.free(export_specifier_nodes);
+    @memset(export_specifier_nodes, false);
+    for (tree.nodes) |node| switch (node.data) {
+        .ExportDeclaration => |exported| for (exported.specifiers) |specifier| {
+            const local_index: usize = @intCast(specifier.local);
+            if (local_index < export_specifier_nodes.len) export_specifier_nodes[local_index] = true;
+            const exported_index: usize = @intCast(specifier.exported);
+            if (exported_index < export_specifier_nodes.len) export_specifier_nodes[exported_index] = true;
+        },
+        else => {},
+    };
+
     var recovery = diagnostics.LimitedList.init(max_diagnostics);
     for (tree.nodes, 0..) |node, raw_id| {
-        if (!isExecutableExpression(node.data)) continue;
+        if (!isExecutableExpression(node.data) or export_specifier_nodes[raw_id]) continue;
         const node_id: ast.NodeId = @intCast(raw_id);
-        if (isExportSpecifierIdentifier(tree, node_id)) continue;
         if (nodeType(entries.items, node_id) != null) continue;
         try putNodeType(allocator, entries, .{ .node_id = node_id, .type_id = builtins.unknown, .state = .resolved });
         try recovery.append(allocator, .{
@@ -1923,16 +1897,6 @@ fn completeExpressionCoverage(
         });
     }
     return recovery.toOwnedSlice(allocator);
-}
-
-fn isExportSpecifierIdentifier(tree: ast.Ast, node_id: ast.NodeId) bool {
-    for (tree.nodes) |node| switch (node.data) {
-        .ExportDeclaration => |exported| for (exported.specifiers) |specifier| {
-            if (specifier.local == node_id or specifier.exported == node_id) return true;
-        },
-        else => {},
-    };
-    return false;
 }
 
 fn isExecutableExpression(data: ast.NodeData) bool {
@@ -2016,7 +1980,11 @@ fn owningEnumType(
     return null;
 }
 
-fn nodeType(entries: []const NodeTypeInfo, node_id: ast.NodeId) ?types.TypeId {
+fn lessNodeTypeInfoById(_: void, left: NodeTypeInfo, right: NodeTypeInfo) bool {
+    return left.node_id < right.node_id;
+}
+
+fn nodeTypeLowerBound(entries: []const NodeTypeInfo, node_id: ast.NodeId) usize {
     var low: usize = 0;
     var high: usize = entries.len;
     while (low < high) {
@@ -2026,8 +1994,12 @@ fn nodeType(entries: []const NodeTypeInfo, node_id: ast.NodeId) ?types.TypeId {
         else
             high = mid;
     }
-    if (low < entries.len and entries[low].node_id == node_id) return entries[low].type_id;
-    for (entries) |entry| if (entry.node_id == node_id) return entry.type_id;
+    return low;
+}
+
+fn nodeType(entries: []const NodeTypeInfo, node_id: ast.NodeId) ?types.TypeId {
+    const index = nodeTypeLowerBound(entries, node_id);
+    if (index < entries.len and entries[index].node_id == node_id) return entries[index].type_id;
     return null;
 }
 
@@ -2041,6 +2013,11 @@ fn priorDeclarationType(
         if (index < symbols.len and symbols[index].declaration == declaration) return entry.effective();
     }
     return null;
+}
+
+fn hasDuplicateDeclarationDiagnostic(items: []const diagnostics.Diagnostic) bool {
+    for (items) |item| if (item.code == .duplicate_declaration) return true;
+    return false;
 }
 
 fn isDuplicateSymbol(symbols: []const binder.Symbol, symbol: binder.Symbol) bool {
@@ -2239,7 +2216,16 @@ fn refreshFunctionReturns(
 }
 
 fn lookupResolvedTypeNode(entries: []const ResolvedTypeNode, node_id: ast.TypeNodeId) ?types.TypeId {
-    for (entries) |entry| if (entry.node_id == node_id) return entry.type_id;
+    var low: usize = 0;
+    var high: usize = entries.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (entries[mid].node_id < node_id)
+            low = mid + 1
+        else
+            high = mid;
+    }
+    if (low < entries.len and entries[low].node_id == node_id) return entries[low].type_id;
     return null;
 }
 
@@ -2251,13 +2237,12 @@ fn symbolTypePtr(entries: []SymbolTypeInfo, symbol_id: binder.SymbolId) ?*Symbol
 }
 
 fn putNodeType(allocator: std.mem.Allocator, entries: *std.ArrayList(NodeTypeInfo), value: NodeTypeInfo) !void {
-    for (entries.items) |*entry| {
-        if (entry.node_id == value.node_id) {
-            entry.* = value;
-            return;
-        }
+    const index = nodeTypeLowerBound(entries.items, value.node_id);
+    if (index < entries.items.len and entries.items[index].node_id == value.node_id) {
+        entries.items[index] = value;
+        return;
     }
-    try entries.append(allocator, value);
+    try entries.insert(allocator, index, value);
 }
 
 fn putNodeContextualType(
@@ -2267,12 +2252,12 @@ fn putNodeContextualType(
     contextual_type: types.TypeId,
     fallback_type: types.TypeId,
 ) !void {
-    for (entries.items) |*entry| {
-        if (entry.node_id != node_id) continue;
-        entry.contextual_type = contextual_type;
+    const index = nodeTypeLowerBound(entries.items, node_id);
+    if (index < entries.items.len and entries.items[index].node_id == node_id) {
+        entries.items[index].contextual_type = contextual_type;
         return;
     }
-    try entries.append(allocator, .{
+    try entries.insert(allocator, index, .{
         .node_id = node_id,
         .type_id = fallback_type,
         .contextual_type = contextual_type,
