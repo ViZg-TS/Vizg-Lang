@@ -1199,6 +1199,7 @@ fn statusFromError(owned: *OwnedProject, err: anyerror) Vizg_ProjectStatus {
         error.UnknownModule,
         error.SourceNotSupplied,
         error.ModuleNotAnalyzed,
+        error.InvalidModuleState,
         error.ProjectFinished,
         => .INVALID_STATE,
         error.InvalidExternalExport,
@@ -1633,6 +1634,63 @@ pub fn projectRespondSource(project: ?*Vizg_Project, request_id: u64, input: ?*c
     if (!sourceInputsOutsideWorkspace(owned, args)) return .INVALID_ARGUMENT;
     const source = moduleSource(args) orelse return .INVALID_ARGUMENT;
     owned.project.respondSource(.init(request_id), source) catch |err| return statusFromError(owned, err);
+    return .OK;
+}
+
+/// Install one versioned portable frontend snapshot for an already supplied
+/// source module. The snapshot bytes are copied into project-owned memory.
+pub fn projectInstallFrontendCache(
+    project: ?*Vizg_Project,
+    module_id: u64,
+    cache_ptr: [*c]const u8,
+    cache_len: usize,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    if (owned.creation_limited) return .INVALID_STATE;
+    beginProjectCall(owned);
+    if (cache_len == 0 or !validAlignedHostArray(u8, cache_ptr, cache_len)) return .INVALID_ARGUMENT;
+    if (!inputOutsideWorkspace(owned, cache_ptr, cache_len)) return .INVALID_ARGUMENT;
+    owned.project.installFrontendCache(.init(module_id), cache_ptr[0..cache_len]) catch |err|
+        return statusFromError(owned, err);
+    return .OK;
+}
+
+/// Return the exact number of bytes required to export one analyzed module's
+/// frontend snapshot. Valid both before and after project finish.
+pub fn projectFrontendCacheSize(
+    project: ?*Vizg_Project,
+    module_id: u64,
+    out_size: ?*usize,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    beginProjectCall(owned);
+    const output = out_size orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(usize, output, 1) or
+        !inputOutsideWorkspace(owned, output, @sizeOf(usize))) return .INVALID_ARGUMENT;
+    output.* = owned.project.frontendCacheSize(.init(module_id)) catch |err|
+        return statusFromError(owned, err);
+    return .OK;
+}
+
+/// Export one analyzed module's frontend snapshot into caller-owned memory.
+pub fn projectWriteFrontendCache(
+    project: ?*Vizg_Project,
+    module_id: u64,
+    output_ptr: [*c]u8,
+    output_len: usize,
+    out_written: ?*usize,
+) callconv(.c) Vizg_ProjectStatus {
+    const owned = ownedProject(project) orelse return .INVALID_ARGUMENT;
+    beginProjectCall(owned);
+    const written = out_written orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(usize, written, 1) or
+        !inputOutsideWorkspace(owned, written, @sizeOf(usize)) or
+        !validAlignedMutableHostArray(u8, output_ptr, output_len) or
+        !inputOutsideWorkspace(owned, output_ptr, output_len)) return .INVALID_ARGUMENT;
+    written.* = owned.project.exportFrontendCache(.init(module_id), output_ptr[0..output_len]) catch |err| switch (err) {
+        error.BufferTooSmall => return .INVALID_ARGUMENT,
+        else => return statusFromError(owned, err),
+    };
     return .OK;
 }
 
@@ -4462,6 +4520,9 @@ comptime {
     @export(&projectRegisterSourceLanguageItems, .{ .name = "vizg_project_register_source_language_items" });
     @export(&projectStep, .{ .name = "vizg_project_step" });
     @export(&projectRespondSource, .{ .name = "vizg_project_respond_source" });
+    @export(&projectInstallFrontendCache, .{ .name = "vizg_project_install_frontend_cache" });
+    @export(&projectFrontendCacheSize, .{ .name = "vizg_project_frontend_cache_size" });
+    @export(&projectWriteFrontendCache, .{ .name = "vizg_project_write_frontend_cache" });
     @export(&projectRespondExternal, .{ .name = "vizg_project_respond_external" });
     @export(&externalModuleApiVersion, .{ .name = "vizg_external_module_api_version" });
     @export(&projectRespondExternalV2, .{ .name = "vizg_project_respond_external_v2" });

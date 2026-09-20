@@ -79,4 +79,5 @@ test {
     _ = @import("semantics/type_collector_test.zig");
     _ = @import("frontend/syntax_corpus_test.zig");
     _ = @import("frontend/tests.zig");
+    _ = @import("frontend/cache.zig");
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("../frontend/ast.zig");
 const binder = @import("../frontend/binder.zig");
 const frontend = @import("../frontend/frontend.zig");
+const frontend_cache = @import("../frontend/cache.zig");
 const function_like = @import("../frontend/function_like.zig");
 const resolver = @import("../frontend/resolver.zig");
 const diagnostics = @import("../diagnostics/root.zig");
@@ -283,6 +284,24 @@ pub fn analyzeSourceWithLimits(
     options: frontend.FrontendOptions,
     limits: SemanticLimits,
 ) !SemanticResult {
+    return analyzeSourceWithLimitsAndFrontendCache(backing_allocator, source, options, limits, null, null);
+}
+
+/// Project-graph ingestion path: materialize only source-local structural
+/// analysis. Canonical type collection/inference/checking is performed once by
+/// `analyzeModuleGraphData` after imports and global surfaces are linked.
+///
+/// This deliberately returns a `SemanticResult` with an empty local TypeInfo;
+/// callers that require standalone source types must use `analyzeSource*`.
+pub fn analyzeSourceStructureWithLimitsAndFrontendCache(
+    backing_allocator: std.mem.Allocator,
+    source: frontend.SourceFile,
+    options: frontend.FrontendOptions,
+    limits: SemanticLimits,
+    cache_bytes: ?[]const u8,
+    cache_used: ?*bool,
+) !SemanticResult {
+    if (cache_used) |used| used.* = false;
     const arena = try createArena(backing_allocator);
     errdefer destroyArena(arena);
     const allocator = arena.allocator();
@@ -294,7 +313,82 @@ pub fn analyzeSourceWithLimits(
     };
     var bounded_options = options;
     bounded_options.max_diagnostics = @min(options.max_diagnostics, limits.max_diagnostics);
-    const fe = try frontend.analyze(allocator, owned_source, bounded_options);
+    const fe = if (cache_bytes) |bytes| blk: {
+        const cached = frontend_cache.decode(allocator, owned_source, bytes) catch |err| switch (err) {
+            error.InvalidCache => break :blk try frontend.analyze(allocator, owned_source, bounded_options),
+            else => return err,
+        };
+        if (cache_used) |used| used.* = true;
+        break :blk cached;
+    } else try frontend.analyze(allocator, owned_source, bounded_options);
+
+    const syntax_diags = try selectDiagnostics(allocator, fe.diagnostics, true, owned_source.path);
+    const semantic_diags = try selectDiagnostics(allocator, fe.diagnostics, false, owned_source.path);
+    const all_diags = try combineDiagnosticsWithLimit(
+        allocator,
+        &.{ syntax_diags, semantic_diags },
+        owned_source.path,
+        limits.max_diagnostics,
+    );
+    const module: SemanticModule = .{
+        .id = 0,
+        .path = owned_source.path,
+        .imports = fe.bind.module.imports,
+        .exports = fe.bind.module.exports,
+    };
+    return .{
+        .arena = arena,
+        .frontend = fe,
+        .module = module,
+        .type_store = types.TypeStore.initWithLimit(allocator, limits.max_types),
+        .type_info = .{
+            .symbols = &.{},
+            .nodes = &.{},
+            .diagnostics = &.{},
+        },
+        .syntax_diagnostics = syntax_diags,
+        .semantic_diagnostics = semantic_diags,
+        .diagnostics = all_diags,
+        .metadata = .{
+            .source_kind = owned_source.kind,
+            .is_partial = all_diags.len != 0,
+            .syntax_diagnostic_count = syntax_diags.len,
+            .semantic_diagnostic_count = semantic_diags.len,
+        },
+    };
+}
+
+/// Analyze one source while optionally reusing a portable frontend snapshot.
+/// The snapshot contains syntax/binding/CFG state only; type inference remains
+/// project-version-local and always executes against a fresh TypeStore.
+pub fn analyzeSourceWithLimitsAndFrontendCache(
+    backing_allocator: std.mem.Allocator,
+    source: frontend.SourceFile,
+    options: frontend.FrontendOptions,
+    limits: SemanticLimits,
+    cache_bytes: ?[]const u8,
+    cache_used: ?*bool,
+) !SemanticResult {
+    if (cache_used) |used| used.* = false;
+    const arena = try createArena(backing_allocator);
+    errdefer destroyArena(arena);
+    const allocator = arena.allocator();
+
+    const owned_source: frontend.SourceFile = .{
+        .path = try allocator.dupe(u8, source.path),
+        .text = try allocator.dupe(u8, source.text),
+        .kind = source.kind,
+    };
+    var bounded_options = options;
+    bounded_options.max_diagnostics = @min(options.max_diagnostics, limits.max_diagnostics);
+    const fe = if (cache_bytes) |bytes| blk: {
+        const cached = frontend_cache.decode(allocator, owned_source, bytes) catch |err| switch (err) {
+            error.InvalidCache => break :blk try frontend.analyze(allocator, owned_source, bounded_options),
+            else => return err,
+        };
+        if (cache_used) |used| used.* = true;
+        break :blk cached;
+    } else try frontend.analyze(allocator, owned_source, bounded_options);
     var type_store = types.TypeStore.initWithLimit(allocator, limits.max_types);
     const info = try buildTypeInfo(
         allocator,

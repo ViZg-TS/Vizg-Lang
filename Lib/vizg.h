@@ -1369,6 +1369,16 @@ Vizg_ProjectStatus vizg_project_step(
 Vizg_ProjectStatus vizg_project_respond_source(
     Vizg_Project *project, uint64_t request_id,
     const Vizg_ProjectSource *source);
+/* Portable per-module frontend cache. A cache blob is opaque to hosts and
+ * versioned by ViZG; stale/corrupt blobs may be omitted and recomputed. */
+Vizg_ProjectStatus vizg_project_install_frontend_cache(
+    Vizg_Project *project, uint64_t module_id,
+    const uint8_t *cache_ptr, size_t cache_len);
+Vizg_ProjectStatus vizg_project_frontend_cache_size(
+    Vizg_Project *project, uint64_t module_id, size_t *out_size);
+Vizg_ProjectStatus vizg_project_write_frontend_cache(
+    Vizg_Project *project, uint64_t module_id,
+    uint8_t *output_ptr, size_t output_len, size_t *out_written);
 Vizg_ProjectStatus vizg_project_respond_external(
     Vizg_Project *project, uint64_t request_id,
     const Vizg_ExternalModule *external_module);

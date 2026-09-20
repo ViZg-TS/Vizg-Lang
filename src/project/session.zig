@@ -74,6 +74,7 @@ pub const Module = struct {
     source: ?contracts.ModuleSource,
     semantic_result: ?*semantics.SemanticResult,
     metadata_derived: bool,
+    frontend_cache: ?[]u8 = null,
 
     pub fn diagnostics(self: *const Module) []const @import("../diagnostics/root.zig").Diagnostic {
         const result = self.semantic_result orelse return &.{};
@@ -179,6 +180,39 @@ pub const Project = struct {
 
     pub fn lookup(self: *const Project, id: contracts.ModuleId) ?*const Module {
         return self.find(id);
+    }
+
+    /// Install a portable frontend snapshot for a source that has already
+    /// been supplied. Invalid/corrupt snapshots are harmless: semantic analysis
+    /// falls back to the ordinary frontend and a fresh snapshot can replace it.
+    pub fn installFrontendCache(self: *Project, id: contracts.ModuleId, bytes: []const u8) !void {
+        try self.ensureOpen();
+        const module = self.findMut(id) orelse return error.UnknownModule;
+        if (module.source == null) return error.InvalidModuleState;
+        switch (module.state) {
+            .supplied => {
+                if (module.frontend_cache) |existing| self.allocator.free(existing);
+                module.frontend_cache = try self.allocator.dupe(u8, bytes);
+            },
+            // A repeated resolver response may name a module that was supplied
+            // earlier (language item/global-root) and has since completed.
+            // Its cache is no longer needed; treating the install as an
+            // idempotent no-op keeps host resolution order irrelevant.
+            .analyzed, .complete => {},
+            else => return error.InvalidModuleState,
+        }
+    }
+
+    pub fn frontendCacheSize(self: *const Project, id: contracts.ModuleId) !usize {
+        const module = self.find(id) orelse return error.UnknownModule;
+        const result = module.semantic_result orelse return error.InvalidModuleState;
+        return @import("../frontend/cache.zig").encodedSize(&result.frontend);
+    }
+
+    pub fn exportFrontendCache(self: *const Project, id: contracts.ModuleId, output: []u8) !usize {
+        const module = self.find(id) orelse return error.UnknownModule;
+        const result = module.semantic_result orelse return error.InvalidModuleState;
+        return @import("../frontend/cache.zig").encodeInto(&result.frontend, output);
     }
 
     pub fn isGlobalRoot(self: *const Project, id: contracts.ModuleId) bool {
@@ -616,7 +650,8 @@ pub const Project = struct {
         }
 
         const source = self.find(id).?.source.?;
-        result_ptr.* = try semantics.analyzeSourceWithLimits(self.allocator, .{
+        var cache_used = false;
+        result_ptr.* = try semantics.analyzeSourceStructureWithLimitsAndFrontendCache(self.allocator, .{
             .path = source.logical_name,
             .text = source.bytes,
             .kind = switch (source.kind) {
@@ -630,7 +665,7 @@ pub const Project = struct {
         }, .{
             .max_types = self.limits.max_semantic_types,
             .max_diagnostics = self.limits.max_diagnostics,
-        });
+        }, initial.frontend_cache, &cache_used);
         result_initialized = true;
 
         const request_checkpoint = self.requests.checkpoint();
@@ -1567,6 +1602,8 @@ pub const Project = struct {
 
     fn deinitModule(self: *Project, module: *Module) void {
         self.clearResult(module);
+        if (module.frontend_cache) |bytes| self.allocator.free(bytes);
+        module.frontend_cache = null;
         if (module.source) |source| self.freeSource(source);
     }
 
