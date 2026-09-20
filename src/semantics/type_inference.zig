@@ -295,7 +295,7 @@ fn inferNode(
             null,
         .ConditionalExpression => |expression| if (findType(entries, expression.consequent)) |consequent|
             if (findType(entries, expression.alternate)) |alternate|
-                .{ .type_id = if (consequent == alternate) consequent else try store.unionOf(&.{ consequent, alternate }) }
+                .{ .type_id = try conditionalCommonType(consequent, alternate, store) }
             else
                 null
         else
@@ -743,6 +743,36 @@ fn receiverFor(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mo
 
 /// Access distributes over unions. Every non-nullish branch must support the
 /// key; optional access removes nullish branches and always includes undefined.
+pub fn inferPropertyAccessFromReceiver(
+    allocator: std.mem.Allocator,
+    object_type: types.TypeId,
+    property: []const u8,
+    optional: bool,
+    tree: ast_mod.Ast,
+    store: *types.TypeStore,
+) !OperatorResult {
+    return inferAccess(allocator, object_type, .{ .property = property }, optional, tree, store);
+}
+
+pub fn inferElementAccessFromReceiver(
+    allocator: std.mem.Allocator,
+    object_type: types.TypeId,
+    index_node: ast_mod.NodeId,
+    index_type: types.TypeId,
+    optional: bool,
+    tree: ast_mod.Ast,
+    store: *types.TypeStore,
+) !OperatorResult {
+    return inferAccess(
+        allocator,
+        object_type,
+        .{ .index = .{ .node = index_node, .type_id = index_type } },
+        optional,
+        tree,
+        store,
+    );
+}
+
 fn inferAccess(
     allocator: std.mem.Allocator,
     object_type: types.TypeId,
@@ -1189,6 +1219,25 @@ fn invalidAccess(key: AccessKey, recovery: types.TypeId) OperatorResult {
     return .{ .type_id = recovery, .valid = false, .issue = issueForKey(key) };
 }
 
+fn conditionalCommonType(
+    consequent: types.TypeId,
+    alternate: types.TypeId,
+    store: *types.TypeStore,
+) !types.TypeId {
+    if (consequent == alternate) return consequent;
+    const consequent_type = store.lookup(consequent);
+    const alternate_type = store.lookup(alternate);
+    if (consequent_type != null and alternate_type != null and
+        consequent_type.?.kind == .array and alternate_type.?.kind == .array)
+    {
+        const left = consequent_type.?.kind.array;
+        const right = alternate_type.?.kind.array;
+        if (left.element_type == store.builtins.never) return alternate;
+        if (right.element_type == store.builtins.never) return consequent;
+    }
+    return store.unionOf(&.{ consequent, alternate });
+}
+
 fn inferArray(
     allocator: std.mem.Allocator,
     node_id: ast_mod.NodeId,
@@ -1249,8 +1298,12 @@ fn inferArray(
             else => try members.append(allocator, ty),
         }
     }
+    // An unconstrained empty array contributes no element evidence. Model it
+    // as never[] rather than unknown[] so it composes as the bottom array type
+    // in conditionals, assignments, and generic inference. Contextual typing
+    // above still replaces it with the expected element type when available.
     const element_type = if (members.items.len == 0)
-        store.builtins.unknown
+        store.builtins.never
     else
         try store.unionOf(members.items);
     return store.intern(.{ .array = .{ .element_type = element_type } });

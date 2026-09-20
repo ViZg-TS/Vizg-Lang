@@ -171,6 +171,22 @@ const Checker = struct {
         if (target_type.kind == .applied_generic and self.appliedInterface(target_type.kind.applied_generic) != null)
             return self.compareAppliedInterfaceTarget(source, target, target_type.kind.applied_generic, 0);
 
+        // A complete enum may flow to a primitive sink only when every
+        // possible member does. This keeps numeric enums assignable to number,
+        // string enums assignable to string, and rejects heterogeneous enums
+        // from either primitive without inventing a union nominal.
+        if (source_type.kind == .enum_type and target_builtin != null) {
+            if (self.store.lookupEnumSemanticType(source_type.kind.enum_type.identity)) |enum_semantic| {
+                if (enum_semantic.members.members.len != 0) {
+                    for (enum_semantic.members.members) |member| {
+                        if (self.compare(member.type_id, target) != .compatible)
+                            return self.fail(.incompatible_kind, source, target);
+                    }
+                    return .compatible;
+                }
+            }
+        }
+
         // Enum member expressions keep their underlying literal TypeId so they
         // remain assignable to primitive sinks, but that literal is also a
         // value of the enum nominal that owns the member.
@@ -929,4 +945,31 @@ test "enum member literal is assignable to owning enum nominal" {
 
     try testing.expect(check(program, semantic.type_id, &store).isCompatible());
     try testing.expect(!check(store.builtins.number, semantic.type_id, &store).isCompatible());
+}
+
+test "homogeneous enums flow to their primitive domain" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var store = types.TypeStore.init(arena.allocator());
+
+    const numeric_identity = types.SemanticDeclId.init(1, 8);
+    const numeric = try store.createEnumSemanticType(numeric_identity, "Numeric");
+    const zero = try store.intern(.{ .literal = .{ .number = 0 } });
+    const one = try store.intern(.{ .literal = .{ .number = 1 } });
+    try store.completeEnumSemanticType(numeric_identity, .{ .members = &.{
+        .{ .name = "Zero", .type_id = zero, .readonly = true },
+        .{ .name = "One", .type_id = one, .readonly = true },
+    } }, false);
+    try testing.expect(check(numeric.type_id, store.builtins.number, &store).isCompatible());
+    try testing.expect(!check(numeric.type_id, store.builtins.string, &store).isCompatible());
+
+    const mixed_identity = types.SemanticDeclId.init(1, 9);
+    const mixed = try store.createEnumSemanticType(mixed_identity, "Mixed");
+    const text = try store.intern(.{ .literal = .{ .string = "\"text\"" } });
+    try store.completeEnumSemanticType(mixed_identity, .{ .members = &.{
+        .{ .name = "Zero", .type_id = zero, .readonly = true },
+        .{ .name = "Text", .type_id = text, .readonly = true },
+    } }, true);
+    try testing.expect(!check(mixed.type_id, store.builtins.number, &store).isCompatible());
+    try testing.expect(!check(mixed.type_id, store.builtins.string, &store).isCompatible());
 }

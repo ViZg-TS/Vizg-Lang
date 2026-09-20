@@ -2316,7 +2316,20 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
                 hir_result = value;
                 lowered = undefined;
             },
-            .diagnostics => |*report| report.deinit(),
+            .diagnostics => |*report| {
+                for (report.diagnostics) |diagnostic| {
+                    std.debug.print(
+                        "HIR-ELIG code={s} module={any} path={s} span={any}\n",
+                        .{
+                            vizg.hir.diagnostics.codeId(diagnostic.code),
+                            diagnostic.module_id,
+                            diagnostic.path orelse "<none>",
+                            diagnostic.span,
+                        },
+                    );
+                }
+                report.deinit();
+            },
         }
     }
     errdefer if (hir_result) |*value| value.deinit();

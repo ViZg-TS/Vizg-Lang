@@ -143,6 +143,11 @@ pub const FlowTypeInfo = struct {
     symbol_id: binder.SymbolId,
     reference_node: ast_mod.NodeId,
     type_id: types.TypeId,
+    /// True only when an active flow fact, rather than the symbol/access base
+    /// type, determined this reference. Project re-inference must preserve only
+    /// these entries; preserving ordinary references freezes stale pre-flow
+    /// symbol types and prevents the fixed point from converging.
+    narrowed: bool = false,
 };
 
 /// Why a symbol or expression has the type currently recorded for it.

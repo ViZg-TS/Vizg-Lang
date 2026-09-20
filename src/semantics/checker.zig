@@ -502,6 +502,9 @@ fn checkAggregateElementMismatch(
 }
 
 fn resolvedNode(type_info: type_info_mod.TypeInfo, node_id: ast_mod.NodeId, store: *const types.TypeStore) ?types.TypeId {
+    if (type_info.lookupFlowTypeAtReference(node_id)) |flow_type| {
+        if (flow_type != store.builtins.unknown) return flow_type;
+    }
     const info = type_info.lookupNodeInfo(node_id) orelse return null;
     const effective = info.effective() orelse return null;
     if (effective == store.builtins.unknown) return null;

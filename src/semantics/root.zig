@@ -1337,6 +1337,81 @@ fn refreshDirectExportTypes(modules: []ProjectSemanticModule, type_store: *const
     return changed;
 }
 
+fn runFlowTypeFixedPoint(
+    allocator: std.mem.Allocator,
+    module_id: ModuleId,
+    result: frontend.FrontendResult,
+    symbols: []SymbolTypeInfo,
+    nodes: *std.ArrayList(NodeTypeInfo),
+    resolved_type_nodes: []const ResolvedTypeNode,
+    type_store: *types.TypeStore,
+) ![]const FlowTypeInfo {
+    var final_flow: []const FlowTypeInfo = &.{};
+    var flow_round: usize = 0;
+    while (flow_round < symbols.len + 2) : (flow_round += 1) {
+        try refreshReferenceTypes(allocator, result, symbols, nodes, &type_store.builtins);
+        _ = try type_inference.inferPrimitiveExpressionsWithCfgs(
+            allocator,
+            result.ast,
+            nodes,
+            type_store,
+            resolved_type_nodes,
+            result.cfgs,
+        );
+
+        const narrowed = try narrowing.analyze(allocator, result, type_store, symbols, nodes);
+        final_flow = narrowed.flow_types;
+
+        var flow_node_overrides: std.ArrayList(NodeTypeInfo) = .empty;
+        defer flow_node_overrides.deinit(allocator);
+        for (narrowed.flow_types) |flow| {
+            if (!flow.narrowed) continue;
+            var already_present = false;
+            for (flow_node_overrides.items) |entry| if (entry.node_id == flow.reference_node) {
+                already_present = true;
+                break;
+            };
+            if (already_present) continue;
+            for (nodes.items) |entry| if (entry.node_id == flow.reference_node) {
+                try flow_node_overrides.append(allocator, entry);
+                break;
+            };
+        }
+
+        var symbol_changed_this_flow_round = false;
+        var type_round: usize = 0;
+        while (type_round < symbols.len + 2) : (type_round += 1) {
+            _ = try type_inference.inferPrimitiveExpressionsWithCfgsPreserving(
+                allocator,
+                result.ast,
+                nodes,
+                type_store,
+                resolved_type_nodes,
+                result.cfgs,
+                flow_node_overrides.items,
+            );
+            const variables_changed = refreshVariableTypes(result, symbols, nodes.items, type_store);
+            const parameters_changed = refreshParameterDefaultTypes(result, symbols, nodes.items, &type_store.builtins);
+            const functions_changed = try refreshFunctionReturns(
+                allocator,
+                module_id,
+                result,
+                symbols,
+                nodes.items,
+                resolved_type_nodes,
+                type_store,
+            );
+            const changed = variables_changed or parameters_changed or functions_changed;
+            if (!changed) break;
+            symbol_changed_this_flow_round = true;
+            try refreshReferenceTypes(allocator, result, symbols, nodes, &type_store.builtins);
+        }
+
+        if (!symbol_changed_this_flow_round) return final_flow;
+    }
+    return final_flow;
+}
+
 fn finishProjectTypes(
     allocator: std.mem.Allocator,
     module_id: ModuleId,
@@ -1345,50 +1420,17 @@ fn finishProjectTypes(
     type_store: *types.TypeStore,
 ) !void {
     var nodes: std.ArrayList(NodeTypeInfo) = .{ .items = @constCast(info.nodes), .capacity = info.nodes.len };
-    const narrowed = try narrowing.analyze(allocator, result, type_store, info.symbols, &nodes);
-
-    // Narrowing mutates reference/access nodes in-place. Freeze those leaf
-    // results before re-inference: parent expressions must be recomputed from
-    // the flow-sensitive leaves instead of reconstructing a property access
-    // from its pre-narrowing receiver type.
-    var flow_node_overrides: std.ArrayList(NodeTypeInfo) = .empty;
-    defer flow_node_overrides.deinit(allocator);
-    for (narrowed.flow_types) |flow| {
-        var already_present = false;
-        for (flow_node_overrides.items) |entry| if (entry.node_id == flow.reference_node) {
-            already_present = true;
-            break;
-        };
-        if (already_present) continue;
-        for (nodes.items) |entry| if (entry.node_id == flow.reference_node) {
-            try flow_node_overrides.append(allocator, entry);
-            break;
-        };
-    }
-
-    // Retype dependent parent expressions from the narrowed reference map and
-    // refresh inferred signatures so the checker validates the narrowed body
-    // instead of stale pre-narrowing operands (BUG-0074).
-    _ = try type_inference.inferPrimitiveExpressionsWithCfgsPreserving(
-        allocator,
-        result.ast,
-        &nodes,
-        type_store,
-        info.resolved_type_nodes,
-        result.cfgs,
-        flow_node_overrides.items,
-    );
-    _ = try refreshFunctionReturns(
+    const flow_types = try runFlowTypeFixedPoint(
         allocator,
         module_id,
         result,
         @constCast(info.symbols),
-        nodes.items,
+        &nodes,
         info.resolved_type_nodes,
         type_store,
     );
     info.nodes = try nodes.toOwnedSlice(allocator);
-    info.flow_types = narrowed.flow_types;
+    info.flow_types = flow_types;
     var retained_diags: std.ArrayList(diagnostics.Diagnostic) = .empty;
     for (info.diagnostics) |diagnostic| {
         if (resolvedCoverageRecovery(diagnostic, result.ast, info.nodes, &type_store.builtins)) continue;
@@ -1689,23 +1731,12 @@ fn buildTypeInfo(
         try remainingDiagnostics(max_diagnostics, collected.diagnostics.len),
     );
 
-    const narrowed = try narrowing.analyze(allocator, result, type_store, symbol_types.items, &node_types);
-    // Retype dependent parent expressions from the narrowed reference map and
-    // refresh inferred signatures before the checker validates (BUG-0074).
-    _ = try type_inference.inferPrimitiveExpressionsWithCfgs(
-        allocator,
-        result.ast,
-        &node_types,
-        type_store,
-        collected.resolved_type_nodes,
-        result.cfgs,
-    );
-    _ = try refreshFunctionReturns(
+    const flow_types = try runFlowTypeFixedPoint(
         allocator,
         module_id,
         result,
         symbol_types.items,
-        node_types.items,
+        &node_types,
         collected.resolved_type_nodes,
         type_store,
     );
@@ -1713,7 +1744,7 @@ fn buildTypeInfo(
         .symbols = symbol_types.items,
         .nodes = node_types.items,
         .resolved_type_nodes = collected.resolved_type_nodes,
-        .flow_types = narrowed.flow_types,
+        .flow_types = flow_types,
         .diagnostics = &.{},
     };
     const checker_diags = if (run_checker)
@@ -1737,7 +1768,7 @@ fn buildTypeInfo(
         .symbols = try symbol_types.toOwnedSlice(allocator),
         .nodes = try node_types.toOwnedSlice(allocator),
         .resolved_type_nodes = collected.resolved_type_nodes,
-        .flow_types = narrowed.flow_types,
+        .flow_types = flow_types,
         .diagnostics = semantic_diags,
     };
 }

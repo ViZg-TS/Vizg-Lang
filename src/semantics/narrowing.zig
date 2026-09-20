@@ -7,6 +7,7 @@ const tokens = @import("../frontend/tokens.zig");
 const types = @import("../types/root.zig");
 const dataflow = @import("dataflow.zig");
 const type_info = @import("type_info.zig");
+const type_inference = @import("type_inference.zig");
 
 pub const Result = struct { flow_types: []const type_info.FlowTypeInfo };
 
@@ -159,7 +160,22 @@ const Analyzer = struct {
                     try self.joinExpressionStates(facts, &skipped, &taken);
                 } else {
                     try self.processExpr(value.right, facts);
-                    try self.replaceAssignmentFact(value.left, self.nodeType(node_id), facts);
+                    const replacement = if (value.operator == .Equal)
+                        try self.currentNodeType(value.right, facts)
+                    else
+                        self.nodeType(node_id);
+                    try self.replaceAssignmentFact(value.left, replacement, facts);
+                    if (value.operator == .Equal) {
+                        var assignment_info = type_info.NodeTypeInfo{ .node_id = node_id, .type_id = replacement };
+                        for (self.nodes.items) |entry| if (entry.node_id == node_id) {
+                            assignment_info = entry;
+                            assignment_info.type_id = replacement;
+                            assignment_info.state = .resolved;
+                            assignment_info.issue = .none;
+                            break;
+                        };
+                        try self.putNode(assignment_info);
+                    }
                 }
             },
             .UpdateExpression => |value| {
@@ -186,6 +202,16 @@ const Analyzer = struct {
             },
             .MemberExpression => |value| {
                 try self.processExpr(value.object, facts);
+                const object_type = try self.currentNodeType(value.object, facts);
+                const inferred = try type_inference.inferPropertyAccessFromReceiver(
+                    self.allocator,
+                    object_type,
+                    value.property,
+                    value.optional,
+                    self.frontend_result.ast,
+                    self.store,
+                );
+                try self.putInferredAccess(node_id, inferred);
                 if (try self.factKeyForNode(node_id)) |key| try self.recordFlowNode(node_id, key, facts);
             },
             .ElementAccessExpression => |value| {
@@ -201,6 +227,17 @@ const Analyzer = struct {
                     try self.processExpr(value.index, &taken);
                     try self.joinExpressionStates(facts, &skipped, &taken);
                 } else try self.processExpr(value.index, facts);
+                const object_type = try self.currentNodeType(value.object, facts);
+                const inferred = try type_inference.inferElementAccessFromReceiver(
+                    self.allocator,
+                    object_type,
+                    value.index,
+                    self.nodeType(value.index),
+                    value.optional,
+                    self.frontend_result.ast,
+                    self.store,
+                );
+                try self.putInferredAccess(node_id, inferred);
                 if (try self.factKeyForNode(node_id)) |key| try self.recordFlowNode(node_id, key, facts);
             },
             .AsExpression => |value| try self.processExpr(value.expression, facts),
@@ -216,6 +253,21 @@ const Analyzer = struct {
                 defer no.deinit();
                 try self.applyGuard(value.condition, false, &no);
                 try self.processExpr(value.alternate, &no);
+                const consequent_type = try self.currentNodeType(value.consequent, &yes);
+                const alternate_type = try self.currentNodeType(value.alternate, &no);
+                const result_type = if (consequent_type == alternate_type)
+                    consequent_type
+                else
+                    try self.store.unionOf(&.{ consequent_type, alternate_type });
+                var conditional_info = type_info.NodeTypeInfo{ .node_id = node_id, .type_id = result_type };
+                for (self.nodes.items) |entry| if (entry.node_id == node_id) {
+                    conditional_info = entry;
+                    conditional_info.type_id = result_type;
+                    conditional_info.state = .resolved;
+                    conditional_info.issue = .none;
+                    break;
+                };
+                try self.putNode(conditional_info);
                 try self.joinExpressionStates(facts, &yes, &no);
             },
             .SequenceExpression => |value| for (value.expressions) |child| try self.processExpr(child, facts),
@@ -323,21 +375,35 @@ const Analyzer = struct {
         const key = (try self.factKeyForNode(left_data.UnaryExpression.argument)) orelse return false;
         const current = self.currentTypeForKey(facts, key);
 
-        // A dynamic receiver checked by `typeof` has a runtime category even
-        // though its checker-facing TypeScript type remains `any`/`unknown`.
-        // Keep the negative branch conservative because the current type
-        // model has no compact "not object" complement.
-        if (std.mem.eql(u8, name, "object") and
-            (current == self.store.builtins.any or current == self.store.builtins.unknown))
-        {
+        const wanted = if (std.mem.eql(u8, name, "string"))
+            self.store.builtins.string
+        else if (std.mem.eql(u8, name, "number"))
+            self.store.builtins.number
+        else if (std.mem.eql(u8, name, "boolean"))
+            self.store.builtins.boolean
+        else if (std.mem.eql(u8, name, "bigint"))
+            self.store.builtins.bigint
+        else if (std.mem.eql(u8, name, "symbol"))
+            self.store.builtins.symbol
+        else if (std.mem.eql(u8, name, "undefined"))
+            self.store.builtins.undefined
+        else if (std.mem.eql(u8, name, "object"))
+            self.store.builtins.object
+        else
+            return false;
+
+        // `typeof` gives a concrete runtime category even when the declared
+        // checker type is any/unknown. Positive branches may therefore use
+        // the category directly. Negative branches stay conservative until
+        // the type model grows compact complements such as "not number".
+        if (current == self.store.builtins.any or current == self.store.builtins.unknown) {
             if (keep)
-                try facts.set(key, self.store.builtins.object)
+                try facts.set(key, wanted)
             else
                 self.removeExactFact(facts, key);
             return true;
         }
 
-        const wanted = if (std.mem.eql(u8, name, "string")) self.store.builtins.string else if (std.mem.eql(u8, name, "number")) self.store.builtins.number else if (std.mem.eql(u8, name, "boolean")) self.store.builtins.boolean else if (std.mem.eql(u8, name, "bigint")) self.store.builtins.bigint else if (std.mem.eql(u8, name, "symbol")) self.store.builtins.symbol else if (std.mem.eql(u8, name, "undefined")) self.store.builtins.undefined else return false;
         try facts.set(key, try self.filterType(current, wanted, keep));
         return true;
     }
@@ -556,11 +622,12 @@ const Analyzer = struct {
             if (!std.mem.eql(u8, path.property, property)) continue;
             return .{ .symbol = parent.symbol, .access_path = @intCast(index) };
         }
+        const base_type = self.nodeType(representative);
         try self.access_paths.append(self.allocator, .{
             .root_symbol = parent.symbol,
             .parent = parent.access_path,
             .property = property,
-            .base_type = self.nodeType(representative),
+            .base_type = base_type,
         });
         return .{ .symbol = parent.symbol, .access_path = @intCast(self.access_paths.items.len - 1) };
     }
@@ -575,6 +642,34 @@ const Analyzer = struct {
         return false;
     }
 
+    fn currentNodeType(
+        self: *Analyzer,
+        node_id: ast.NodeId,
+        facts: *const dataflow.StateBuilder,
+    ) !types.TypeId {
+        if (try self.factKeyForNode(node_id)) |key| return self.currentTypeForKey(facts, key);
+        return self.nodeType(node_id);
+    }
+
+    fn putInferredAccess(
+        self: *Analyzer,
+        node_id: ast.NodeId,
+        inferred: type_inference.OperatorResult,
+    ) !void {
+        var node_info = type_info.NodeTypeInfo{
+            .node_id = node_id,
+            .type_id = inferred.type_id,
+            .state = if (inferred.valid) .resolved else .@"error",
+            .issue = inferred.issue,
+            .receiver_type = inferred.receiver_type,
+        };
+        for (self.nodes.items) |entry| if (entry.node_id == node_id) {
+            node_info.contextual_type = entry.contextual_type;
+            break;
+        };
+        try self.putNode(node_info);
+    }
+
     fn recordFlowNode(
         self: *Analyzer,
         node_id: ast.NodeId,
@@ -582,7 +677,8 @@ const Analyzer = struct {
         facts: *const dataflow.StateBuilder,
     ) !void {
         const base = self.baseTypeForKey(key);
-        const narrowed = facts.get(key) orelse base;
+        const active_fact = facts.get(key);
+        const narrowed = active_fact orelse base;
         const node_type = if ((base == self.store.builtins.any or base == self.store.builtins.unknown) and
             narrowed == self.store.builtins.object)
             base
@@ -592,8 +688,6 @@ const Analyzer = struct {
         for (self.nodes.items) |entry| if (entry.node_id == node_id) {
             node_info = entry;
             node_info.type_id = node_type;
-            node_info.state = .resolved;
-            node_info.issue = .none;
             break;
         };
         try self.putNode(node_info);
@@ -604,6 +698,7 @@ const Analyzer = struct {
             .symbol_id = key.symbol,
             .reference_node = node_id,
             .type_id = narrowed,
+            .narrowed = active_fact != null,
         });
         self.program_point += 1;
     }
