@@ -1314,7 +1314,7 @@ fn refreshProjectTypes(allocator: std.mem.Allocator, module_id: ModuleId, result
     const symbols = @constCast(info.symbols);
     try refreshReferenceTypes(allocator, result, symbols, &nodes, &type_store.builtins);
     _ = try type_inference.inferPrimitiveExpressionsWithCfgs(allocator, result.ast, &nodes, type_store, info.resolved_type_nodes, result.cfgs);
-    var changed = refreshVariableTypes(result, symbols, nodes.items, &type_store.builtins);
+    var changed = refreshVariableTypes(result, symbols, nodes.items, type_store);
     changed = (try refreshFunctionReturns(allocator, module_id, result, symbols, nodes.items, info.resolved_type_nodes, type_store)) or changed;
     info.nodes = try nodes.toOwnedSlice(allocator);
     return changed;
@@ -1346,16 +1346,37 @@ fn finishProjectTypes(
 ) !void {
     var nodes: std.ArrayList(NodeTypeInfo) = .{ .items = @constCast(info.nodes), .capacity = info.nodes.len };
     const narrowed = try narrowing.analyze(allocator, result, type_store, info.symbols, &nodes);
+
+    // Narrowing mutates reference/access nodes in-place. Freeze those leaf
+    // results before re-inference: parent expressions must be recomputed from
+    // the flow-sensitive leaves instead of reconstructing a property access
+    // from its pre-narrowing receiver type.
+    var flow_node_overrides: std.ArrayList(NodeTypeInfo) = .empty;
+    defer flow_node_overrides.deinit(allocator);
+    for (narrowed.flow_types) |flow| {
+        var already_present = false;
+        for (flow_node_overrides.items) |entry| if (entry.node_id == flow.reference_node) {
+            already_present = true;
+            break;
+        };
+        if (already_present) continue;
+        for (nodes.items) |entry| if (entry.node_id == flow.reference_node) {
+            try flow_node_overrides.append(allocator, entry);
+            break;
+        };
+    }
+
     // Retype dependent parent expressions from the narrowed reference map and
     // refresh inferred signatures so the checker validates the narrowed body
     // instead of stale pre-narrowing operands (BUG-0074).
-    _ = try type_inference.inferPrimitiveExpressionsWithCfgs(
+    _ = try type_inference.inferPrimitiveExpressionsWithCfgsPreserving(
         allocator,
         result.ast,
         &nodes,
         type_store,
         info.resolved_type_nodes,
         result.cfgs,
+        flow_node_overrides.items,
     );
     _ = try refreshFunctionReturns(
         allocator,
@@ -1594,7 +1615,7 @@ fn buildTypeInfo(
             collected.resolved_type_nodes,
             result.cfgs,
         );
-        const variables_changed = refreshVariableTypes(result, symbol_types.items, node_types.items, builtins);
+        const variables_changed = refreshVariableTypes(result, symbol_types.items, node_types.items, type_store);
         const parameters_changed = refreshParameterDefaultTypes(result, symbol_types.items, node_types.items, builtins);
         const functions_changed = try refreshFunctionReturns(
             allocator,
@@ -1646,7 +1667,7 @@ fn buildTypeInfo(
             collected.resolved_type_nodes,
             result.cfgs,
         );
-        const variables_changed = refreshVariableTypes(result, symbol_types.items, node_types.items, builtins);
+        const variables_changed = refreshVariableTypes(result, symbol_types.items, node_types.items, type_store);
         const parameters_changed = refreshParameterDefaultTypes(result, symbol_types.items, node_types.items, builtins);
         const functions_changed = try refreshFunctionReturns(
             allocator,
@@ -1972,8 +1993,9 @@ fn refreshVariableTypes(
     result: frontend.FrontendResult,
     symbol_types: []SymbolTypeInfo,
     node_types: []const NodeTypeInfo,
-    builtins: *const types.Builtins,
+    type_store: *types.TypeStore,
 ) bool {
+    const builtins = &type_store.builtins;
     var changed = false;
     for (result.bind.symbols) |symbol| {
         if (symbol.kind != .variable) continue;
@@ -1981,7 +2003,20 @@ fn refreshVariableTypes(
         if (entry.declared_type != null or entry.state == .@"error") continue;
         switch (result.ast.node(symbol.declaration).data) {
             .VariableDeclarator => |declarator| if (declarator.init) |initializer| {
-                const inferred = nodeType(node_types, initializer) orelse builtins.unknown;
+                var inferred = nodeType(node_types, initializer) orelse builtins.unknown;
+                // Mutable enum-member bindings widen to the owning enum nominal.
+                // The member's underlying literal TypeId is intentionally not
+                // used to discover ownership because equal literals may belong
+                // to unrelated enum declarations.
+                if (symbol.mutable) switch (result.ast.node(initializer).data) {
+                    .MemberExpression => |member| {
+                        const receiver = nodeType(node_types, member.object) orelse builtins.unknown;
+                        if (type_store.lookup(receiver)) |receiver_type| {
+                            if (receiver_type.kind == .enum_type) inferred = receiver;
+                        }
+                    },
+                    else => {},
+                };
                 if (entry.inferred_type == null or entry.inferred_type.? != inferred) {
                     entry.inferred_type = inferred;
                     changed = true;
@@ -3777,6 +3812,29 @@ test "Goal 121 expression-body arrows receive flow entries" {
     try std.testing.expect(result.type_info.flow_types.len != 0);
 }
 
+test "Goal 121 property access narrowing follows early exits and invalidates descendants" {
+    const source =
+        \\interface Box { value?: string; nested?: { count?: number } }
+        \\function text(box: Box): string {
+        \\  if (box.value === undefined) return "";
+        \\  return box.value;
+        \\}
+        \\function count(box: Box): number {
+        \\  if (box.nested === undefined) return 0;
+        \\  if (box.nested.count === undefined) return 0;
+        \\  return box.nested.count;
+        \\}
+    ;
+    var result = try analyze(std.testing.allocator, source);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+    const text_return = std.mem.indexOf(u8, source, "return box.value;") orelse unreachable;
+    const count_return = std.mem.lastIndexOf(u8, source, "return box.nested.count;") orelse unreachable;
+    try std.testing.expectEqual(result.type_store.builtins.string, testReferenceTypeAt(&result, text_return + "return ".len).?);
+    try std.testing.expectEqual(result.type_store.builtins.number, testReferenceTypeAt(&result, count_return + "return ".len).?);
+}
+
 test "Goal 123 checker covers every diagnostic family from canonical types" {
     var result = try analyze(std.testing.allocator,
         \\let initialized: number = "wrong";
@@ -4454,6 +4512,24 @@ test "BUG-0075 fixed TypeScript enum members resolve semantically with reverse m
     }
     try std.testing.expect(saw_unknown);
     try std.testing.expectEqual(@as(usize, 1), result.semantic_diagnostics.len);
+}
+
+test "mutable enum member initializer widens to owning enum" {
+    var result = try analyze(std.testing.allocator,
+        \\enum State { First, Second }
+        \\let state = State.First;
+        \\state = State.Second;
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.semantic_diagnostics.len);
+    var state_symbol: ?binder.SymbolId = null;
+    for (result.frontend.bind.symbols) |symbol| {
+        if (symbol.kind == .variable and std.mem.eql(u8, symbol.name, "state")) state_symbol = symbol.id;
+    }
+    const state_type = result.type_info.lookupSymbol(state_symbol.?).?.effective().?;
+    const ty = result.lookupType(state_type).?;
+    try std.testing.expect(ty.kind == .enum_type);
 }
 
 test "BUG-0075 string enum members are string literals and disable numeric reverse mapping" {

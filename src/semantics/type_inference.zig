@@ -161,12 +161,43 @@ pub fn inferPrimitiveExpressionsWithCfgs(
     resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
     cfgs: []const cfg_mod.FunctionCfg,
 ) !usize {
+    return inferPrimitiveExpressionsWithCfgsPreserving(
+        allocator,
+        tree,
+        entries,
+        store,
+        resolved_type_nodes,
+        cfgs,
+        &.{},
+    );
+}
+
+pub fn inferPrimitiveExpressionsWithCfgsPreserving(
+    allocator: std.mem.Allocator,
+    tree: ast_mod.Ast,
+    entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
+    store: *types.TypeStore,
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
+    cfgs: []const cfg_mod.FunctionCfg,
+    preserved_nodes: []const node_type_info_mod.NodeTypeInfo,
+) !usize {
     try entries.ensureTotalCapacity(allocator, entries.items.len + tree.nodes.len);
     var round: usize = 0;
     while (round <= tree.nodes.len) : (round += 1) {
         var changed = false;
         for (tree.nodes, 0..) |node, raw_id| {
             const id: ast_mod.NodeId = @intCast(raw_id);
+            if (findNodeInfo(preserved_nodes, id)) |preserved| {
+                changed = putType(
+                    entries,
+                    id,
+                    preserved.type_id,
+                    preserved.state == .resolved,
+                    preserved.issue,
+                    preserved.receiver_type,
+                ) or changed;
+                continue;
+            }
             const candidate = try inferNode(allocator, id, node.data, tree, entries.items, store, resolved_type_nodes, cfgs);
             if (candidate) |value| changed = putType(entries, id, value.type_id, value.valid, value.issue, value.receiver_type) or changed;
         }

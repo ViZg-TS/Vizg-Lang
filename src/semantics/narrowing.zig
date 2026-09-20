@@ -10,6 +10,13 @@ const type_info = @import("type_info.zig");
 
 pub const Result = struct { flow_types: []const type_info.FlowTypeInfo };
 
+const AccessPath = struct {
+    root_symbol: binder.SymbolId,
+    parent: ?u32,
+    property: []const u8,
+    base_type: types.TypeId,
+};
+
 const Analyzer = struct {
     allocator: std.mem.Allocator,
     frontend_result: frontend.FrontendResult,
@@ -17,11 +24,13 @@ const Analyzer = struct {
     symbols: []const type_info.SymbolTypeInfo,
     nodes: *std.ArrayList(type_info.NodeTypeInfo),
     flow: std.ArrayList(type_info.FlowTypeInfo) = .empty,
+    access_paths: std.ArrayList(AccessPath) = .empty,
     function_node: ast.NodeId = ast.invalid_node,
     block_id: cfg.BasicBlockId = 0,
     program_point: u32 = 0,
 
     fn run(self: *Analyzer) !Result {
+        defer self.access_paths.deinit(self.allocator);
         for (self.frontend_result.cfgs) |function_cfg| {
             self.function_node = function_cfg.function;
             var solved = try dataflow.solve(self.allocator, function_cfg.graph, &.{}, self);
@@ -57,7 +66,7 @@ const Analyzer = struct {
     pub fn mergeValues(self: *Analyzer, key: dataflow.FactKey, left: u32, right: u32) !?u32 {
         if (left == right) return left;
         const merged = try self.store.unionOf(&.{ left, right });
-        return if (merged == self.baseType(key.symbol)) null else merged;
+        return if (merged == self.baseTypeForKey(key)) null else merged;
     }
 
     fn processStatement(self: *Analyzer, node_id: ast.NodeId, facts: *dataflow.StateBuilder) anyerror!void {
@@ -104,23 +113,8 @@ const Analyzer = struct {
     fn processExpr(self: *Analyzer, node_id: ast.NodeId, facts: *dataflow.StateBuilder) anyerror!void {
         if (!self.valid(node_id)) return;
         switch (self.frontend_result.ast.node(node_id).data) {
-            .Identifier => if (self.symbolForNode(node_id)) |symbol| {
-                const base = self.baseType(symbol);
-                const narrowed = self.factType(facts, symbol) orelse base;
-                // `any`/`unknown` remain checker-facing dynamic types after a
-                // `typeof value === "object"` guard: TypeScript still permits
-                // dynamic indexed access there. The flow map nevertheless
-                // records the proven runtime receiver category so HIR
-                // reachability can distinguish object-only dynamic reads from
-                // a genuinely unconstrained `any` receiver.
-                const node_type = if ((base == self.store.builtins.any or base == self.store.builtins.unknown) and
-                    narrowed == self.store.builtins.object)
-                    base
-                else
-                    narrowed;
-                try self.putNode(.{ .node_id = node_id, .type_id = node_type });
-                try self.putFlow(.{ .function_node = self.function_node, .block_id = self.block_id, .program_point = self.program_point, .symbol_id = symbol, .reference_node = node_id, .type_id = narrowed });
-                self.program_point += 1;
+            .Identifier => if (try self.factKeyForNode(node_id)) |key| {
+                try self.recordFlowNode(node_id, key, facts);
             },
             .UnaryExpression => |value| try self.processExpr(value.argument, facts),
             .BinaryExpression => |value| {
@@ -170,7 +164,7 @@ const Analyzer = struct {
             },
             .UpdateExpression => |value| {
                 try self.processExpr(value.argument, facts);
-                if (self.symbolForNode(value.argument)) |symbol| self.removeFact(facts, symbol);
+                if (try self.factKeyForNode(value.argument)) |key| self.removeFactAndDescendants(facts, key);
             },
             .CallExpression => |value| {
                 try self.processExpr(value.callee, facts);
@@ -190,7 +184,10 @@ const Analyzer = struct {
                 try self.processExpr(value.callee, facts);
                 for (value.arguments) |argument| try self.processExpr(argument, facts);
             },
-            .MemberExpression => |value| try self.processExpr(value.object, facts),
+            .MemberExpression => |value| {
+                try self.processExpr(value.object, facts);
+                if (try self.factKeyForNode(node_id)) |key| try self.recordFlowNode(node_id, key, facts);
+            },
             .ElementAccessExpression => |value| {
                 try self.processExpr(value.object, facts);
                 if (self.optionalChainBase(value.object) != null or value.optional) {
@@ -204,6 +201,7 @@ const Analyzer = struct {
                     try self.processExpr(value.index, &taken);
                     try self.joinExpressionStates(facts, &skipped, &taken);
                 } else try self.processExpr(value.index, facts);
+                if (try self.factKeyForNode(node_id)) |key| try self.recordFlowNode(node_id, key, facts);
             },
             .AsExpression => |value| try self.processExpr(value.expression, facts),
             .SatisfiesExpression => |value| try self.processExpr(value.expression, facts),
@@ -236,11 +234,10 @@ const Analyzer = struct {
     }
 
     fn replaceAssignmentFact(self: *Analyzer, target: ast.NodeId, replacement: types.TypeId, facts: *dataflow.StateBuilder) !void {
-        const symbol = self.symbolForNode(target) orelse return;
-        if (replacement == self.store.builtins.unknown or replacement == self.store.builtins.any)
-            self.removeFact(facts, symbol)
-        else
-            try self.setFact(facts, symbol, replacement);
+        const key = (try self.factKeyForNode(target)) orelse return;
+        self.removeFactAndDescendants(facts, key);
+        if (replacement != self.store.builtins.unknown and replacement != self.store.builtins.any)
+            try facts.set(key, replacement);
     }
 
     fn joinExpressionStates(self: *Analyzer, output: *dataflow.StateBuilder, left: *const dataflow.StateBuilder, right: *const dataflow.StateBuilder) !void {
@@ -256,8 +253,8 @@ const Analyzer = struct {
     }
 
     fn applyNullishGuard(self: *Analyzer, node_id: ast.NodeId, keep_nullish: bool, facts: *dataflow.StateBuilder) !void {
-        const symbol = self.symbolForNode(node_id) orelse return;
-        try self.setFact(facts, symbol, try self.filterNullish(self.currentType(facts, symbol), keep_nullish));
+        const key = (try self.factKeyForNode(node_id)) orelse return;
+        try facts.set(key, try self.filterNullish(self.currentTypeForKey(facts, key), keep_nullish));
     }
 
     fn optionalChainBase(self: *Analyzer, node_id: ast.NodeId) ?ast.NodeId {
@@ -274,12 +271,23 @@ const Analyzer = struct {
         const data = self.frontend_result.ast.node(node_id).data;
         if (data == .UnaryExpression and data.UnaryExpression.operator == .Exclamation)
             return self.applyGuard(data.UnaryExpression.argument, !truthy, facts);
-        if (data == .Identifier) {
-            if (self.symbolForNode(node_id)) |symbol| try self.setFact(facts, symbol, try self.filterTruthiness(self.currentType(facts, symbol), truthy));
+        if (data == .Identifier or data == .MemberExpression or data == .ElementAccessExpression) {
+            if (try self.factKeyForNode(node_id)) |key|
+                try facts.set(key, try self.filterTruthiness(self.currentTypeForKey(facts, key), truthy));
             return;
         }
         if (data != .BinaryExpression) return;
         const binary = data.BinaryExpression;
+        if (binary.operator == .AmpersandAmpersand and truthy) {
+            try self.applyGuard(binary.left, true, facts);
+            try self.applyGuard(binary.right, true, facts);
+            return;
+        }
+        if (binary.operator == .BarBar and !truthy) {
+            try self.applyGuard(binary.left, false, facts);
+            try self.applyGuard(binary.right, false, facts);
+            return;
+        }
         const equality = switch (binary.operator) {
             .EqualsEquals, .EqualsEqualsEquals => true,
             .ExclamationEquals, .ExclamationEqualsEquals => false,
@@ -296,14 +304,14 @@ const Analyzer = struct {
         if (binary.operator == .Keyword_instanceof) {
             const constructor = self.store.lookup(self.nodeType(binary.right)) orelse return;
             if (constructor.kind != .class_constructor) return;
-            if (self.symbolForNode(binary.left)) |symbol| try self.setFact(
-                facts,
-                symbol,
-                try self.filterType(self.currentType(facts, symbol), constructor.kind.class_constructor.instance_type, truthy),
+            if (try self.factKeyForNode(binary.left)) |key| try facts.set(
+                key,
+                try self.filterType(self.currentTypeForKey(facts, key), constructor.kind.class_constructor.instance_type, truthy),
             );
         } else if (binary.operator == .Keyword_in and truthy) {
-            if (self.symbolForNode(binary.right)) |symbol| {
-                if (self.literalText(binary.left)) |name| try self.setFact(facts, symbol, try self.keepProperty(self.currentType(facts, symbol), name));
+            if (try self.factKeyForNode(binary.right)) |key| {
+                if (self.literalText(binary.left)) |name|
+                    try facts.set(key, try self.keepProperty(self.currentTypeForKey(facts, key), name));
             }
         }
     }
@@ -312,8 +320,8 @@ const Analyzer = struct {
         const left_data = self.frontend_result.ast.node(left).data;
         if (left_data != .UnaryExpression or left_data.UnaryExpression.operator != .Keyword_typeof) return false;
         const name = self.literalText(right) orelse return false;
-        const symbol = self.symbolForNode(left_data.UnaryExpression.argument) orelse return false;
-        const current = self.currentType(facts, symbol);
+        const key = (try self.factKeyForNode(left_data.UnaryExpression.argument)) orelse return false;
+        const current = self.currentTypeForKey(facts, key);
 
         // A dynamic receiver checked by `typeof` has a runtime category even
         // though its checker-facing TypeScript type remains `any`/`unknown`.
@@ -323,25 +331,25 @@ const Analyzer = struct {
             (current == self.store.builtins.any or current == self.store.builtins.unknown))
         {
             if (keep)
-                try self.setFact(facts, symbol, self.store.builtins.object)
+                try facts.set(key, self.store.builtins.object)
             else
-                self.removeFact(facts, symbol);
+                self.removeExactFact(facts, key);
             return true;
         }
 
         const wanted = if (std.mem.eql(u8, name, "string")) self.store.builtins.string else if (std.mem.eql(u8, name, "number")) self.store.builtins.number else if (std.mem.eql(u8, name, "boolean")) self.store.builtins.boolean else if (std.mem.eql(u8, name, "bigint")) self.store.builtins.bigint else if (std.mem.eql(u8, name, "symbol")) self.store.builtins.symbol else if (std.mem.eql(u8, name, "undefined")) self.store.builtins.undefined else return false;
-        try self.setFact(facts, symbol, try self.filterType(current, wanted, keep));
+        try facts.set(key, try self.filterType(current, wanted, keep));
         return true;
     }
 
     fn applyNullishEquality(self: *Analyzer, left: ast.NodeId, right: ast.NodeId, keep: bool, loose: bool, facts: *dataflow.StateBuilder) !bool {
         const wanted = if (self.isNull(right)) self.store.builtins.null_ else if (self.isUndefined(right)) self.store.builtins.undefined else return false;
-        const symbol = self.symbolForNode(left) orelse return false;
+        const key = (try self.factKeyForNode(left)) orelse return false;
         const narrowed = if (loose)
-            try self.filterNullish(self.currentType(facts, symbol), keep)
+            try self.filterNullish(self.currentTypeForKey(facts, key), keep)
         else
-            try self.filterType(self.currentType(facts, symbol), wanted, keep);
-        try self.setFact(facts, symbol, narrowed);
+            try self.filterType(self.currentTypeForKey(facts, key), wanted, keep);
+        try facts.set(key, narrowed);
         return true;
     }
 
@@ -472,29 +480,134 @@ const Analyzer = struct {
         return false;
     }
 
-    fn setFact(_: *Analyzer, facts: *dataflow.StateBuilder, symbol: binder.SymbolId, type_id: types.TypeId) !void {
-        try facts.set(.{ .symbol = symbol }, type_id);
+    fn removeExactFact(_: *Analyzer, facts: *dataflow.StateBuilder, key: dataflow.FactKey) void {
+        facts.remove(key);
     }
-    fn removeFact(_: *Analyzer, facts: *dataflow.StateBuilder, symbol: binder.SymbolId) void {
-        facts.remove(.{ .symbol = symbol });
+
+    fn removeFactAndDescendants(self: *Analyzer, facts: *dataflow.StateBuilder, key: dataflow.FactKey) void {
+        var index = facts.facts.items.len;
+        while (index > 0) {
+            index -= 1;
+            const candidate = facts.facts.items[index].key;
+            if (candidate.symbol != key.symbol) continue;
+            const remove = if (key.access_path == null)
+                true
+            else if (candidate.access_path) |candidate_path|
+                candidate_path == key.access_path.? or self.accessPathDescendsFrom(candidate_path, key.access_path.?)
+            else
+                false;
+            if (remove) _ = facts.facts.swapRemove(index);
+        }
     }
+
     fn invalidateDeclaration(self: *Analyzer, declaration: ast.NodeId, facts: *dataflow.StateBuilder) void {
-        for (self.frontend_result.bind.symbols) |symbol| if (symbol.declaration == declaration) self.removeFact(facts, symbol.id);
+        for (self.frontend_result.bind.symbols) |symbol| if (symbol.declaration == declaration)
+            self.removeFactAndDescendants(facts, .{ .symbol = symbol.id });
     }
-    fn factType(_: *Analyzer, facts: *const dataflow.StateBuilder, symbol: binder.SymbolId) ?types.TypeId {
-        return facts.get(.{ .symbol = symbol });
+
+    fn currentTypeForKey(self: *Analyzer, facts: *const dataflow.StateBuilder, key: dataflow.FactKey) types.TypeId {
+        return facts.get(key) orelse self.baseTypeForKey(key);
     }
-    fn currentType(self: *Analyzer, facts: *const dataflow.StateBuilder, symbol: binder.SymbolId) types.TypeId {
-        return self.factType(facts, symbol) orelse self.baseType(symbol);
+
+    fn baseTypeForKey(self: *Analyzer, key: dataflow.FactKey) types.TypeId {
+        if (key.access_path) |path_id| {
+            if (@as(usize, @intCast(path_id)) < self.access_paths.items.len)
+                return self.access_paths.items[@intCast(path_id)].base_type;
+            return self.store.builtins.unknown;
+        }
+        return self.baseType(key.symbol);
     }
+
     fn baseType(self: *Analyzer, symbol: binder.SymbolId) types.TypeId {
         for (self.symbols) |entry| if (entry.symbol_id == symbol) return entry.effective() orelse self.store.builtins.unknown;
         return self.store.builtins.unknown;
     }
+
     fn symbolForNode(self: *Analyzer, node: ast.NodeId) ?binder.SymbolId {
         for (self.frontend_result.resolve.references) |reference| if (reference.node == node) return reference.symbol;
         return null;
     }
+
+    fn factKeyForNode(self: *Analyzer, node: ast.NodeId) !?dataflow.FactKey {
+        if (!self.valid(node)) return null;
+        return switch (self.frontend_result.ast.node(node).data) {
+            .Identifier => if (self.symbolForNode(node)) |symbol| .{ .symbol = symbol } else null,
+            .MemberExpression => |member| blk: {
+                const parent = (try self.factKeyForNode(member.object)) orelse break :blk null;
+                break :blk try self.internAccessPath(parent, member.property, node);
+            },
+            .ElementAccessExpression => |element| blk: {
+                const property = self.literalText(element.index) orelse break :blk null;
+                const parent = (try self.factKeyForNode(element.object)) orelse break :blk null;
+                break :blk try self.internAccessPath(parent, property, node);
+            },
+            else => null,
+        };
+    }
+
+    fn internAccessPath(
+        self: *Analyzer,
+        parent: dataflow.FactKey,
+        property: []const u8,
+        representative: ast.NodeId,
+    ) !dataflow.FactKey {
+        for (self.access_paths.items, 0..) |path, index| {
+            if (path.root_symbol != parent.symbol or path.parent != parent.access_path) continue;
+            if (!std.mem.eql(u8, path.property, property)) continue;
+            return .{ .symbol = parent.symbol, .access_path = @intCast(index) };
+        }
+        try self.access_paths.append(self.allocator, .{
+            .root_symbol = parent.symbol,
+            .parent = parent.access_path,
+            .property = property,
+            .base_type = self.nodeType(representative),
+        });
+        return .{ .symbol = parent.symbol, .access_path = @intCast(self.access_paths.items.len - 1) };
+    }
+
+    fn accessPathDescendsFrom(self: *Analyzer, candidate: u32, ancestor: u32) bool {
+        var current: ?u32 = candidate;
+        while (current) |path_id| {
+            if (path_id == ancestor) return true;
+            if (@as(usize, @intCast(path_id)) >= self.access_paths.items.len) return false;
+            current = self.access_paths.items[@intCast(path_id)].parent;
+        }
+        return false;
+    }
+
+    fn recordFlowNode(
+        self: *Analyzer,
+        node_id: ast.NodeId,
+        key: dataflow.FactKey,
+        facts: *const dataflow.StateBuilder,
+    ) !void {
+        const base = self.baseTypeForKey(key);
+        const narrowed = facts.get(key) orelse base;
+        const node_type = if ((base == self.store.builtins.any or base == self.store.builtins.unknown) and
+            narrowed == self.store.builtins.object)
+            base
+        else
+            narrowed;
+        var node_info = type_info.NodeTypeInfo{ .node_id = node_id, .type_id = node_type };
+        for (self.nodes.items) |entry| if (entry.node_id == node_id) {
+            node_info = entry;
+            node_info.type_id = node_type;
+            node_info.state = .resolved;
+            node_info.issue = .none;
+            break;
+        };
+        try self.putNode(node_info);
+        try self.putFlow(.{
+            .function_node = self.function_node,
+            .block_id = self.block_id,
+            .program_point = self.program_point,
+            .symbol_id = key.symbol,
+            .reference_node = node_id,
+            .type_id = narrowed,
+        });
+        self.program_point += 1;
+    }
+
     fn nodeType(self: *Analyzer, node: ast.NodeId) types.TypeId {
         for (self.nodes.items) |entry| if (entry.node_id == node) return entry.type_id;
         return self.store.builtins.unknown;
