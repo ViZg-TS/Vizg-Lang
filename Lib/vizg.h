@@ -9,7 +9,7 @@
 #define VIZG_ABI_VERSION 1u
 #define VIZG_HIR_API_VERSION 2u
 #define VIZG_HIR_PAYLOAD_API_VERSION 1u
-#define VIZG_HIR_DETAIL_API_VERSION 9u
+#define VIZG_HIR_DETAIL_API_VERSION 10u
 #define VIZG_HIR_REACHABILITY_API_VERSION 4u
 #define VIZG_HIR_CONSUMER_API_VERSION 1u
 #define VIZG_EXTERNAL_MODULE_API_VERSION 4u
@@ -1467,6 +1467,14 @@ Vizg_ProjectStatus vizg_hir_type_member_count(
 Vizg_ProjectStatus vizg_hir_type_member_at(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     uint32_t type_id, size_t index, Vizg_HirTypeMember *out_member);
+/* HIR detail API v10: primitive carrier for a TypeScript literal type. */
+Vizg_ProjectStatus vizg_hir_literal_value_type(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint32_t type_id, uint32_t *out_type_id);
+/* HIR detail API v10: semantic carrier for values typed as a TypeScript enum. */
+Vizg_ProjectStatus vizg_hir_enum_value_type(
+    const Vizg_ProjectResult *result, uint32_t requested_version,
+    uint32_t type_id, uint32_t *out_type_id);
 Vizg_ProjectStatus vizg_hir_array_element_type(
     const Vizg_ProjectResult *result, uint32_t requested_version,
     uint32_t type_id, uint32_t *out_type_id);

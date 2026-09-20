@@ -7,7 +7,7 @@ const vizg = @import("vizg-impl");
 pub const VIZG_ABI_VERSION: u32 = 1;
 pub const VIZG_HIR_API_VERSION: u32 = 2;
 pub const VIZG_HIR_PAYLOAD_API_VERSION: u32 = 1;
-pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 9;
+pub const VIZG_HIR_DETAIL_API_VERSION: u32 = 10;
 pub const VIZG_HIR_REACHABILITY_API_VERSION: u32 = 4;
 pub const VIZG_HIR_CONSUMER_API_VERSION: u32 = 1;
 pub const VIZG_EXTERNAL_MODULE_API_VERSION: u32 = 4;
@@ -3394,6 +3394,43 @@ pub fn hirTypeMemberAt(
     return .OK;
 }
 
+/// HIR detail API v10: returns the primitive value carrier of a literal
+/// semantic type.
+pub fn hirLiteralValueType(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    type_id: u32,
+    out_type_id: ?*u32,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version < 10) return .INVALID_STATE;
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_type_id orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(u32, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(u32))) return .INVALID_ARGUMENT;
+    const store = &(owned.hir_result.?.type_store orelse return .INVALID_STATE);
+    output.* = store.literalValueType(type_id) orelse return .INVALID_ARGUMENT;
+    return .OK;
+}
+
+/// HIR detail API v10: returns the semantic value carrier of a TypeScript
+/// enum nominal. The declaration value remains a managed enum object; this
+/// query is exclusively for values whose static type is the enum itself.
+pub fn hirEnumValueType(
+    result: ?*const Vizg_ProjectResult,
+    requested_version: u32,
+    type_id: u32,
+    out_type_id: ?*u32,
+) callconv(.c) Vizg_ProjectStatus {
+    if (requested_version < 10) return .INVALID_STATE;
+    const owned = hirDetailOwned(result, requested_version) orelse return .INVALID_STATE;
+    const output = out_type_id orelse return .INVALID_ARGUMENT;
+    if (!validAlignedMutableHostArray(u32, output, 1) or
+        !outputOutsideWorkspace(owned, output, @sizeOf(u32))) return .INVALID_ARGUMENT;
+    const store = &(owned.hir_result.?.type_store orelse return .INVALID_STATE);
+    output.* = store.enumValueType(type_id) orelse return .INVALID_ARGUMENT;
+    return .OK;
+}
+
 pub fn hirArrayElementType(
     result: ?*const Vizg_ProjectResult,
     requested_version: u32,
@@ -4554,6 +4591,8 @@ comptime {
     @export(&hirExternalTypeIdentity, .{ .name = "vizg_hir_external_type_identity" });
     @export(&hirTypeMemberCount, .{ .name = "vizg_hir_type_member_count" });
     @export(&hirTypeMemberAt, .{ .name = "vizg_hir_type_member_at" });
+    @export(&hirLiteralValueType, .{ .name = "vizg_hir_literal_value_type" });
+    @export(&hirEnumValueType, .{ .name = "vizg_hir_enum_value_type" });
     @export(&hirArrayElementType, .{ .name = "vizg_hir_array_element_type" });
     @export(&hirAppliedGenericTarget, .{ .name = "vizg_hir_applied_generic_target" });
     @export(&hirFunctionSignature, .{ .name = "vizg_hir_function_signature" });

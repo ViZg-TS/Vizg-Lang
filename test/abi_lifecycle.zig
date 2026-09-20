@@ -1050,6 +1050,141 @@ test "versioned C HIR consumer reads immutable result records" {
     );
 }
 
+test "HIR detail v10 exposes TypeScript enum and literal value carriers" {
+    var workspace = try Workspace.init(8 * 1024 * 1024);
+    defer workspace.deinit();
+    const project = try createProject(workspace);
+    defer c.vizg_project_destroy(project);
+
+    var root = projectSource(
+        70,
+        "enum-carrier.ts",
+        \\enum Numeric { Zero, One = 4 }
+        \\enum Text { Red = "red", Green = "green" }
+        \\enum Mixed { Zero = 0, Red = "red" }
+        \\export const numeric: Numeric = Numeric.One;
+        \\export const text: Text = Text.Red;
+        \\export const mixed: Mixed = Mixed.Red;
+    ,
+        true,
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_project_add_source(project, &root),
+    );
+    const result = try finishProject(project);
+
+    var summary: c.Vizg_HirSummary = undefined;
+    try std.testing.expectEqual(
+        @as(u32, c.VIZG_PROJECT_STATUS_OK),
+        c.vizg_hir_summary(result, c.VIZG_HIR_API_VERSION, &summary),
+    );
+
+    var number_type: ?u32 = null;
+    var string_type: ?u32 = null;
+    var unknown_type: ?u32 = null;
+    for (0..summary.type_count) |index| {
+        var detail: c.Vizg_HirTypeDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+        );
+        if (detail.kind != c.VIZG_HIR_TYPE_PRIMITIVE) continue;
+        switch (detail.builtin_kind) {
+            c.VIZG_HIR_BUILTIN_NUMBER => number_type = detail.id,
+            c.VIZG_HIR_BUILTIN_STRING => string_type = detail.id,
+            c.VIZG_HIR_BUILTIN_UNKNOWN => unknown_type = detail.id,
+            else => {},
+        }
+    }
+    try std.testing.expect(number_type != null and string_type != null and unknown_type != null);
+
+    var numeric_count: usize = 0;
+    var string_count: usize = 0;
+    var dynamic_count: usize = 0;
+    var checked_old_version = false;
+    for (0..summary.type_count) |index| {
+        var detail: c.Vizg_HirTypeDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+        );
+        if (detail.kind != c.VIZG_HIR_TYPE_ENUM) continue;
+
+        var carrier: u32 = 0;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_enum_value_type(
+                result,
+                c.VIZG_HIR_DETAIL_API_VERSION,
+                detail.id,
+                &carrier,
+            ),
+        );
+        if (!checked_old_version) {
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+                c.vizg_hir_enum_value_type(result, 9, detail.id, &carrier),
+            );
+            checked_old_version = true;
+        }
+        if (carrier == number_type.?) {
+            numeric_count += 1;
+        } else if (carrier == string_type.?) {
+            string_count += 1;
+        } else if (carrier == unknown_type.?) {
+            dynamic_count += 1;
+        } else {
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    try std.testing.expect(checked_old_version);
+    try std.testing.expectEqual(@as(usize, 1), numeric_count);
+    try std.testing.expectEqual(@as(usize, 1), string_count);
+    try std.testing.expectEqual(@as(usize, 1), dynamic_count);
+
+    var numeric_literal_count: usize = 0;
+    var string_literal_count: usize = 0;
+    var checked_literal_old_version = false;
+    for (0..summary.type_count) |index| {
+        var detail: c.Vizg_HirTypeDetail = undefined;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_type_detail_at(result, c.VIZG_HIR_DETAIL_API_VERSION, index, &detail),
+        );
+        if (detail.kind != c.VIZG_HIR_TYPE_LITERAL) continue;
+
+        var carrier: u32 = 0;
+        try std.testing.expectEqual(
+            @as(u32, c.VIZG_PROJECT_STATUS_OK),
+            c.vizg_hir_literal_value_type(
+                result,
+                c.VIZG_HIR_DETAIL_API_VERSION,
+                detail.id,
+                &carrier,
+            ),
+        );
+        if (!checked_literal_old_version) {
+            try std.testing.expectEqual(
+                @as(u32, c.VIZG_PROJECT_STATUS_INVALID_STATE),
+                c.vizg_hir_literal_value_type(result, 9, detail.id, &carrier),
+            );
+            checked_literal_old_version = true;
+        }
+        if (carrier == number_type.?) {
+            numeric_literal_count += 1;
+        } else if (carrier == string_type.?) {
+            string_literal_count += 1;
+        } else {
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expect(checked_literal_old_version);
+    try std.testing.expect(numeric_literal_count >= 1);
+    try std.testing.expect(string_literal_count >= 1);
+}
+
 test "HIR detail v6 exposes ordered semantic class composition" {
     var workspace = try Workspace.init(8 * 1024 * 1024);
     defer workspace.deinit();

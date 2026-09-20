@@ -373,6 +373,63 @@ pub const TypeStore = struct {
         return ty.kind.applied_generic.resolved_target;
     }
 
+    /// Returns the primitive runtime value domain carried by a literal type.
+    ///
+    /// Literal identity is compile-time type information; runtime storage uses
+    /// the corresponding primitive value carrier.
+    pub fn literalValueType(self: *const TypeStore, type_id: model.TypeId) ?model.TypeId {
+        const ty = self.lookup(type_id) orelse return null;
+        return switch (ty.kind) {
+            .literal => |literal| switch (literal) {
+                .boolean => self.builtins.boolean,
+                .number => self.builtins.number,
+                .bigint => self.builtins.bigint,
+                .string => self.builtins.string,
+            },
+            else => null,
+        };
+    }
+
+    /// Returns the runtime value domain carried by a TypeScript enum nominal.
+    ///
+    /// The enum declaration itself remains an object in the value namespace;
+    /// this query describes values typed as the enum. Homogeneous numeric and
+    /// string enums collapse to their primitive builtin carrier. Empty,
+    /// heterogeneous, or otherwise non-reducible enums use unknown, which
+    /// preserves the member value losslessly for downstream dynamic carriers.
+    pub fn enumValueType(self: *const TypeStore, type_id: model.TypeId) ?model.TypeId {
+        const ty = self.lookup(type_id) orelse return null;
+        const nominal = switch (ty.kind) {
+            .enum_type => |value| value,
+            else => return null,
+        };
+        if (nominal.members.members.len == 0) return self.builtins.unknown;
+
+        var domain: ?model.TypeId = null;
+        for (nominal.members.members) |member| {
+            const member_type = self.lookup(member.type_id) orelse return self.builtins.unknown;
+            const current: model.TypeId = switch (member_type.kind) {
+                .literal => |literal| switch (literal) {
+                    .number => self.builtins.number,
+                    .string => self.builtins.string,
+                    else => return self.builtins.unknown,
+                },
+                .primitive => |primitive| switch (primitive) {
+                    .number => self.builtins.number,
+                    .string => self.builtins.string,
+                    else => return self.builtins.unknown,
+                },
+                else => return self.builtins.unknown,
+            };
+            if (domain) |existing| {
+                if (existing != current) return self.builtins.unknown;
+            } else {
+                domain = current;
+            }
+        }
+        return domain orelse self.builtins.unknown;
+    }
+
     fn substituteInner(
         self: *TypeStore,
         type_id: model.TypeId,
@@ -1022,7 +1079,11 @@ pub const TypeStore = struct {
     }
 
     fn cloneNominal(self: *TypeStore, nominal: model.NominalType) !model.NominalType {
-        return .{ .identity = nominal.identity, .name = try self.allocator.dupe(u8, nominal.name) };
+        return .{
+            .identity = nominal.identity,
+            .name = try self.allocator.dupe(u8, nominal.name),
+            .members = try self.cloneMemberTable(nominal.members),
+        };
     }
 
     fn cloneMemberTable(self: *TypeStore, table: model.MemberTable) !model.MemberTable {
@@ -1329,6 +1390,69 @@ test "Goal 155 nominal completion is one-shot and preserves stable identity" {
         .name = "Pair",
         .members = .{},
     } }));
+}
+
+test "literal value domains preserve primitive runtime carriers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+
+    const yes = try store.intern(.{ .literal = .{ .boolean = true } });
+    const one = try store.intern(.{ .literal = .{ .number = 1 } });
+    const big = try store.intern(.{ .literal = .{ .bigint = "1n" } });
+    const text = try store.intern(.{ .literal = .{ .string = "\"x\"" } });
+
+    try std.testing.expectEqual(store.builtins.boolean, store.literalValueType(yes).?);
+    try std.testing.expectEqual(store.builtins.number, store.literalValueType(one).?);
+    try std.testing.expectEqual(store.builtins.bigint, store.literalValueType(big).?);
+    try std.testing.expectEqual(store.builtins.string, store.literalValueType(text).?);
+    try std.testing.expect(store.literalValueType(store.builtins.number) == null);
+
+    const readonly = try store.cloneReadOnly(arena.allocator());
+    try std.testing.expectEqual(readonly.builtins.boolean, readonly.literalValueType(yes).?);
+    try std.testing.expectEqual(readonly.builtins.number, readonly.literalValueType(one).?);
+    try std.testing.expectEqual(readonly.builtins.bigint, readonly.literalValueType(big).?);
+    try std.testing.expectEqual(readonly.builtins.string, readonly.literalValueType(text).?);
+}
+
+test "enum value domains distinguish declaration object identity from member carriers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var store = TypeStore.init(arena.allocator());
+
+    const numeric_identity = model.SemanticDeclId.init(12, 1);
+    const numeric = try store.createEnumSemanticType(numeric_identity, "Numeric");
+    const zero = try store.intern(.{ .literal = .{ .number = 0 } });
+    const one = try store.intern(.{ .literal = .{ .number = 1 } });
+    try store.completeEnumSemanticType(numeric_identity, .{ .members = &.{
+        .{ .name = "Zero", .type_id = zero, .readonly = true },
+        .{ .name = "One", .type_id = one, .readonly = true },
+    } }, false);
+    try std.testing.expectEqual(store.builtins.number, store.enumValueType(numeric.type_id).?);
+
+    const string_identity = model.SemanticDeclId.init(12, 2);
+    const strings = try store.createEnumSemanticType(string_identity, "Strings");
+    const red = try store.intern(.{ .literal = .{ .string = "\"red\"" } });
+    const green = try store.intern(.{ .literal = .{ .string = "\"green\"" } });
+    try store.completeEnumSemanticType(string_identity, .{ .members = &.{
+        .{ .name = "Red", .type_id = red, .readonly = true },
+        .{ .name = "Green", .type_id = green, .readonly = true },
+    } }, true);
+    try std.testing.expectEqual(store.builtins.string, store.enumValueType(strings.type_id).?);
+
+    const mixed_identity = model.SemanticDeclId.init(12, 3);
+    const mixed = try store.createEnumSemanticType(mixed_identity, "Mixed");
+    try store.completeEnumSemanticType(mixed_identity, .{ .members = &.{
+        .{ .name = "Zero", .type_id = zero, .readonly = true },
+        .{ .name = "Red", .type_id = red, .readonly = true },
+    } }, true);
+    try std.testing.expectEqual(store.builtins.unknown, store.enumValueType(mixed.type_id).?);
+    try std.testing.expect(store.enumValueType(store.builtins.number) == null);
+
+    const readonly = try store.cloneReadOnly(arena.allocator());
+    try std.testing.expectEqual(readonly.builtins.number, readonly.enumValueType(numeric.type_id).?);
+    try std.testing.expectEqual(readonly.builtins.string, readonly.enumValueType(strings.type_id).?);
+    try std.testing.expectEqual(readonly.builtins.unknown, readonly.enumValueType(mixed.type_id).?);
 }
 
 test "Goal 155 object shape keys ignore source property order" {
