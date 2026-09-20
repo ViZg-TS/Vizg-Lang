@@ -397,6 +397,16 @@ pub fn collectDeclaredTypesInModuleWithImportsAndValuesAndLimit(
                 if (declaredType(declared.items, symbol.id) == null)
                     try putDeclared(&declared, allocator, symbol.id, try resolveTypeAnnotation(&context, annotation));
             },
+            .ClassMethod => |method| if (!complete_nominals and symbol.kind == .method) {
+                _ = try collectMethodSignature(
+                    &context,
+                    symbol.scope,
+                    method,
+                    symbol,
+                    null,
+                    &signatures,
+                );
+            },
             else => {},
         }
     }

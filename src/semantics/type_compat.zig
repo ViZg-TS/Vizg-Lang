@@ -171,6 +171,17 @@ const Checker = struct {
         if (target_type.kind == .applied_generic and self.appliedInterface(target_type.kind.applied_generic) != null)
             return self.compareAppliedInterfaceTarget(source, target, target_type.kind.applied_generic, 0);
 
+        // Enum member expressions keep their underlying literal TypeId so they
+        // remain assignable to primitive sinks, but that literal is also a
+        // value of the enum nominal that owns the member.
+        if (target_type.kind == .enum_type) {
+            if (self.store.lookupEnumSemanticType(target_type.kind.enum_type.identity)) |enum_semantic| {
+                for (enum_semantic.members.members) |member| {
+                    if (source == member.type_id) return .compatible;
+                }
+            }
+        }
+
         if (source_type.kind == .union_type) {
             for (source_type.kind.union_type, 0..) |member, index| {
                 self.push(.{ .source_union_member = index });
@@ -902,4 +913,20 @@ test "Goal 156 source intersections combine structural members" {
     } });
 
     try testing.expect(check(source, target, &store).isCompatible());
+}
+
+test "enum member literal is assignable to owning enum nominal" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var store = types.TypeStore.init(arena.allocator());
+
+    const identity = types.SemanticDeclId.init(1, 7);
+    const semantic = try store.createEnumSemanticType(identity, "ScopeKind");
+    const program = try store.intern(.{ .literal = .{ .number = 0 } });
+    try store.completeEnumSemanticType(identity, .{ .members = &.{
+        .{ .name = "Program", .type_id = program, .readonly = true },
+    } }, false);
+
+    try testing.expect(check(program, semantic.type_id, &store).isCompatible());
+    try testing.expect(!check(store.builtins.number, semantic.type_id, &store).isCompatible());
 }

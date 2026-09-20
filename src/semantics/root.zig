@@ -1207,10 +1207,21 @@ fn collectSemanticImports(
                 target = if (type_only) type_namespace else value_namespace;
                 type_target = type_namespace;
                 state = .namespace;
-            } else if (exportIndex(exports, target_module, link.imported_name, type_only)) |index| {
-                target = if (type_only) exports[index].type_identity orelse exports[index].identity else exports[index].identity;
-                type_target = exports[index].type_identity;
-                state = .resolved;
+            } else if (type_only) {
+                if (exportIndex(exports, target_module, link.imported_name, true)) |type_index| {
+                    target = exports[type_index].type_identity orelse exports[type_index].identity;
+                    type_target = exports[type_index].type_identity orelse target;
+                    state = .resolved;
+                }
+            } else {
+                if (exportIndex(exports, target_module, link.imported_name, false)) |value_index| {
+                    target = exports[value_index].identity;
+                    type_target = exports[value_index].type_identity;
+                }
+                if (exportIndex(exports, target_module, link.imported_name, true)) |type_index| {
+                    type_target = exports[type_index].type_identity orelse exports[type_index].identity;
+                }
+                if (target != null or type_target != null) state = .resolved;
             }
         }
         try imports.append(allocator, .{
@@ -1224,7 +1235,7 @@ fn collectSemanticImports(
             .local_name = link.local_name,
             .imported_name = link.imported_name,
             .type_only = type_only,
-            .runtime_binding = !type_only and state != .unresolved and state != .cyclic_partial,
+            .runtime_binding = !type_only and target != null and state != .unresolved and state != .cyclic_partial,
             .state = state,
             .target = target,
             .type_target = type_target,

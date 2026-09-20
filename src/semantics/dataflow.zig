@@ -3,6 +3,9 @@ const cfg = @import("../frontend/cfg.zig");
 
 pub const FactKey = struct {
     symbol: u32,
+    /// Analyzer-owned canonical path below the root symbol. Null denotes the
+    /// binding itself; the dataflow engine treats this as an opaque identity.
+    access_path: ?u32 = null,
     /// Null for a block state. Set for a fact captured at a reference/program
     /// point, so consumers can distinguish two uses in the same block.
     reference: ?u32 = null,
@@ -201,12 +204,19 @@ fn eqlState(left: State, right: State) bool {
 }
 
 fn eqlKey(left: FactKey, right: FactKey) bool {
-    return left.symbol == right.symbol and left.reference == right.reference;
+    return left.symbol == right.symbol and left.access_path == right.access_path and left.reference == right.reference;
 }
 
 fn orderKey(left: FactKey, right: FactKey) std.math.Order {
     if (left.symbol < right.symbol) return .lt;
     if (left.symbol > right.symbol) return .gt;
+    if (left.access_path == null and right.access_path != null) return .lt;
+    if (left.access_path != null and right.access_path == null) return .gt;
+    if (left.access_path) |left_path| {
+        const right_path = right.access_path.?;
+        if (left_path < right_path) return .lt;
+        if (left_path > right_path) return .gt;
+    }
     if (left.reference == null and right.reference != null) return .lt;
     if (left.reference != null and right.reference == null) return .gt;
     if (left.reference) |left_reference| {

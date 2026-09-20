@@ -171,6 +171,10 @@ pub fn inferPrimitiveExpressionsWithCfgs(
             if (candidate) |value| changed = putType(entries, id, value.type_id, value.valid, value.issue, value.receiver_type) or changed;
         }
         changed = (try applyAggregateContexts(tree, entries, store, resolved_type_nodes)) or changed;
+        changed = applyCallContexts(tree, entries, store) or changed;
+        changed = applyReturnContexts(tree, entries, store, resolved_type_nodes) or changed;
+        changed = applyConditionalContexts(tree, entries, store) or changed;
+        changed = (try applyContextualObjectMembers(tree, entries, store)) or changed;
         if (!changed) return round + 1;
     }
     return round;
@@ -1165,6 +1169,19 @@ fn inferArray(
     if (findNodeInfo(entries, node_id)) |node_info| {
         if (node_info.contextual_type) |contextual| {
             if (store.lookup(contextual)) |contextual_type| switch (contextual_type.kind) {
+                .array => |declared_array| {
+                    // An empty array literal has no source element from which to
+                    // infer a more specific element type. In a contextual array
+                    // position, preserve the declared element type instead of
+                    // manufacturing unknown[], which would incorrectly reject
+                    // ordinary typed empty-array initializers.
+                    if (array.elements.len == 0) {
+                        return store.intern(.{ .array = .{
+                            .element_type = declared_array.element_type,
+                            .readonly = declared_array.readonly,
+                        } });
+                    }
+                },
                 .tuple => |tuple| {
                     var elements = try store.allocator.alloc(types.TupleElement, array.elements.len);
                     for (array.elements, 0..) |maybe_element, index| {
@@ -1252,21 +1269,29 @@ fn inferObject(
     }
 
     // Materialize one reserved recursive identity, then reuse it on later rounds.
+    // A recovery placeholder such as unknown is not evidence of recursion:
+    // on early fixed-point rounds both the object literal and unresolved child
+    // references may temporarily share that builtin TypeId. Treating that
+    // coincidence as self-reference permanently poisons ordinary object
+    // literals. Only an already materialized object shell may participate in
+    // recursive-shape detection.
     if (findType(entries, node_id)) |prior| {
         if (store.lookup(prior)) |prior_type| switch (prior_type.kind) {
-            .object => |prior_properties| if (objectShellMatches(prior_properties, properties.items, prior)) return prior,
+            .object => |prior_properties| {
+                if (objectShellMatches(prior_properties, properties.items, prior)) return prior;
+                var contains_prior = false;
+                for (properties.items) |property| contains_prior = contains_prior or property.type_id == prior;
+                if (contains_prior) {
+                    const recursive = try store.reserve();
+                    for (properties.items) |*property| if (property.type_id == prior) {
+                        property.type_id = recursive;
+                    };
+                    try store.defineReserved(recursive, .{ .object = properties.items });
+                    return recursive;
+                }
+            },
             else => {},
         };
-        var contains_prior = false;
-        for (properties.items) |property| contains_prior = contains_prior or property.type_id == prior;
-        if (contains_prior) {
-            const recursive = try store.reserve();
-            for (properties.items) |*property| if (property.type_id == prior) {
-                property.type_id = recursive;
-            };
-            try store.defineReserved(recursive, .{ .object = properties.items });
-            return recursive;
-        }
     }
     return store.intern(.{ .object = properties.items });
 }
@@ -1607,6 +1632,163 @@ fn sequenceCanFallThrough(statements: []const ast_mod.NodeId, tree: ast_mod.Ast)
 
 /// Store declared-annotation types as the contextual hint without overwriting
 /// the actual source-inferred expression type. Child inference proceeds from
+/// Propagate direct callable parameter types into argument expressions. This
+/// is intentionally a context pass rather than part of call validation: the
+/// next inference round can then type empty arrays and other context-sensitive
+/// literals from the parameter contract before assignability is checked.
+fn applyCallContexts(
+    tree: ast_mod.Ast,
+    entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
+    store: *types.TypeStore,
+) bool {
+    var changed = false;
+    for (tree.nodes) |node| switch (node.data) {
+        .CallExpression => |call| {
+            const callee_type = findType(entries.items, call.callee) orelse continue;
+            const signature = callableSignature(callee_type, store) orelse continue;
+            for (call.arguments, 0..) |argument, index| {
+                const parameter = parameterForArgument(signature, index) orelse continue;
+                changed = putContextualType(
+                    entries,
+                    argument,
+                    restArgumentType(parameter, store),
+                    store.builtins.unknown,
+                ) or changed;
+            }
+        },
+        else => {},
+    };
+    return changed;
+}
+
+fn applyReturnContexts(
+    tree: ast_mod.Ast,
+    entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
+    store: *types.TypeStore,
+    resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
+) bool {
+    var changed = false;
+    for (tree.nodes, 0..) |_, raw_id| {
+        const node_id: ast_mod.NodeId = @intCast(raw_id);
+        const function = function_like.describe(tree, node_id) orelse continue;
+        const annotation = function.return_type orelse continue;
+        const expected = lookupResolvedTypeAnnotation(annotation, resolved_type_nodes, store);
+        if (function.expression_body) {
+            changed = putContextualType(entries, function.body, expected, store.builtins.unknown) or changed;
+        } else {
+            changed = applyReturnContextInNode(tree, function.body, expected, entries, store) or changed;
+        }
+    }
+    return changed;
+}
+
+fn applyReturnContextInNode(
+    tree: ast_mod.Ast,
+    node_id: ast_mod.NodeId,
+    expected: types.TypeId,
+    entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
+    store: *types.TypeStore,
+) bool {
+    if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= tree.nodes.len) return false;
+    var changed = false;
+    switch (tree.node(node_id).data) {
+        .ReturnStatement => |statement| if (statement.argument) |argument| {
+            changed = putContextualType(entries, argument, expected, store.builtins.unknown) or changed;
+        },
+        .Program => |program| {
+            for (program.statements) |child|
+                changed = applyReturnContextInNode(tree, child, expected, entries, store) or changed;
+        },
+        .BlockStatement => |block| {
+            for (block.statements) |child|
+                changed = applyReturnContextInNode(tree, child, expected, entries, store) or changed;
+        },
+        .IfStatement => |statement| {
+            changed = applyReturnContextInNode(tree, statement.consequent, expected, entries, store) or changed;
+            if (statement.alternate) |alternate|
+                changed = applyReturnContextInNode(tree, alternate, expected, entries, store) or changed;
+        },
+        .WhileStatement => |statement| changed = applyReturnContextInNode(tree, statement.body, expected, entries, store) or changed,
+        .DoWhileStatement => |statement| changed = applyReturnContextInNode(tree, statement.body, expected, entries, store) or changed,
+        .ForStatement => |statement| changed = applyReturnContextInNode(tree, statement.body, expected, entries, store) or changed,
+        .SwitchStatement => |statement| {
+            for (statement.cases) |case|
+                changed = applyReturnContextInNode(tree, case, expected, entries, store) or changed;
+        },
+        .SwitchCase => |case| {
+            for (case.consequent) |child|
+                changed = applyReturnContextInNode(tree, child, expected, entries, store) or changed;
+        },
+        .TryStatement => |statement| {
+            changed = applyReturnContextInNode(tree, statement.block, expected, entries, store) or changed;
+            if (statement.handler) |handler|
+                changed = applyReturnContextInNode(tree, handler, expected, entries, store) or changed;
+            if (statement.finalizer) |finalizer|
+                changed = applyReturnContextInNode(tree, finalizer, expected, entries, store) or changed;
+        },
+        .CatchClause => |clause| changed = applyReturnContextInNode(tree, clause.body, expected, entries, store) or changed,
+        .FinallyClause => |clause| changed = applyReturnContextInNode(tree, clause.body, expected, entries, store) or changed,
+        .LabeledStatement => |statement| changed = applyReturnContextInNode(tree, statement.body, expected, entries, store) or changed,
+        .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassDeclaration, .ClassExpression, .ClassMethod => {},
+        else => {},
+    }
+    return changed;
+}
+
+fn applyConditionalContexts(
+    tree: ast_mod.Ast,
+    entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
+    store: *types.TypeStore,
+) bool {
+    var changed = false;
+    for (tree.nodes, 0..) |node, raw_id| {
+        if (node.data != .ConditionalExpression) continue;
+        const info = findNodeInfo(entries.items, @intCast(raw_id)) orelse continue;
+        const contextual = info.contextual_type orelse continue;
+        const conditional = node.data.ConditionalExpression;
+        changed = putContextualType(entries, conditional.consequent, contextual, store.builtins.unknown) or changed;
+        changed = putContextualType(entries, conditional.alternate, contextual, store.builtins.unknown) or changed;
+    }
+    return changed;
+}
+
+fn applyContextualObjectMembers(
+    tree: ast_mod.Ast,
+    entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
+    store: *types.TypeStore,
+) !bool {
+    var changed = false;
+    for (tree.nodes, 0..) |node, raw_id| {
+        if (node.data != .ObjectExpression) continue;
+        const info = findNodeInfo(entries.items, @intCast(raw_id)) orelse continue;
+        const contextual = info.contextual_type orelse continue;
+        const object = node.data.ObjectExpression;
+        const contextual_type = store.lookup(contextual) orelse continue;
+        for (object.properties) |property| {
+            if (property.kind == .spread) continue;
+            const name = switch (property.kind) {
+                .computed => computedPropertyName(property, tree) orelse continue,
+                else => property.key,
+            };
+            const expected: ?types.TypeId = switch (contextual_type.kind) {
+                .object => |members| blk: {
+                    for (members) |member| if (std.mem.eql(u8, member.name, name)) break :blk member.type_id;
+                    break :blk null;
+                },
+                .interface => blk: {
+                    const member = lookupSemanticMember(contextual, name, store, store.count() + 1) orelse break :blk null;
+                    break :blk member.type_id;
+                },
+                else => null,
+            };
+            if (expected) |expected_type| {
+                changed = putContextualType(entries, property.value, expected_type, store.builtins.unknown) or changed;
+            }
+        }
+    }
+    return changed;
+}
+
 /// the real `type_id`; tuple holes are filled only for structural shape (so a
 /// `[number, , boolean]` annotation can still declare the third slot). The
 /// checker later compares `contextual_type` against `type_id` and emits
