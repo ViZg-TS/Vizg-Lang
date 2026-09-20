@@ -163,6 +163,20 @@ pub const TypeResolutionState = enum {
 // diagnostics. SemanticResult owns these slices for one analysis context.
 // ---------------------------------------------------------------------------
 
+fn lookupNodeInfoSorted(entries: []const NodeTypeInfo, node_id: ast_mod.NodeId) ?NodeTypeInfo {
+    var low: usize = 0;
+    var high: usize = entries.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (entries[mid].node_id < node_id)
+            low = mid + 1
+        else
+            high = mid;
+    }
+    if (low < entries.len and entries[low].node_id == node_id) return entries[low];
+    return null;
+}
+
 pub const TypeInfo = struct {
     symbols: []const SymbolTypeInfo,
     nodes: []const NodeTypeInfo,
@@ -172,6 +186,8 @@ pub const TypeInfo = struct {
 
     /// Look up a symbol by id; returns null if not found.
     pub fn lookupSymbol(self: @This(), symbol_id: binder.SymbolId) ?SymbolTypeInfo {
+        const index: usize = @intCast(symbol_id);
+        if (index < self.symbols.len and self.symbols[index].symbol_id == symbol_id) return self.symbols[index];
         for (self.symbols) |entry| {
             if (entry.symbol_id == symbol_id) return entry;
         }
@@ -181,6 +197,7 @@ pub const TypeInfo = struct {
     /// Look up the type of an AST node by id; returns `types.invalid_type`
     /// when no entry is found.
     pub fn lookupNode(self: @This(), node_id: ast_mod.NodeId) ?types.TypeId {
+        if (lookupNodeInfoSorted(self.nodes, node_id)) |entry| return entry.effective();
         for (self.nodes) |entry| {
             if (entry.node_id == node_id) return entry.effective();
         }
@@ -188,6 +205,7 @@ pub const TypeInfo = struct {
     }
 
     pub fn lookupNodeInfo(self: @This(), node_id: ast_mod.NodeId) ?NodeTypeInfo {
+        if (lookupNodeInfoSorted(self.nodes, node_id)) |entry| return entry;
         for (self.nodes) |entry| {
             if (entry.node_id == node_id) return entry;
         }

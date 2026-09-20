@@ -182,12 +182,13 @@ pub fn inferPrimitiveExpressionsWithCfgsPreserving(
     preserved_nodes: []const node_type_info_mod.NodeTypeInfo,
 ) !usize {
     try entries.ensureTotalCapacity(allocator, entries.items.len + tree.nodes.len);
+    std.mem.sort(node_type_info_mod.NodeTypeInfo, entries.items, {}, lessNodeTypeInfo);
     var round: usize = 0;
     while (round <= tree.nodes.len) : (round += 1) {
         var changed = false;
         for (tree.nodes, 0..) |node, raw_id| {
             const id: ast_mod.NodeId = @intCast(raw_id);
-            if (findNodeInfo(preserved_nodes, id)) |preserved| {
+            if (findNodeInfoLinear(preserved_nodes, id)) |preserved| {
                 changed = putType(
                     entries,
                     id,
@@ -2043,19 +2044,40 @@ fn compoundBaseOperator(operator: tokens.TokenType) tokens.TokenType {
     };
 }
 
-fn findType(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) ?types.TypeId {
-    for (entries) |entry| if (entry.node_id == node_id) return entry.type_id;
-    return null;
+fn lessNodeTypeInfo(_: void, left: node_type_info_mod.NodeTypeInfo, right: node_type_info_mod.NodeTypeInfo) bool {
+    return left.node_id < right.node_id;
 }
 
-fn findEffectiveType(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) ?types.TypeId {
-    for (entries) |entry| if (entry.node_id == node_id) return entry.effective();
-    return null;
+fn nodeInfoLowerBound(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) usize {
+    var low: usize = 0;
+    var high: usize = entries.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (entries[mid].node_id < node_id)
+            low = mid + 1
+        else
+            high = mid;
+    }
+    return low;
 }
 
 fn findNodeInfo(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) ?node_type_info_mod.NodeTypeInfo {
+    const index = nodeInfoLowerBound(entries, node_id);
+    if (index < entries.len and entries[index].node_id == node_id) return entries[index];
+    return null;
+}
+
+fn findNodeInfoLinear(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) ?node_type_info_mod.NodeTypeInfo {
     for (entries) |entry| if (entry.node_id == node_id) return entry;
     return null;
+}
+
+fn findType(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) ?types.TypeId {
+    return if (findNodeInfo(entries, node_id)) |entry| entry.type_id else null;
+}
+
+fn findEffectiveType(entries: []const node_type_info_mod.NodeTypeInfo, node_id: ast_mod.NodeId) ?types.TypeId {
+    return if (findNodeInfo(entries, node_id)) |entry| entry.effective() else null;
 }
 
 fn putType(
@@ -2066,8 +2088,9 @@ fn putType(
     issue: InferenceIssue,
     receiver_type: ?types.TypeId,
 ) bool {
-    for (entries.items) |*entry| {
-        if (entry.node_id != node_id) continue;
+    const index = nodeInfoLowerBound(entries.items, node_id);
+    if (index < entries.items.len and entries.items[index].node_id == node_id) {
+        const entry = &entries.items[index];
         const state: node_type_info_mod.TypeResolutionState = if (valid) .resolved else .@"error";
         if (entry.type_id == type_id and entry.state == state and entry.issue == issue and entry.receiver_type == receiver_type) return false;
         entry.type_id = type_id;
@@ -2076,7 +2099,7 @@ fn putType(
         entry.receiver_type = receiver_type;
         return true;
     }
-    entries.appendAssumeCapacity(.{
+    entries.insertAssumeCapacity(index, .{
         .node_id = node_id,
         .type_id = type_id,
         .state = if (valid) .resolved else .@"error",
@@ -2098,8 +2121,9 @@ fn putTypeWithContextual(
     receiver_type: ?types.TypeId,
     contextual_type: ?types.TypeId,
 ) bool {
-    for (entries.items) |*entry| {
-        if (entry.node_id != node_id) continue;
+    const index = nodeInfoLowerBound(entries.items, node_id);
+    if (index < entries.items.len and entries.items[index].node_id == node_id) {
+        const entry = &entries.items[index];
         const state: node_type_info_mod.TypeResolutionState = if (valid) .resolved else .@"error";
         if (entry.type_id == type_id and entry.state == state and entry.issue == issue and entry.receiver_type == receiver_type and entry.contextual_type == contextual_type) return false;
         entry.type_id = type_id;
@@ -2109,7 +2133,7 @@ fn putTypeWithContextual(
         entry.contextual_type = contextual_type;
         return true;
     }
-    entries.appendAssumeCapacity(.{
+    entries.insertAssumeCapacity(index, .{
         .node_id = node_id,
         .type_id = type_id,
         .state = if (valid) .resolved else .@"error",
@@ -2127,13 +2151,14 @@ fn putContextualType(
     contextual_type: types.TypeId,
     fallback_inferred: types.TypeId,
 ) bool {
-    for (entries.items) |*entry| {
-        if (entry.node_id != node_id) continue;
+    const index = nodeInfoLowerBound(entries.items, node_id);
+    if (index < entries.items.len and entries.items[index].node_id == node_id) {
+        const entry = &entries.items[index];
         if (entry.contextual_type == contextual_type) return false;
         entry.contextual_type = contextual_type;
         return true;
     }
-    entries.appendAssumeCapacity(.{
+    entries.insertAssumeCapacity(index, .{
         .node_id = node_id,
         .type_id = fallback_inferred,
         .contextual_type = contextual_type,

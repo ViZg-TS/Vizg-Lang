@@ -75,6 +75,7 @@ pub const Module = struct {
     semantic_result: ?*semantics.SemanticResult,
     metadata_derived: bool,
     frontend_cache: ?[]u8 = null,
+    frontend_cache_used: bool = false,
 
     pub fn diagnostics(self: *const Module) []const @import("../diagnostics/root.zig").Diagnostic {
         const result = self.semantic_result orelse return &.{};
@@ -206,12 +207,22 @@ pub const Project = struct {
     pub fn frontendCacheSize(self: *const Project, id: contracts.ModuleId) !usize {
         const module = self.find(id) orelse return error.UnknownModule;
         const result = module.semantic_result orelse return error.InvalidModuleState;
+        if (module.frontend_cache_used) {
+            const bytes = module.frontend_cache orelse return error.InvalidModuleState;
+            return bytes.len;
+        }
         return @import("../frontend/cache.zig").encodedSize(&result.frontend);
     }
 
     pub fn exportFrontendCache(self: *const Project, id: contracts.ModuleId, output: []u8) !usize {
         const module = self.find(id) orelse return error.UnknownModule;
         const result = module.semantic_result orelse return error.InvalidModuleState;
+        if (module.frontend_cache_used) {
+            const bytes = module.frontend_cache orelse return error.InvalidModuleState;
+            if (output.len < bytes.len) return error.BufferTooSmall;
+            @memcpy(output[0..bytes.len], bytes);
+            return bytes.len;
+        }
         return @import("../frontend/cache.zig").encodeInto(&result.frontend, output);
     }
 
@@ -679,6 +690,7 @@ pub const Project = struct {
         const module = self.findMut(id).?;
         module.semantic_result = result_ptr;
         module.metadata_derived = true;
+        module.frontend_cache_used = cache_used;
         module.state = .complete;
         self.clearProjectSemantics();
         return result_ptr;

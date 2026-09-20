@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const ast = @import("../frontend/ast.zig");
 const binder = @import("../frontend/binder.zig");
 const frontend = @import("../frontend/frontend.zig");
@@ -496,6 +497,26 @@ pub fn analyzeBorrowedModuleGraphWithLimits(
     };
 }
 
+const project_semantics_profile_enabled = true;
+
+fn projectProfileNowNanos() u64 {
+    if (!project_semantics_profile_enabled or builtin.os.tag != .linux) return 0;
+    var ts: std.os.linux.timespec = undefined;
+    if (std.os.linux.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+fn projectProfileStage(label: []const u8, started_ns: u64) void {
+    if (!project_semantics_profile_enabled or started_ns == 0) return;
+    const finished_ns = projectProfileNowNanos();
+    if (finished_ns < started_ns) return;
+    const elapsed_ns = finished_ns - started_ns;
+    std.debug.print(
+        "VIZG_PROFILE project_semantics.{s} duration_ms={d}.{d:0>3}\n",
+        .{ label, elapsed_ns / std.time.ns_per_ms, (elapsed_ns % std.time.ns_per_ms) / std.time.ns_per_us },
+    );
+}
+
 fn analyzeModuleGraphData(
     backing_allocator: std.mem.Allocator,
     graph: *const modules_mod.ModuleGraph,
@@ -505,9 +526,13 @@ fn analyzeModuleGraphData(
     errdefer destroyArena(arena);
     const allocator = arena.allocator();
     var type_store = types.TypeStore.initWithLimit(allocator, limits.max_types);
+    const profile_total_started = projectProfileNowNanos();
+    var profile_started = projectProfileNowNanos();
 
     var external_exports: std.ArrayList(ExternalSemanticExport) = .empty;
     try collectExternalExports(allocator, graph.external_modules, &type_store, &external_exports);
+    projectProfileStage("external_exports", profile_started);
+    profile_started = projectProfileNowNanos();
 
     var project_modules: std.ArrayList(ProjectSemanticModule) = .empty;
     for (graph.modules) |module| {
@@ -517,6 +542,8 @@ fn analyzeModuleGraphData(
             .type_info = try buildTypeInfo(allocator, module.id, module.result, &type_store, false, &.{}, &.{}, false, limits.max_diagnostics),
         });
     }
+    projectProfileStage("initial_type_info", profile_started);
+    profile_started = projectProfileNowNanos();
 
     var export_list: std.ArrayList(SemanticExport) = .empty;
     try collectDirectExports(allocator, graph.modules, project_modules.items, &type_store, &export_list);
@@ -524,6 +551,8 @@ fn analyzeModuleGraphData(
 
     var import_list: std.ArrayList(SemanticImport) = .empty;
     try collectSemanticImports(allocator, graph, &type_store, external_exports.items, export_list.items, &import_list);
+    projectProfileStage("link_exports_imports", profile_started);
+    profile_started = projectProfileNowNanos();
 
     // The first pass establishes exported identities. Once imports are linked,
     // complete nominal tables exactly once in dependency-first graph order so
@@ -551,6 +580,8 @@ fn analyzeModuleGraphData(
     }
 
     try registerCanonicalLanguageItemSurfaces(graph, export_list.items, &type_store);
+    projectProfileStage("complete_nominals", profile_started);
+    profile_started = projectProfileNowNanos();
 
     // Rebuild effective module types against the now-immutable nominal tables.
     // Missing/cyclic targets remain stable `unknown` placeholders.
@@ -569,6 +600,8 @@ fn analyzeModuleGraphData(
             limits.max_diagnostics,
         );
     }
+    projectProfileStage("rebuild_type_info", profile_started);
+    profile_started = projectProfileNowNanos();
 
     // Imported values may feed exported initializers. Iterate bounded propagation
     // over IDs; cycles settle as unknown or a stable canonical TypeId.
@@ -588,11 +621,17 @@ fn analyzeModuleGraphData(
         changed = (try refreshNamespaceImportTargets(allocator, graph, &type_store, export_list.items, import_list.items)) or changed;
         if (!changed) break;
     }
+    projectProfileStage("propagation", profile_started);
+    if (project_semantics_profile_enabled)
+        std.debug.print("VIZG_PROFILE project_semantics.propagation_rounds count={d}\n", .{round + 1});
+    profile_started = projectProfileNowNanos();
 
     for (project_modules.items) |*module| {
         const graph_module = graphModule(graph, module.id) orelse continue;
         try finishProjectTypes(allocator, module.id, graph_module.result, &module.type_info, &type_store);
     }
+    projectProfileStage("finish_project_types", profile_started);
+    profile_started = projectProfileNowNanos();
 
     var all_diags = diagnostics.LimitedList.init(limits.max_diagnostics);
     try all_diags.appendSlice(allocator, graph.diagnostics);
@@ -602,6 +641,8 @@ fn analyzeModuleGraphData(
     const export_slice = try export_list.toOwnedSlice(allocator);
     const import_slice = try import_list.toOwnedSlice(allocator);
     const diagnostic_slice = try all_diags.toOwnedSlice(allocator);
+    projectProfileStage("finalize", profile_started);
+    projectProfileStage("total", profile_total_started);
     return .{
         .arena = arena,
         .type_store = type_store,
@@ -1788,6 +1829,8 @@ fn functionType(entries: []const type_collector.FunctionSignatureEntry, symbol_i
 }
 
 fn symbolType(entries: []const SymbolTypeInfo, symbol_id: binder.SymbolId) ?SymbolTypeInfo {
+    const index: usize = @intCast(symbol_id);
+    if (index < entries.len and entries[index].symbol_id == symbol_id) return entries[index];
     for (entries) |entry| if (entry.symbol_id == symbol_id) return entry;
     return null;
 }
@@ -1974,6 +2017,16 @@ fn owningEnumType(
 }
 
 fn nodeType(entries: []const NodeTypeInfo, node_id: ast.NodeId) ?types.TypeId {
+    var low: usize = 0;
+    var high: usize = entries.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (entries[mid].node_id < node_id)
+            low = mid + 1
+        else
+            high = mid;
+    }
+    if (low < entries.len and entries[low].node_id == node_id) return entries[low].type_id;
     for (entries) |entry| if (entry.node_id == node_id) return entry.type_id;
     return null;
 }
@@ -2191,6 +2244,8 @@ fn lookupResolvedTypeNode(entries: []const ResolvedTypeNode, node_id: ast.TypeNo
 }
 
 fn symbolTypePtr(entries: []SymbolTypeInfo, symbol_id: binder.SymbolId) ?*SymbolTypeInfo {
+    const index: usize = @intCast(symbol_id);
+    if (index < entries.len and entries[index].symbol_id == symbol_id) return &entries[index];
     for (entries) |*entry| if (entry.symbol_id == symbol_id) return entry;
     return null;
 }
