@@ -181,7 +181,10 @@ pub fn inferPrimitiveExpressionsWithCfgsPreserving(
     cfgs: []const cfg_mod.FunctionCfg,
     preserved_nodes: []const node_type_info_mod.NodeTypeInfo,
 ) !usize {
-    try entries.ensureTotalCapacity(allocator, entries.items.len + tree.nodes.len);
+    // NodeTypeInfo is keyed uniquely by AST NodeId. Grow the table only when
+    // inference actually discovers a previously untyped node. Project semantic
+    // analysis uses a long-lived arena, so speculative whole-AST reservations
+    // on every fixed-point round accumulate until project teardown.
     std.mem.sort(node_type_info_mod.NodeTypeInfo, entries.items, {}, lessNodeTypeInfo);
     var round: usize = 0;
     while (round <= tree.nodes.len) : (round += 1) {
@@ -189,23 +192,24 @@ pub fn inferPrimitiveExpressionsWithCfgsPreserving(
         for (tree.nodes, 0..) |node, raw_id| {
             const id: ast_mod.NodeId = @intCast(raw_id);
             if (findNodeInfoLinear(preserved_nodes, id)) |preserved| {
-                changed = putType(
+                changed = (try putType(
+                    allocator,
                     entries,
                     id,
                     preserved.type_id,
                     preserved.state == .resolved,
                     preserved.issue,
                     preserved.receiver_type,
-                ) or changed;
+                )) or changed;
                 continue;
             }
             const candidate = try inferNode(allocator, id, node.data, tree, entries.items, store, resolved_type_nodes, cfgs);
-            if (candidate) |value| changed = putType(entries, id, value.type_id, value.valid, value.issue, value.receiver_type) or changed;
+            if (candidate) |value| changed = (try putType(allocator, entries, id, value.type_id, value.valid, value.issue, value.receiver_type)) or changed;
         }
         changed = (try applyAggregateContexts(tree, entries, store, resolved_type_nodes)) or changed;
-        changed = applyCallContexts(tree, entries, store) or changed;
-        changed = applyReturnContexts(tree, entries, store, resolved_type_nodes) or changed;
-        changed = applyConditionalContexts(tree, entries, store) or changed;
+        changed = (try applyCallContexts(tree, entries, store)) or changed;
+        changed = (try applyReturnContexts(tree, entries, store, resolved_type_nodes)) or changed;
+        changed = (try applyConditionalContexts(tree, entries, store)) or changed;
         changed = (try applyContextualObjectMembers(tree, entries, store)) or changed;
         if (!changed) return round + 1;
     }
@@ -1725,7 +1729,7 @@ fn applyCallContexts(
     tree: ast_mod.Ast,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     store: *types.TypeStore,
-) bool {
+) !bool {
     var changed = false;
     for (tree.nodes) |node| switch (node.data) {
         .CallExpression => |call| {
@@ -1733,12 +1737,13 @@ fn applyCallContexts(
             const signature = callableSignature(callee_type, store) orelse continue;
             for (call.arguments, 0..) |argument, index| {
                 const parameter = parameterForArgument(signature, index) orelse continue;
-                changed = putContextualType(
+                changed = (try putContextualType(
+                    store.allocator,
                     entries,
                     argument,
                     restArgumentType(parameter, store),
                     store.builtins.unknown,
-                ) or changed;
+                )) or changed;
             }
         },
         else => {},
@@ -1751,7 +1756,7 @@ fn applyReturnContexts(
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     store: *types.TypeStore,
     resolved_type_nodes: []const node_type_info_mod.ResolvedTypeNode,
-) bool {
+) !bool {
     var changed = false;
     for (tree.nodes, 0..) |_, raw_id| {
         const node_id: ast_mod.NodeId = @intCast(raw_id);
@@ -1759,9 +1764,9 @@ fn applyReturnContexts(
         const annotation = function.return_type orelse continue;
         const expected = lookupResolvedTypeAnnotation(annotation, resolved_type_nodes, store);
         if (function.expression_body) {
-            changed = putContextualType(entries, function.body, expected, store.builtins.unknown) or changed;
+            changed = (try putContextualType(store.allocator, entries, function.body, expected, store.builtins.unknown)) or changed;
         } else {
-            changed = applyReturnContextInNode(tree, function.body, expected, entries, store) or changed;
+            changed = (try applyReturnContextInNode(tree, function.body, expected, entries, store)) or changed;
         }
     }
     return changed;
@@ -1773,47 +1778,47 @@ fn applyReturnContextInNode(
     expected: types.TypeId,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     store: *types.TypeStore,
-) bool {
+) !bool {
     if (node_id == ast_mod.invalid_node or @as(usize, @intCast(node_id)) >= tree.nodes.len) return false;
     var changed = false;
     switch (tree.node(node_id).data) {
         .ReturnStatement => |statement| if (statement.argument) |argument| {
-            changed = putContextualType(entries, argument, expected, store.builtins.unknown) or changed;
+            changed = (try putContextualType(store.allocator, entries, argument, expected, store.builtins.unknown)) or changed;
         },
         .Program => |program| {
             for (program.statements) |child|
-                changed = applyReturnContextInNode(tree, child, expected, entries, store) or changed;
+                changed = (try applyReturnContextInNode(tree, child, expected, entries, store)) or changed;
         },
         .BlockStatement => |block| {
             for (block.statements) |child|
-                changed = applyReturnContextInNode(tree, child, expected, entries, store) or changed;
+                changed = (try applyReturnContextInNode(tree, child, expected, entries, store)) or changed;
         },
         .IfStatement => |statement| {
-            changed = applyReturnContextInNode(tree, statement.consequent, expected, entries, store) or changed;
+            changed = (try applyReturnContextInNode(tree, statement.consequent, expected, entries, store)) or changed;
             if (statement.alternate) |alternate|
-                changed = applyReturnContextInNode(tree, alternate, expected, entries, store) or changed;
+                changed = (try applyReturnContextInNode(tree, alternate, expected, entries, store)) or changed;
         },
-        .WhileStatement => |statement| changed = applyReturnContextInNode(tree, statement.body, expected, entries, store) or changed,
-        .DoWhileStatement => |statement| changed = applyReturnContextInNode(tree, statement.body, expected, entries, store) or changed,
-        .ForStatement => |statement| changed = applyReturnContextInNode(tree, statement.body, expected, entries, store) or changed,
+        .WhileStatement => |statement| changed = (try applyReturnContextInNode(tree, statement.body, expected, entries, store)) or changed,
+        .DoWhileStatement => |statement| changed = (try applyReturnContextInNode(tree, statement.body, expected, entries, store)) or changed,
+        .ForStatement => |statement| changed = (try applyReturnContextInNode(tree, statement.body, expected, entries, store)) or changed,
         .SwitchStatement => |statement| {
             for (statement.cases) |case|
-                changed = applyReturnContextInNode(tree, case, expected, entries, store) or changed;
+                changed = (try applyReturnContextInNode(tree, case, expected, entries, store)) or changed;
         },
         .SwitchCase => |case| {
             for (case.consequent) |child|
-                changed = applyReturnContextInNode(tree, child, expected, entries, store) or changed;
+                changed = (try applyReturnContextInNode(tree, child, expected, entries, store)) or changed;
         },
         .TryStatement => |statement| {
-            changed = applyReturnContextInNode(tree, statement.block, expected, entries, store) or changed;
+            changed = (try applyReturnContextInNode(tree, statement.block, expected, entries, store)) or changed;
             if (statement.handler) |handler|
-                changed = applyReturnContextInNode(tree, handler, expected, entries, store) or changed;
+                changed = (try applyReturnContextInNode(tree, handler, expected, entries, store)) or changed;
             if (statement.finalizer) |finalizer|
-                changed = applyReturnContextInNode(tree, finalizer, expected, entries, store) or changed;
+                changed = (try applyReturnContextInNode(tree, finalizer, expected, entries, store)) or changed;
         },
-        .CatchClause => |clause| changed = applyReturnContextInNode(tree, clause.body, expected, entries, store) or changed,
-        .FinallyClause => |clause| changed = applyReturnContextInNode(tree, clause.body, expected, entries, store) or changed,
-        .LabeledStatement => |statement| changed = applyReturnContextInNode(tree, statement.body, expected, entries, store) or changed,
+        .CatchClause => |clause| changed = (try applyReturnContextInNode(tree, clause.body, expected, entries, store)) or changed,
+        .FinallyClause => |clause| changed = (try applyReturnContextInNode(tree, clause.body, expected, entries, store)) or changed,
+        .LabeledStatement => |statement| changed = (try applyReturnContextInNode(tree, statement.body, expected, entries, store)) or changed,
         .FunctionDeclaration, .FunctionExpression, .ArrowFunctionExpression, .ClassDeclaration, .ClassExpression, .ClassMethod => {},
         else => {},
     }
@@ -1824,15 +1829,15 @@ fn applyConditionalContexts(
     tree: ast_mod.Ast,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     store: *types.TypeStore,
-) bool {
+) !bool {
     var changed = false;
     for (tree.nodes, 0..) |node, raw_id| {
         if (node.data != .ConditionalExpression) continue;
         const info = findNodeInfo(entries.items, @intCast(raw_id)) orelse continue;
         const contextual = info.contextual_type orelse continue;
         const conditional = node.data.ConditionalExpression;
-        changed = putContextualType(entries, conditional.consequent, contextual, store.builtins.unknown) or changed;
-        changed = putContextualType(entries, conditional.alternate, contextual, store.builtins.unknown) or changed;
+        changed = (try putContextualType(store.allocator, entries, conditional.consequent, contextual, store.builtins.unknown)) or changed;
+        changed = (try putContextualType(store.allocator, entries, conditional.alternate, contextual, store.builtins.unknown)) or changed;
     }
     return changed;
 }
@@ -1867,7 +1872,7 @@ fn applyContextualObjectMembers(
                 else => null,
             };
             if (expected) |expected_type| {
-                changed = putContextualType(entries, property.value, expected_type, store.builtins.unknown) or changed;
+                changed = (try putContextualType(store.allocator, entries, property.value, expected_type, store.builtins.unknown)) or changed;
             }
         }
     }
@@ -1911,7 +1916,7 @@ fn applyAggregateContexts(
                                 if (maybe_elem) |element| {
                                     const inferred = findType(entries.items, element) orelse store.builtins.unknown;
                                     if (index < declared_tuple.elements.len) {
-                                        changed = putContextualType(entries, element, declared_tuple.elements[index].type_id, store.builtins.unknown) or changed;
+                                        changed = (try putContextualType(store.allocator, entries, element, declared_tuple.elements[index].type_id, store.builtins.unknown)) or changed;
                                     }
                                     actual[index] = .{
                                         .type_id = inferred,
@@ -1936,7 +1941,8 @@ fn applyAggregateContexts(
                                 .elements = actual,
                                 .readonly = declared_tuple.readonly,
                             } });
-                            changed = putTypeWithContextual(
+                            changed = (try putTypeWithContextual(
+                                store.allocator,
                                 entries,
                                 initializer,
                                 inferred_tuple,
@@ -1944,16 +1950,16 @@ fn applyAggregateContexts(
                                 .none,
                                 null,
                                 declared_contextual,
-                            ) or changed;
+                            )) or changed;
                         },
                         .array => |declared_array| {
                             // For a declared array shape store the annotation as the contextual hint only.
                             // If an entry already exists from inferArray (with actual element types on type_id),
                             // update only contextual_type so the checker can compare actual vs declared element types.
                             const inferred = findType(entries.items, initializer) orelse store.builtins.unknown;
-                            changed = putTypeWithContextual(entries, initializer, inferred, true, .none, null, declared_contextual) or changed;
+                            changed = (try putTypeWithContextual(store.allocator, entries, initializer, inferred, true, .none, null, declared_contextual)) or changed;
                             for (array.elements) |maybe_element| if (maybe_element) |element| {
-                                changed = putContextualType(entries, element, declared_array.element_type, store.builtins.unknown) or changed;
+                                changed = (try putContextualType(store.allocator, entries, element, declared_array.element_type, store.builtins.unknown)) or changed;
                             };
                         },
                         else => {},
@@ -1966,7 +1972,7 @@ fn applyAggregateContexts(
                             // The checker will later compare actual property types against this declared shape and
                             // emit per-property mismatches when they diverge.
                             const inferred = findType(entries.items, initializer) orelse store.builtins.unknown;
-                            changed = putTypeWithContextual(entries, initializer, inferred, true, .none, null, declared_contextual) or changed;
+                            changed = (try putTypeWithContextual(store.allocator, entries, initializer, inferred, true, .none, null, declared_contextual)) or changed;
                             for (object.properties) |property| {
                                 if (property.kind == .spread) continue;
                                 const name = switch (property.kind) {
@@ -1975,7 +1981,7 @@ fn applyAggregateContexts(
                                 };
                                 for (expected_properties) |expected_property| {
                                     if (!std.mem.eql(u8, name, expected_property.name)) continue;
-                                    changed = putContextualType(entries, property.value, expected_property.type_id, store.builtins.unknown) or changed;
+                                    changed = (try putContextualType(store.allocator, entries, property.value, expected_property.type_id, store.builtins.unknown)) or changed;
                                     break;
                                 }
                             }
@@ -1985,7 +1991,7 @@ fn applyAggregateContexts(
                             // literal's inferred anonymous-object type while supplying direct or inherited
                             // member types to its values.
                             const inferred = findType(entries.items, initializer) orelse store.builtins.unknown;
-                            changed = putTypeWithContextual(entries, initializer, inferred, true, .none, null, declared_contextual) or changed;
+                            changed = (try putTypeWithContextual(store.allocator, entries, initializer, inferred, true, .none, null, declared_contextual)) or changed;
                             for (object.properties) |property| {
                                 if (property.kind == .spread) continue;
                                 const name = switch (property.kind) {
@@ -1998,7 +2004,7 @@ fn applyAggregateContexts(
                                     store,
                                     store.count() + 1,
                                 ) orelse continue;
-                                changed = putContextualType(entries, property.value, expected_member.type_id, store.builtins.unknown) or changed;
+                                changed = (try putContextualType(store.allocator, entries, property.value, expected_member.type_id, store.builtins.unknown)) or changed;
                             }
                         },
                         else => {},
@@ -2081,13 +2087,14 @@ fn findEffectiveType(entries: []const node_type_info_mod.NodeTypeInfo, node_id: 
 }
 
 fn putType(
+    allocator: std.mem.Allocator,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     node_id: ast_mod.NodeId,
     type_id: types.TypeId,
     valid: bool,
     issue: InferenceIssue,
     receiver_type: ?types.TypeId,
-) bool {
+) !bool {
     const index = nodeInfoLowerBound(entries.items, node_id);
     if (index < entries.items.len and entries.items[index].node_id == node_id) {
         const entry = &entries.items[index];
@@ -2099,7 +2106,7 @@ fn putType(
         entry.receiver_type = receiver_type;
         return true;
     }
-    entries.insertAssumeCapacity(index, .{
+    try entries.insert(allocator, index, .{
         .node_id = node_id,
         .type_id = type_id,
         .state = if (valid) .resolved else .@"error",
@@ -2113,6 +2120,7 @@ fn putType(
 /// Used by aggregate-context typing so declared annotation shapes can be kept
 /// alongside actual inferred types for post-inference comparison.
 fn putTypeWithContextual(
+    allocator: std.mem.Allocator,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     node_id: ast_mod.NodeId,
     type_id: types.TypeId,
@@ -2120,7 +2128,7 @@ fn putTypeWithContextual(
     issue: InferenceIssue,
     receiver_type: ?types.TypeId,
     contextual_type: ?types.TypeId,
-) bool {
+) !bool {
     const index = nodeInfoLowerBound(entries.items, node_id);
     if (index < entries.items.len and entries.items[index].node_id == node_id) {
         const entry = &entries.items[index];
@@ -2133,7 +2141,7 @@ fn putTypeWithContextual(
         entry.contextual_type = contextual_type;
         return true;
     }
-    entries.insertAssumeCapacity(index, .{
+    try entries.insert(allocator, index, .{
         .node_id = node_id,
         .type_id = type_id,
         .state = if (valid) .resolved else .@"error",
@@ -2146,11 +2154,12 @@ fn putTypeWithContextual(
 
 /// Apply an expectation to a child without changing its inferred fact.
 fn putContextualType(
+    allocator: std.mem.Allocator,
     entries: *std.ArrayList(node_type_info_mod.NodeTypeInfo),
     node_id: ast_mod.NodeId,
     contextual_type: types.TypeId,
     fallback_inferred: types.TypeId,
-) bool {
+) !bool {
     const index = nodeInfoLowerBound(entries.items, node_id);
     if (index < entries.items.len and entries.items[index].node_id == node_id) {
         const entry = &entries.items[index];
@@ -2158,7 +2167,7 @@ fn putContextualType(
         entry.contextual_type = contextual_type;
         return true;
     }
-    entries.insertAssumeCapacity(index, .{
+    try entries.insert(allocator, index, .{
         .node_id = node_id,
         .type_id = fallback_inferred,
         .contextual_type = contextual_type,
