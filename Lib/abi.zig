@@ -2299,7 +2299,7 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
     if (!validAlignedMutableHostArray(?*Vizg_ProjectResult, out_result, 1) or
         !inputOutsideWorkspace(owned, out_result, @sizeOf(?*Vizg_ProjectResult))) return .INVALID_ARGUMENT;
     out_result[0] = null;
-    const finished = owned.project.finish() catch |err| if (err == error.OutOfMemory) @panic("VIZG_OOM_STAGE=project.finish") else return statusFromError(owned, err);
+    const finished = owned.project.finish() catch |err| return statusFromError(owned, err);
     if (owned.result_ready) {
         if (owned.result_view.destroyed) return .INVALID_STATE;
         out_result[0] = @ptrCast(&owned.result_view);
@@ -2310,7 +2310,7 @@ pub fn projectFinish(project: ?*Vizg_Project, out_result: [*c]?*Vizg_ProjectResu
         // ABI consumers need source-local provenance for actionable diagnostics;
         // transformation traces remain opt-in through the native Zig API.
         var lowered = vizg.hir.lowerProjectWithDebug(owned.fba.allocator(), &owned.project, .{}, .minimal) catch |err|
-            if (err == error.OutOfMemory) @panic("VIZG_OOM_STAGE=hir.lowerProjectWithDebug") else return statusFromError(owned, err);
+            return statusFromError(owned, err);
         switch (lowered) {
             .result => |value| {
                 hir_result = value;

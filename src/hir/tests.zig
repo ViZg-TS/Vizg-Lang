@@ -1426,6 +1426,36 @@ test "ANF builder rejects a value use before definition" {
     );
 }
 
+test "ANF scratch indexes remain function-local across global value and place ids" {
+    var project = try completedProject();
+    defer project.deinit();
+    var result = try hir.HirResult.initEmpty(std.testing.allocator, project.semanticResult().?);
+    defer result.deinit();
+    var raw_builder = hir.builder.Builder.init(&result, .{});
+    const unknown_type = project.semanticResult().?.type_store.builtins.unknown;
+    const binding = try result.makeId(hir.BindingId, 0);
+
+    var first = try hir.anf_builder.AnfBuilder.init(&raw_builder);
+    var first_value = try first.emitValue(.{ .constant = .null_ }, unknown_type);
+    for (1..128) |_| first_value = try first.emitValue(.{ .constant = .null_ }, unknown_type);
+    for (0..32) |_| _ = try first.emitPlace(.{ .binding = binding });
+    try std.testing.expectEqual(@as(usize, 128), first.defined_values.items.len);
+    try std.testing.expectEqual(@as(usize, 32), first.defined_places.items.len);
+
+    var second = try hir.anf_builder.AnfBuilder.init(&raw_builder);
+    const second_value = try second.emitValue(.{ .constant = .null_ }, unknown_type);
+    _ = try second.emitPlace(.{ .binding = binding });
+
+    try std.testing.expect(second_value.index().? > first_value.index().?);
+    try std.testing.expectEqual(@as(usize, 1), second.defined_values.items.len);
+    try std.testing.expectEqual(@as(usize, 1), second.value_types.items.len);
+    try std.testing.expectEqual(@as(usize, 1), second.defined_places.items.len);
+    try std.testing.expectError(
+        error.ValueUseBeforeDefinition,
+        second.emitValue(.{ .copy = first_value }, unknown_type),
+    );
+}
+
 test "HIR place lowering evaluates targets once and preserves assignment results" {
     var project = try placeLoweringProject();
     defer project.deinit();

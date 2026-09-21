@@ -19,12 +19,21 @@ pub const AnfBuilder = struct {
     defined_values: std.ArrayList(bool) = .empty,
     defined_places: std.ArrayList(bool) = .empty,
     value_types: std.ArrayList(?model.TypeId) = .empty,
+    /// Project IDs remain globally unique, but these scratch tables are
+    /// function-local. Bases translate global IDs into compact local indexes.
+    value_base: usize,
+    place_base: usize,
     current: usize = 0,
     current_origin: ids.OriginId = .invalid,
     entry: ids.BlockId,
 
     pub fn init(builder: *builder_mod.Builder) !AnfBuilder {
-        var self: AnfBuilder = .{ .builder = builder, .entry = .invalid };
+        var self: AnfBuilder = .{
+            .builder = builder,
+            .entry = .invalid,
+            .value_base = builder.budget.usage.values,
+            .place_base = builder.budget.usage.places,
+        };
         self.entry = try self.createBlock();
         return self;
     }
@@ -116,7 +125,9 @@ pub const AnfBuilder = struct {
         }
         try self.builder.reserve(.places, 1);
         const place = try self.builder.makeId(ids.PlaceId, self.builder.budget.usage.places - 1);
-        const index: usize = @intCast(place.index().?);
+        const global_index: usize = @intCast(place.index().?);
+        if (global_index < self.place_base) return error.PlaceAlreadyDefined;
+        const index = global_index - self.place_base;
         while (self.defined_places.items.len <= index) try self.defined_places.append(self.builder.allocator, false);
         if (self.defined_places.items[index]) return error.PlaceAlreadyDefined;
         self.defined_places.items[index] = true;
@@ -170,7 +181,9 @@ pub const AnfBuilder = struct {
     fn allocateValue(self: *AnfBuilder, type_id: model.TypeId) !ids.ValueId {
         try self.builder.reserve(.values, 1);
         const value = try self.builder.makeId(ids.ValueId, self.builder.budget.usage.values - 1);
-        const index: usize = @intCast(value.index().?);
+        const global_index: usize = @intCast(value.index().?);
+        if (global_index < self.value_base) return error.ValueAlreadyDefined;
+        const index = global_index - self.value_base;
         while (self.defined_values.items.len <= index) {
             try self.defined_values.append(self.builder.allocator, false);
             try self.value_types.append(self.builder.allocator, null);
@@ -182,10 +195,16 @@ pub const AnfBuilder = struct {
     }
 
     fn requireValue(self: *const AnfBuilder, value: ids.ValueId) !void {
+        const index = try self.localValueIndex(value);
+        if (index >= self.defined_values.items.len or !self.defined_values.items[index]) return error.ValueUseBeforeDefinition;
+    }
+
+    fn localValueIndex(self: *const AnfBuilder, value: ids.ValueId) !usize {
         try self.builder.result.requireOwnedId(value);
         const raw = value.index() orelse return error.ValueUseBeforeDefinition;
-        const index: usize = @intCast(raw);
-        if (index >= self.defined_values.items.len or !self.defined_values.items[index]) return error.ValueUseBeforeDefinition;
+        const global_index: usize = @intCast(raw);
+        if (global_index < self.value_base) return error.ValueUseBeforeDefinition;
+        return global_index - self.value_base;
     }
 
     fn requireValues(self: *const AnfBuilder, values: []const ids.ValueId) !void {
@@ -193,10 +212,16 @@ pub const AnfBuilder = struct {
     }
 
     fn requirePlace(self: *const AnfBuilder, place: ids.PlaceId) !void {
+        const index = try self.localPlaceIndex(place);
+        if (index >= self.defined_places.items.len or !self.defined_places.items[index]) return error.PlaceUseBeforeDefinition;
+    }
+
+    fn localPlaceIndex(self: *const AnfBuilder, place: ids.PlaceId) !usize {
         try self.builder.result.requireOwnedId(place);
         const raw = place.index() orelse return error.PlaceUseBeforeDefinition;
-        const index: usize = @intCast(raw);
-        if (index >= self.defined_places.items.len or !self.defined_places.items[index]) return error.PlaceUseBeforeDefinition;
+        const global_index: usize = @intCast(raw);
+        if (global_index < self.place_base) return error.PlaceUseBeforeDefinition;
+        return global_index - self.place_base;
     }
 
     fn requireKey(self: *const AnfBuilder, key: model.PropertyKey) !void {
@@ -345,8 +370,13 @@ pub const AnfBuilder = struct {
                 const parameters = self.drafts.items[target_index].parameters.items;
                 if (parameters.len != jump.arguments.len) return error.BlockArgumentArityMismatch;
                 for (parameters, jump.arguments) |parameter, argument| {
-                    const argument_index: usize = @intCast(argument.index().?);
-                    if (self.value_types.items[argument_index].? != parameter.type_id) return error.BlockArgumentTypeMismatch;
+                    const argument_index = try self.localValueIndex(argument);
+                    if (argument_index >= self.value_types.items.len or
+                        self.value_types.items[argument_index] == null or
+                        self.value_types.items[argument_index].? != parameter.type_id)
+                    {
+                        return error.BlockArgumentTypeMismatch;
+                    }
                 }
             },
             .branch => |branch| try self.requireValue(branch.condition),
